@@ -390,10 +390,35 @@ export function inferRouteCandidates(entries: PassiveCapturedEntry[], filter?: s
     .slice(0, Math.max(1, limit))
 }
 
+// Dormant-until-attached: the MAIN-world canvas draw interceptor is not patched
+// until a canvas command needs it. markTabActive() also broadcasts this, but that
+// path is fire-and-forget — for canvas_log/canvas_objects (which read the observer
+// in the same command) we enable deterministically and await it first.
+//
+// Coupling note: this only flips capture ON. It relies on the idle `active:false`
+// broadcast (armed by markTabActive's 45s timer for every canvas_*/scene_* command,
+// all of which are needsTab) to flip the per-op tax back OFF. If a canvas/scene
+// command is ever moved to noTabActions, no idle timer is armed and capture would
+// leak on permanently — keep canvas/scene commands needsTab.
+//
+// Also note: capture is prospective. Draws that completed before this enable were
+// made against the unpatched prototype and are not in the observer log; the first
+// canvas_log after a cold attach can be empty until the canvas redraws.
+async function ensureCanvasCaptureEnabled(tabId: number): Promise<void> {
+  try {
+    await executeInMainWorld(tabId, () => {
+      try {
+        document.dispatchEvent(new CustomEvent("__interceptor_canvas_set", { detail: { active: true } }))
+      } catch {}
+    })
+  } catch {}
+}
+
 export async function handleCanvasActions(
   action: { type: string; [key: string]: unknown },
   tabId: number
 ): Promise<ActionResult> {
+  await ensureCanvasCaptureEnabled(tabId)
   switch (action.type) {
     case "canvas_list": {
       const data = await executeInMainWorld<CanvasListEntry[]>(tabId, walkCanvasElements)

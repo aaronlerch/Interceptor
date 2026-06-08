@@ -3,6 +3,29 @@ if ((window as any).__interceptor_net_installed) {
 } else {
   (window as any).__interceptor_net_installed = true
 
+  // Dormant-until-attached: the fetch/XHR wrappers stay installed (so history is
+  // available the moment a command attaches), but while inactive they do NOT read
+  // response bodies — the per-request `response.clone().text()` is the real tax on
+  // heavy apps. Inactive → dispatch lightweight metadata only (url/method/status,
+  // no body). Active → full capture, exactly as before. The isolated world relays
+  // this via the `__interceptor_set_active` CustomEvent (content/active-state.ts).
+  // Two independent reasons to capture fully; either one keeps bodies flowing.
+  //  - command: the per-tab idle-timed active signal (content/active-state.ts)
+  //  - monitor: an armed recording session, which owns its own lifecycle and must
+  //    NOT be torn down by the command idle timer (content/monitor.ts arm/disarm).
+  let netActive = false
+  let netActiveCommand = false
+  let netActiveMonitor = false
+  function recomputeNetActive(): void { netActive = netActiveCommand || netActiveMonitor }
+  document.addEventListener("__interceptor_set_active", ((e: CustomEvent) => {
+    netActiveCommand = !!(e.detail && e.detail.active)
+    recomputeNetActive()
+  }) as EventListener)
+  document.addEventListener("__interceptor_monitor_capture", ((e: CustomEvent) => {
+    netActiveMonitor = !!(e.detail && e.detail.active)
+    recomputeNetActive()
+  }) as EventListener)
+
   // Trust overrides — must run before any page bundle captures native getters.
   // Pages tag synthetic events with `event.__interceptor_trust = true` to claim
   // trusted-input semantics. Used to defeat user-activation gates on
@@ -226,6 +249,7 @@ if ((window as any).__interceptor_net_installed) {
   }
 
   function dispatchPageComm(detail: Record<string, unknown>): void {
+    if (!netActive) return
     try {
       document.dispatchEvent(new CustomEvent("__interceptor_page_comm", {
         detail: {
@@ -275,6 +299,27 @@ if ((window as any).__interceptor_net_installed) {
     } catch {}
 
     return originalFetch.call(this, input, init).then((response) => {
+      // Dormant path: record metadata only, never touch the body. This avoids
+      // the clone()+text() read and the SSE stream tee on every idle request.
+      if (!netActive) {
+        try {
+          document.dispatchEvent(new CustomEvent("__interceptor_net", {
+            detail: {
+              url,
+              method,
+              status: response.status,
+              body: "",
+              bodyOmitted: true,
+              type: "fetch",
+              timestamp: Date.now(),
+              truncated: false,
+              contentType: (response.headers.get("content-type") || "").toLowerCase(),
+            }
+          }))
+        } catch {}
+        return response
+      }
+
       if (reqHeaders) {
         try {
           document.dispatchEvent(new CustomEvent("__interceptor_headers", {
@@ -442,6 +487,25 @@ if ((window as any).__interceptor_net_installed) {
     const xhrHeaders = this._interceptor_headers
 
     this.addEventListener("load", function (this: XHRWithInterceptor) {
+      // Dormant path: metadata only, never read responseText.
+      if (!netActive) {
+        try {
+          document.dispatchEvent(new CustomEvent("__interceptor_net", {
+            detail: {
+              url: xhrUrl,
+              method: xhrMethod,
+              status: this.status,
+              body: "",
+              bodyOmitted: true,
+              type: "xhr",
+              timestamp: Date.now(),
+              truncated: false,
+              contentType: (this.getResponseHeader("content-type") || "").toLowerCase(),
+            }
+          }))
+        } catch {}
+        return
+      }
       try {
         const responseText = this.responseText
         const responseHeaders: Record<string, string> = {}

@@ -555,6 +555,11 @@ export function arm(
 ): void {
   if (armed) return
   armed = true
+  // Wake the MAIN-world net interceptor for the whole recording session,
+  // independent of the command idle-timer — otherwise fetch/XHR bodies, SSE, and
+  // WS/Beacon/BroadcastChannel page_comm events are dropped at the source while
+  // monitoring (dormant-until-attached). disarm() turns it back off.
+  try { document.dispatchEvent(new CustomEvent("__interceptor_monitor_capture", { detail: { active: true } })) } catch {}
   sessionId = newSessionId
   seq = 0
   recentUserActions.length = 0
@@ -604,6 +609,9 @@ export function arm(
 
 export function disarm(): { evt: number; mut: number; net: number } {
   if (!armed) return { evt: 0, mut: 0, net: 0 }
+  // Release the monitor's hold on MAIN-world net capture (command active-state,
+  // if any, still governs it via its own flag).
+  try { document.dispatchEvent(new CustomEvent("__interceptor_monitor_capture", { detail: { active: false } })) } catch {}
   flushMutationBatch()
   flushScroll()
 

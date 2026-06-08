@@ -1,6 +1,7 @@
 import { sendToHost, activeTransport, connectToHost, connectWsChannel } from "./transport"
 import { isTabInInterceptorGroup, interceptorGroupId, ensureInterceptorGroup, SENSITIVE_ACTIONS, verifyTabUrl } from "./tab-group"
 import { routeAction } from "./router"
+import { markTabActive } from "./tab-active"
 
 export const MESSAGE_QUEUE_CAP = 50
 export const messageQueue: Array<{
@@ -133,6 +134,10 @@ export async function handleDaemonMessage(msg: {
       return
     }
   }
+
+  // Dormant-until-attached: mark the target tab active so its content-script
+  // hooks wake up for this command (and stay awake briefly for follow-ups).
+  if (tabId && needsTab(action.type)) markTabActive(tabId, action.type)
 
   try {
     const result = await routeAction(action, tabId!)

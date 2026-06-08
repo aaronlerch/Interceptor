@@ -1,6 +1,48 @@
 if (!(window as any).__interceptor_canvas_installed) {
   ;(window as any).__interceptor_canvas_installed = true
 
+  // Dormant-until-attached: patching CanvasRenderingContext2D.prototype taxes
+  // EVERY draw op (fillText/fillRect/stroke/drawImage/…). On chart-heavy pages
+  // that is thousands of calls per frame — the freeze. So we do NOT patch on
+  // load. The prototype is patched lazily the first time a canvas/scene command
+  // enables capture (`__interceptor_canvas_set`), and the per-op work is gated
+  // behind `canvasCaptureActive` so once the tab goes idle the wrappers collapse
+  // to a single boolean check + the native call. No canvas command ever used →
+  // the prototype is never patched at all.
+  let canvasCaptureActive = false
+  let canvasPatched = false
+
+  // Safe despite referencing `observer` (const declared below) and the hoisted
+  // patch2DPrototype/patchGetContext: this only runs from event listeners, which
+  // fire after this block has fully executed and initialized `observer`.
+  function ensureCanvasPatched(): void {
+    if (canvasPatched) return
+    canvasPatched = true
+    patch2DPrototype((window as any).CanvasRenderingContext2D?.prototype)
+    patchGetContext((window as any).HTMLCanvasElement, "HTMLCanvasElement")
+    patchGetContext((window as any).OffscreenCanvas, "OffscreenCanvas")
+    ;(window as any).__interceptorCanvasObserver = observer
+  }
+
+  function setCanvasCapture(active: boolean): void {
+    if (active) {
+      ensureCanvasPatched()
+      canvasCaptureActive = true
+    } else {
+      canvasCaptureActive = false
+    }
+  }
+
+  // Canvas/scene command attached → enable capture for this tab.
+  document.addEventListener("__interceptor_canvas_set", ((e: CustomEvent) => {
+    if (e.detail && e.detail.active) setCanvasCapture(true)
+  }) as EventListener)
+
+  // Tab went idle → stop the per-op tax (prototype stays patched, but cheap).
+  document.addEventListener("__interceptor_set_active", ((e: CustomEvent) => {
+    if (!(e.detail && e.detail.active)) setCanvasCapture(false)
+  }) as EventListener)
+
   type CanvasLike = HTMLCanvasElement | OffscreenCanvas
   type CanvasObserverEntry = Record<string, unknown> & { t: number; kind: string; canvasId?: string }
   type CanvasDerivedObject = Record<string, unknown> & { t: number; kind: string; canvasId?: string; source: string; confidence: number }
@@ -189,7 +231,10 @@ if (!(window as any).__interceptor_canvas_installed) {
       if (typeof orig !== "function") return
       proto[name] = function (...args: unknown[]) {
         const out = orig.apply(this, args)
-        try { handler(this, args, out) } catch {}
+        // Idle fast path: one boolean check, no Date.now/getTransform/dispatch.
+        if (canvasCaptureActive) {
+          try { handler(this, args, out) } catch {}
+        }
         return out
       }
     }
@@ -386,6 +431,8 @@ if (!(window as any).__interceptor_canvas_installed) {
     Ctor.prototype.__interceptor_canvas_get_context_wrapped = true
     Ctor.prototype.getContext = function (type: string, ...rest: unknown[]) {
       const ctx = orig.call(this, type, ...rest)
+      // Idle fast path: don't register/log getContext calls while dormant.
+      if (!canvasCaptureActive) return ctx
       const canvasId = registerCanvas(this)
       const entry: CanvasObserverEntry = {
         t: Date.now(),
@@ -407,9 +454,7 @@ if (!(window as any).__interceptor_canvas_installed) {
     }
   }
 
-  patch2DPrototype((window as any).CanvasRenderingContext2D?.prototype)
-  patchGetContext((window as any).HTMLCanvasElement, "HTMLCanvasElement")
-  patchGetContext((window as any).OffscreenCanvas, "OffscreenCanvas")
-
-  ;(window as any).__interceptorCanvasObserver = observer
+  // NOTE: no eager patching here. The prototype is patched lazily by
+  // ensureCanvasPatched() the first time a canvas/scene command enables capture
+  // (see the `__interceptor_canvas_set` listener at the top of this block).
 }

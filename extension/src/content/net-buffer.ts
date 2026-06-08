@@ -9,6 +9,10 @@ type PassiveCapturedEntry = {
   tabUrl: string
   contentType?: string
   truncated?: boolean
+  // Set when the request was seen while Interceptor was detached (dormant): the
+  // metadata is real but the body was intentionally not read. Distinguishes a
+  // dropped body from a genuinely empty (e.g. 204) response.
+  bodyOmitted?: boolean
   requestHeaders?: Record<string, string>
   responseHeaders?: Record<string, string>
 }

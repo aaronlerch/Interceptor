@@ -1,5 +1,6 @@
 import "./content/canvas-bridge"
 import "./content/dom-observer"
+import "./content/active-state"
 import "./content/monitor"
 import { getDomDirty, setDomDirty } from "./content/dom-observer"
 import { getStaleWarning, clearStaleWarning } from "./content/ref-registry"
