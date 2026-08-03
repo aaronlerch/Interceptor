@@ -14,7 +14,7 @@ const VALUE_FLAGS = new Set(["--out", "--chunk-size"])
 // Boolean flags that may survive global filtering and must never be folded into
 // the evaluated expression. (e.g. `save --out f "new Blob([])" --json` used to
 // concatenate `--json` into the code and fail with a postfix-operator error.)
-const BOOL_FLAGS = new Set(["--main", "--isolated", "--json", "--ws", "--no-ws", "--any-tab"])
+const BOOL_FLAGS = new Set(["--main", "--isolated", "--json", "--ws", "--no-ws", "--any-tab", "--allow-csp-strip"])
 
 export function parseSaveCommand(filtered: string[]): Action {
   const out = flagVal(filtered, "--out")
@@ -26,6 +26,7 @@ export function parseSaveCommand(filtered: string[]): Action {
   const chunkSizeRaw = flagVal(filtered, "--chunk-size")
   const chunkSize = chunkSizeRaw ? parseInt(chunkSizeRaw, 10) : undefined
   const world = filtered.includes("--isolated") ? "ISOLATED" : "MAIN"
+  const allowCspStrip = filtered.includes("--allow-csp-strip")
 
   // Build the JS expression from everything that is NOT: index 0 (the `save`
   // verb), a value-flag or its value, or a boolean flag. This keeps trailing
@@ -52,6 +53,7 @@ export function parseSaveCommand(filtered: string[]): Action {
     out,
     code,
     world,
+    ...(allowCspStrip ? { allowCspStrip: true } : {}),
     ...(chunkSize && chunkSize > 0 ? { chunkSize } : {})
   }
 }

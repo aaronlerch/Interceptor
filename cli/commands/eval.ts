@@ -6,6 +6,12 @@ type Action = { type: string; [key: string]: unknown }
 
 export function parseEvalCommand(filtered: string[]): Action {
   const world = filtered.includes("--main") ? "MAIN" : "ISOLATED"
-  const code = filtered.slice(1).filter(a => a !== "--main").join(" ")
-  return { type: "evaluate", code, world }
+  // Opt-in to the CSP/Trusted-Types header strip. Off by default: it removes
+  // the page's own Content-Security-Policy for the tab (see evaluate.ts).
+  const allowCspStrip = filtered.includes("--allow-csp-strip")
+  const code = filtered
+    .slice(1)
+    .filter(a => a !== "--main" && a !== "--allow-csp-strip")
+    .join(" ")
+  return { type: "evaluate", code, world, ...(allowCspStrip ? { allowCspStrip: true } : {}) }
 }

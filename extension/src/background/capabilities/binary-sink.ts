@@ -130,7 +130,8 @@ async function executeNormalize(
 async function prepareByteSource(
   tabId: number,
   code: string,
-  world: "MAIN" | "ISOLATED"
+  world: "MAIN" | "ISOLATED",
+  allowCspStrip: boolean
 ): Promise<ActionResult> {
   // Reuse the shared CSP / Trusted-Types bypass (runWithCspStripBypass) so the
   // binary sink can extract bytes from strict-CSP pages — including
@@ -141,7 +142,8 @@ async function prepareByteSource(
   const evalResult = await runWithCspStripBypass(
     tabId,
     world,
-    (t, w) => executeNormalize(t, w, code)
+    (t, w) => executeNormalize(t, w, code),
+    { allowCspStrip }
   )
   if (!evalResult.success) return evalResult
 
@@ -394,6 +396,7 @@ export async function handleBinarySinkActions(
   const code = action.code as string
   const out = action.out as string
   const world = (action.world as string) === "ISOLATED" ? "ISOLATED" : "MAIN"
+  const allowCspStrip = action.allowCspStrip === true
   const chunkSize = typeof action.chunkSize === "number" && action.chunkSize > 0
     ? Math.floor(action.chunkSize)
     : DEFAULT_CHUNK_SIZE
@@ -401,7 +404,7 @@ export async function handleBinarySinkActions(
   if (!out) return { success: false, error: "missing output path" }
   if (!code) return { success: false, error: "missing expression" }
 
-  const prepared = await prepareByteSource(tabId, code, world)
+  const prepared = await prepareByteSource(tabId, code, world, allowCspStrip)
   if (!prepared.success) return prepared
 
   const source = prepared.data as ByteSource

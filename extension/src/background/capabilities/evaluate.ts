@@ -134,12 +134,27 @@ async function reloadTabForCspRetry(tabId: number): Promise<void> {
   await waitForTabLoad(tabId, 15_000)
 }
 
+/** Error returned when step 3 is reached without an explicit operator opt-in. */
+export const CSP_STRIP_REFUSED =
+  "MAIN-world eval is blocked by this page's Content-Security-Policy / Trusted Types. " +
+  "Stripping the page's CSP header would disable the site's own XSS defenses for this tab, " +
+  "so it is off by default. Re-run with --allow-csp-strip if you intend that."
+
 /**
  * Run a per-tab evaluation through the CSP / Trusted-Types escalation chain:
  *   1. try the `run` callback in the requested world
  *   2. on a Trusted-Types-only failure (MAIN), retry in ISOLATED
  *   3. on any unsafe-eval CSP / TT failure (MAIN), strip the page's CSP response
  *      header via a per-tab declarativeNetRequest rule + reload, then retry
+ *
+ * Steps 1-2 are always available: they work *within* the page's policy and take
+ * nothing away from it. Step 3 does not — it removes `content-security-policy`
+ * (and `-report-only`, and with them `require-trusted-types-for`) from the
+ * response for this tab, so a logged-in page loses its own XSS defenses for as
+ * long as the session rule is installed. That is an operator decision, not a
+ * default: step 3 requires `opts.allowCspStrip`, threaded from the CLI's
+ * explicit `--allow-csp-strip` flag. Without it the chain stops at step 2 and
+ * returns CSP_STRIP_REFUSED.
  *
  * `run` performs the actual in-page work and returns an ActionResult — e.g.
  * clone-eval for the `evaluate` capability, or blob-URL normalization for the
@@ -149,12 +164,13 @@ async function reloadTabForCspRetry(tabId: number): Promise<void> {
  *
  * This is the shared bypass core (lifted out of handleEvaluateActions) so every
  * capability that evals into a page inherits the same strict-CSP / Trusted-Types
- * handling instead of reimplementing a weaker one.
+ * handling — and the same opt-in gate — instead of reimplementing a weaker one.
  */
 export async function runWithCspStripBypass(
   tabId: number,
   world: "MAIN" | "ISOLATED",
-  run: (tabId: number, world: "MAIN" | "ISOLATED") => Promise<ActionResult>
+  run: (tabId: number, world: "MAIN" | "ISOLATED") => Promise<ActionResult>,
+  opts: { allowCspStrip?: boolean } = {}
 ): Promise<ActionResult> {
   const first = await run(tabId, world)
   if (first.success || world !== "MAIN") {
@@ -182,6 +198,20 @@ export async function runWithCspStripBypass(
 
   if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
     return first
+  }
+
+  // Header-strip gate. Everything above worked inside the page's policy; from
+  // here we would take the policy away. Refuse unless the operator asked.
+  if (!opts.allowCspStrip) {
+    return {
+      success: false,
+      error: CSP_STRIP_REFUSED,
+      data: {
+        originalError: first.error,
+        cspBypassApplied: false,
+        cspStripAvailable: true
+      }
+    }
   }
 
   try {
@@ -226,6 +256,7 @@ export async function handleEvaluateActions(
   }
   const code = action.code as string
   const world = (action.world as string) === "ISOLATED" ? "ISOLATED" : "MAIN"
+  const allowCspStrip = action.allowCspStrip === true
   const initialUserScriptWorld = world === "MAIN" ? "MAIN" : "USER_SCRIPT"
   const userScriptAttempt = await executeWithUserScripts(tabId, initialUserScriptWorld, code)
   if (userScriptAttempt.available) {
@@ -254,6 +285,7 @@ export async function handleEvaluateActions(
   return runWithCspStripBypass(
     tabId,
     world as "MAIN" | "ISOLATED",
-    (t, w) => executeEval(t, w, code)
+    (t, w) => executeEval(t, w, code),
+    { allowCspStrip }
   )
 }

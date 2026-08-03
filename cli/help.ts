@@ -10,6 +10,7 @@ const COMMAND_HELP: Record<string, string> = {
     "interceptor save — write page-produced bytes to disk (no downloads shelf, Save dialog, clipboard, or CDP)",
     "",
     "  interceptor save --out <abs-path> <expr>     evaluate <expr> in the page, stream its bytes to <abs-path>",
+    "  --allow-csp-strip                           on a strict-CSP page, strip the page CSP header for this tab (opt-in)",
     "",
     '<expr> may return: Blob | File | ArrayBuffer | typed array | "blob:..." URL string | { url | blobUrl | href }',
     "",
@@ -260,6 +261,8 @@ Capture:
   interceptor ocr --element N                OCR an element by ref
   interceptor eval <code>                    Run JS in isolated world
   interceptor eval <code> --main             Run JS in page context
+  interceptor eval <code> --main --allow-csp-strip   Also strip the page's CSP header for this tab
+                                             (disables the site's own XSS defenses — opt-in, off by default)
   interceptor save --out <path> <expr>       Stream page bytes (Blob/ArrayBuffer/blob: URL) to disk; no downloads/CDP — see 'save --help'
 
 Cookies:
