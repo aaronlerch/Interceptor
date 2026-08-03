@@ -5,6 +5,9 @@ import AppKit
 final class DisplayDomain: DomainHandler, @unchecked Sendable {
     private let lock = NSLock()
     private var virtualDisplays: [String: VirtualDisplayContext] = [:]
+    // the system-wide focused-application read routes through
+    // the transport.
+    private let transport: any AXTransport = LiveAXTransport()
 
     struct VirtualDisplayContext {
         let display: AnyObject
@@ -307,9 +310,8 @@ final class DisplayDomain: DomainHandler, @unchecked Sendable {
         let targetOrigin = displayBounds.origin
 
         // Find the window via accessibility and set its position
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedApp: CFTypeRef?
-        AXUIElementCopyAttributeValue(systemWide, kAXFocusedApplicationAttribute as CFString, &focusedApp)
+        let systemWide = transport.createSystemWide()
+        _ = transport.copyAttributeValue(systemWide, kAXFocusedApplicationAttribute as String)
 
         // Try moving via CGS private API first
         typealias CGSConnectionID = UInt32

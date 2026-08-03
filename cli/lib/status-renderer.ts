@@ -9,6 +9,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { IS_WIN, SOCKET_PATH, PID_PATH, transportLabel } from "../../shared/platform"
+import { skillsStatusSummary } from "../commands/skills"
 
 export type StatusSnapshot = {
   mode: "browser-only" | "full" | "unknown"
@@ -38,6 +39,11 @@ export type StatusSnapshot = {
     probed: boolean
     reachable: boolean
     reason?: string
+  }
+  // skills-adoption block — pack presence + per-runtime link counts
+  skills?: {
+    packDir: string | null
+    targets: Array<{ id: string; linked: number; total: number }>
   }
 }
 
@@ -121,6 +127,19 @@ export function readStatusSnapshot(): StatusSnapshot {
     mode = "browser-only"
   }
 
+  let skills: StatusSnapshot["skills"]
+  try {
+    const summary = skillsStatusSummary()
+    if (summary.packDir) {
+      skills = {
+        packDir: summary.packDir,
+        targets: summary.targets.map(t => ({ id: t.id, linked: t.linked, total: t.total })),
+      }
+    }
+  } catch {
+    // status must never fail because of skills probing
+  }
+
   return {
     mode,
     daemon: daemonAlive,
@@ -133,6 +152,7 @@ export function readStatusSnapshot(): StatusSnapshot {
     launchAgentInstalled,
     launchAgentPath,
     launchAgentLoaded,
+    skills,
   }
 }
 
@@ -208,20 +228,40 @@ export function detectMacOSDefaultBrowser():
   }
 }
 
+// One source of truth for per-user NMH manifest locations on macOS — the same
+// browser set scripts/install.sh can configure. Used by `status` (presence)
+// and `diagnose` (manifest-path vs running-binary mismatch detection).
+const NMH_MANIFEST_FILE = "com.interceptor.host.json"
+const NMH_BROWSER_DIRS: Record<string, string> = {
+  "chrome":             "Google/Chrome",
+  "brave":              "BraveSoftware/Brave-Browser",
+  "chrome-beta":        "Google/Chrome Beta",
+  "chrome-canary":      "Google/Chrome Canary",
+  "chrome-dev":         "Google/Chrome Dev",
+  "chrome-for-testing": "Google/ChromeForTesting",
+  "edge":               "Microsoft Edge",
+  "vivaldi":            "Vivaldi",
+}
+
+/** Every installed Interceptor NMH manifest: browser slug + manifest file path. */
+export function installedNmhManifests(): Array<{ browser: string; manifestFile: string }> {
+  const home = process.env.HOME || ""
+  const out: Array<{ browser: string; manifestFile: string }> = []
+  for (const [browser, dir] of Object.entries(NMH_BROWSER_DIRS)) {
+    const manifestFile = `${home}/Library/Application Support/${dir}/NativeMessagingHosts/${NMH_MANIFEST_FILE}`
+    if (existsSync(manifestFile)) out.push({ browser, manifestFile })
+  }
+  return out
+}
+
 /**
  * Detect which browsers have an Interceptor native messaging host manifest
  * installed in their per-user dir.
  */
 export function detectConfiguredBrowsers(): ("chrome" | "brave")[] {
-  const home = process.env.HOME || ""
-  const out: ("chrome" | "brave")[] = []
-  if (existsSync(`${home}/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.interceptor.host.json`)) {
-    out.push("chrome")
-  }
-  if (existsSync(`${home}/Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts/com.interceptor.host.json`)) {
-    out.push("brave")
-  }
-  return out
+  return installedNmhManifests()
+    .map(m => m.browser)
+    .filter((b): b is "chrome" | "brave" => b === "chrome" || b === "brave")
 }
 
 /**
@@ -320,6 +360,23 @@ export function formatStatus(snap: StatusSnapshot, opts: { verbose?: boolean }):
     }
   }
 
+  // skills adoption block — pack presence + per-runtime link counts
+  if (snap.skills && snap.skills.targets.length > 0) {
+    lines.push("")
+    if (v) {
+      lines.push("skills (Interceptor skill packs linked into AI runtimes — see 'interceptor skills status'):")
+    } else {
+      lines.push("skills:")
+    }
+    for (const t of snap.skills.targets) {
+      const mark = t.linked === t.total ? "✓" : "⚠"
+      lines.push(`  ${mark} ${t.id}: ${t.linked}/${t.total} linked`)
+    }
+    if (snap.skills.targets.some(t => t.linked < t.total)) {
+      lines.push("  hint: interceptor skills adopt")
+    }
+  }
+
   if (!snap.daemon) {
     lines.push("")
     lines.push("hint: run any interceptor command and the daemon will auto-start.")
@@ -346,5 +403,6 @@ export function snapshotToJson(snap: StatusSnapshot): Record<string, unknown> {
   }
   if (snap.browser) base.browser = snap.browser
   if (snap.extension) base.extension = snap.extension
+  if (snap.skills) base.skills = snap.skills
   return base
 }

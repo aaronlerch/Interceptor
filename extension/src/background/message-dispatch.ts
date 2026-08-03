@@ -1,7 +1,12 @@
 import { sendToHost, activeTransport, connectToHost, connectWsChannel } from "./transport"
-import { isTabInInterceptorGroup, interceptorGroupId, ensureInterceptorGroup, SENSITIVE_ACTIONS, verifyTabUrl } from "./tab-group"
+import {
+  SENSITIVE_ACTIONS, verifyTabUrl,
+  GROUP_LABEL_RE, ensureNamedGroup, isTabInNamedGroup, isTabInAnyManagedGroup, anyManagedGroupKnown
+} from "./tab-group"
 import { routeAction } from "./router"
 import { markTabActive } from "./tab-active"
+import { needsTab } from "./no-tab-actions"
+import { resolveWorkingTabId } from "./resolve-tab"
 
 export const MESSAGE_QUEUE_CAP = 50
 export const messageQueue: Array<{
@@ -11,6 +16,7 @@ export const messageQueue: Array<{
 }> = []
 
 const EXT_REQUEST_TIMEOUT_MS = 180_000
+const EXT_LONG_REQUEST_TIMEOUT_MS = 600_000
 export const pendingRequests = new Map<string, {
   action: string
   tabId?: number
@@ -19,23 +25,32 @@ export const pendingRequests = new Map<string, {
   viaWs?: boolean
 }>()
 
+// the auto-target is per-group. Grouped requests use "activeTabId:<label>"
+// so concurrent agents on one context never clobber each other's target; the bare
+// "activeTabId" key keeps serving ungrouped requests exactly as before.
+function activeTabKey(group?: string): string {
+  return group ? `activeTabId:${group}` : "activeTabId"
+}
+
+async function getActiveTabId(group?: string): Promise<number | undefined> {
+  const storage = chrome.storage as typeof chrome.storage & { session?: chrome.storage.StorageArea }
+  const area = storage.session ?? chrome.storage.local
+  const key = activeTabKey(group)
+  const stored = await area.get(key) as Record<string, number | undefined>
+  return stored[key]
+}
+
+async function setActiveTabId(tabId: number, group?: string): Promise<void> {
+  const storage = chrome.storage as typeof chrome.storage & { session?: chrome.storage.StorageArea }
+  const area = storage.session ?? chrome.storage.local
+  await area.set({ [activeTabKey(group)]: tabId })
+}
+
 export function drainMessageQueue(): void {
   while (messageQueue.length > 0) {
     const queued = messageQueue.shift()!
     handleDaemonMessage(queued)
   }
-}
-
-export function needsTab(type: string): boolean {
-  const noTabActions = new Set([
-    "status", "reload_extension", "tab_create", "tab_list", "window_create", "window_list", "window_get_all",
-    "history_search", "history_delete_all", "bookmark_tree", "bookmark_search",
-    "bookmark_create", "downloads_search", "browsing_data_remove",
-    "session_list", "session_restore", "notification_create", "notification_clear",
-    "search_query", "monitor_status", "monitor_start", "monitor_pause", "monitor_resume",
-    "monitor_stop"
-  ])
-  return !noTabActions.has(type)
 }
 
 export async function handleDaemonMessage(msg: {
@@ -68,11 +83,14 @@ export async function handleDaemonMessage(msg: {
     return
   }
 
+  const requestTimeoutMs = msg.action.type === "binary_sink_save"
+    ? EXT_LONG_REQUEST_TIMEOUT_MS
+    : EXT_REQUEST_TIMEOUT_MS
   const requestTimer = setTimeout(() => {
     const req = pendingRequests.get(msg.id!)
     pendingRequests.delete(msg.id!)
     sendToHost({ id: msg.id, result: { success: false, error: "extension timeout" } }, req?.viaWs)
-  }, EXT_REQUEST_TIMEOUT_MS)
+  }, requestTimeoutMs)
 
   const startTime = Date.now()
   const shortId = msg.id.slice(0, 8)
@@ -87,43 +105,97 @@ export async function handleDaemonMessage(msg: {
   })
 
   const action = msg.action
-  let tabId = msg.tabId
+  // Tab-targeted actions name their target tab in `action.tabId` — the CLI puts
+  // the `tab close <id>` / `tab switch <id>` argument there, while the top-level
+  // `msg.tabId` only carries the global `--tab` override. Without honoring the
+  // explicit target here, resolution below falls through to the active tab, so a
+  // tab-targeted request group-validates and operates on whatever tab is
+  // foregrounded: `tab close <id>` fails with "tab <active-id> is not in the
+  // interceptor group" and leaves <id> open, and switch-then-close acknowledges
+  // while the tab survives. The explicit target wins over `--tab`: the tab
+  // handlers act on `action.tabId` whenever it is present, so the gate below
+  // must validate that same tab, never a different one.
+  let tabId = resolveWorkingTabId(msg.tabId, action.tabId)
 
-  if (!tabId && needsTab(action.type)) {
-    const stored = await chrome.storage.session.get("activeTabId") as { activeTabId?: number }
-    tabId = stored.activeTabId
-  }
-
-  if (!tabId && needsTab(action.type)) {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
-    tabId = activeTab?.id
-    if (tabId) chrome.storage.session.set({ activeTabId: tabId })
-  }
-
-  if (!tabId && needsTab(action.type)) {
+  const fail = (error: string): void => {
     clearTimeout(requestTimer)
-    pendingRequests.delete(msg.id)
-    sendToHost({ id: msg.id, result: { success: false, error: "no active tab" } }, respondViaWs)
+    pendingRequests.delete(msg.id!)
+    sendToHost({ id: msg.id, result: { success: false, error } }, respondViaWs)
+  }
+
+  // per-request group scope rides inside the action payload.
+  const groupLabel = typeof action.group === "string" && action.group.length > 0
+    ? action.group
+    : undefined
+  if (groupLabel && !GROUP_LABEL_RE.test(groupLabel)) {
+    fail(`invalid group label '${groupLabel}' — must match [A-Za-z0-9_-]{1,32}`)
     return
   }
 
-  if (tabId) chrome.storage.session.set({ activeTabId: tabId })
+  if (!tabId && needsTab(action.type)) {
+    tabId = await getActiveTabId(groupLabel)
+    if (tabId && groupLabel) {
+      // Stored per-group target may be dead (tab closed outside group_close) or
+      // no longer a member of the group; validate MEMBERSHIP (not mere existence)
+      // and fall through to the group's own tabs otherwise — this also self-heals
+      // a stale key.
+      let stillInGroup = false
+      try { stillInGroup = await isTabInNamedGroup(tabId, groupLabel) } catch {}
+      if (!stillInGroup) tabId = undefined
+    }
+  }
 
-  if (tabId && needsTab(action.type) && !action.anyTab) {
-    const inGroup = await isTabInInterceptorGroup(tabId)
-    if (!inGroup && interceptorGroupId !== null) {
-      clearTimeout(requestTimer)
-      pendingRequests.delete(msg.id)
-      sendToHost({
-        id: msg.id,
-        result: {
-          success: false,
-          error: `tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`
-        }
-      }, respondViaWs)
+  if (!tabId && needsTab(action.type) && groupLabel) {
+    // Grouped requests resolve ONLY within their group — never the browser-active
+    // tab, which is frequently another agent's (the cross-agent bleed this feature
+    // exists to prevent).
+    const groupId = await ensureNamedGroup(groupLabel)
+    if (groupId !== -1) {
+      const groupTabs = await chrome.tabs.query({ groupId })
+      const candidate = groupTabs
+        .filter(t => typeof t.id === "number")
+        .sort((a, b) => (b.id as number) - (a.id as number))[0]
+      tabId = candidate?.id
+    }
+    if (!tabId) {
+      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}'`)
       return
     }
   }
+
+  if (!tabId && needsTab(action.type)) {
+    // No pre-gate persist here: the post-gate persist below is the only
+    // auto-target write, so a request the group gate rejects (e.g. the
+    // browser-active tab is unmanaged) can never poison the stored target.
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true })
+    tabId = activeTab?.id
+  }
+
+  if (!tabId && needsTab(action.type)) {
+    fail("no active tab")
+    return
+  }
+
+  if (tabId && needsTab(action.type) && !action.anyTab) {
+    if (groupLabel) {
+      const inNamed = await isTabInNamedGroup(tabId, groupLabel)
+      if (!inNamed) {
+        fail(`tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`)
+        return
+      }
+    } else {
+      const inAny = await isTabInAnyManagedGroup(tabId)
+      if (!inAny && anyManagedGroupKnown()) {
+        fail(`tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`)
+        return
+      }
+    }
+  }
+
+  // Persist the auto-target only AFTER the group gate has passed — a rejected
+  // cross-group request must never poison another group's (or the global)
+  // auto-target key.
+  if (tabId) setActiveTabId(tabId, groupLabel)
 
   if (SENSITIVE_ACTIONS.has(action.type) && tabId && action.expectedUrl) {
     const urlErr = await verifyTabUrl(tabId, action.expectedUrl as string)

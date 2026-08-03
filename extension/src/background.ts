@@ -1,13 +1,21 @@
 import { connectToHost, connectWsChannel, registerAlarmListener, registerSwKeepaliveListener, registerStorageContextListener } from "./background/transport"
 import { registerCdpListeners } from "./background/cdp"
 import { registerTabGroupListeners, ensureInterceptorGroup } from "./background/tab-group"
+import { registerBrandTabGroup } from "./background/brand-tab-group"
+import { registerDelegationListeners } from "./background/delegation"
+import { registerPowerIdleListeners } from "./background/keepawake"
+import { initializeActionRouter } from "./background/router"
 
 // Register all event listeners
+initializeActionRouter()
 registerCdpListeners()
 registerTabGroupListeners()
 registerAlarmListener()
 registerSwKeepaliveListener()
 registerStorageContextListener()
+registerBrandTabGroup()
+registerDelegationListeners()
+registerPowerIdleListeners()
 
 // Startup connections
 chrome.runtime.onInstalled.addListener(() => {

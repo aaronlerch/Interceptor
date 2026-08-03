@@ -1,0 +1,44 @@
+{
+  "_comment": "Gate G0 SANITIZED synthetic WIR/WIP exchange. No real credentials, device identifiers, pair material, or personal URLs — all values are fabricated (example.com, PID:0000). Used by scripts/ios-web-g0.ts (fixture mode) and as the shape a real on-device capture must match before it is committed.",
+  "transport": "rsd-shim",
+  "connectedApplicationList": {
+    "__selector": "_rpc_reportConnectedApplicationList:",
+    "__argument": {
+      "WIRApplicationDictionaryKey": {
+        "PID:0000": {
+          "WIRApplicationIdentifierKey": "PID:0000",
+          "WIRApplicationBundleIdentifierKey": "com.apple.mobilesafari",
+          "WIRApplicationNameKey": "Safari",
+          "WIRIsApplicationActiveKey": true,
+          "WIRIsApplicationProxyKey": false
+        }
+      }
+    }
+  },
+  "applicationSentListing": {
+    "__selector": "_rpc_applicationSentListing:",
+    "__argument": {
+      "WIRApplicationIdentifierKey": "PID:0000",
+      "WIRListingKey": {
+        "1": {
+          "WIRPageIdentifierKey": 1,
+          "WIRTypeKey": "WIRTypeWeb",
+          "WIRTitleKey": "Example Domain",
+          "WIRURLKey": "https://example.com/"
+        }
+      }
+    }
+  },
+  "socketSetup": {
+    "variant": "optional-page-id-no-chunks",
+    "__selector": "_rpc_forwardSocketSetup:",
+    "__argument": {
+      "WIRApplicationIdentifierKey": "PID:0000",
+      "WIRSenderKey": "SYNTHETIC-SENDER",
+      "WIRMessageDataTypeChunkSupportedKey": false
+    }
+  },
+  "wipRequest": { "id": 1, "method": "Runtime.evaluate", "params": { "expression": "document.title", "returnByValue": true } },
+  "wipResponse": { "id": 1, "result": { "result": { "type": "string", "value": "Example Domain" } } },
+  "expectedTitle": "Example Domain"
+}

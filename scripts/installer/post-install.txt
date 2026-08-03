@@ -18,6 +18,14 @@ Once both steps are done, open a fresh terminal and run:
     interceptor status
     interceptor open https://example.com
 
+AI skill packs: if you selected "Link Interceptor AI skill packs" during
+setup, the interceptor + interceptor-browser skills are already linked into
+%USERPROFILE%\.claude\skills (Claude Code). To manage links yourself:
+
+    interceptor skills status
+    interceptor skills adopt --into claude
+    interceptor skills adopt --into codex     (Codex: %USERPROFILE%\.codex\skills)
+
 If "interceptor" is not recognised in your terminal, close and reopen it so
 Windows picks up the updated user PATH. Or call the executable directly:
 

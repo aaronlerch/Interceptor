@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Interceptor",
-  "version": "0.16.9",
+  "version": "0.22.37",
   "minimum_chrome_version": "116",
   "description": "Browser bridge",
   "icons": {
@@ -35,14 +35,30 @@
     "alarms",
     "offscreen",
     "tabCapture",
-    "debugger"
+    "debugger",
+    "contextMenus",
+    "idle",
+    "power"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
+  "commands": {
+    "delegate-page": {
+      "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y" },
+      "description": "Hand the current page to the agent"
+    },
+    "delegate-selection": {
+      "suggested_key": { "default": "Ctrl+Shift+U", "mac": "Command+Shift+U" },
+      "description": "Hand the current selection to the agent"
+    }
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "action": {
     "default_title": "Interceptor",

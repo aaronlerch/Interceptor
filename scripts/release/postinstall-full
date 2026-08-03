@@ -156,4 +156,30 @@ if [[ -n "$TARGET_UID" && -f "$LAUNCH_AGENT_PATH" ]]; then
   bootstrap_bridge_launchagent "$TARGET_UID" || true
 fi
 
+# ── skills-refresh marker ────────────────────────────────────────
+# Written on every install AND every (Sparkle-driven) update. The CLI's
+# rate-limited skills hint uses live filesystem probing; this marker records
+# what shipped and when, for `interceptor skills status --json` consumers and
+# debugging. Failure here must never fail the install.
+{
+  printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf 'skills=%s\n' "$(ls "$INSTALL_ROOT/skills" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+} >"$INSTALL_ROOT/.skills-refresh" 2>/dev/null || true
+
+# ── remove obsolete iOS tunnel LaunchDaemon from older installs ──────
+# The no-Xcode iOS path now uses the daemon's unprivileged CoreDeviceProxy
+# userspace tunnel. New packages do not stage com.interceptor.ios-tunnel; upgrades
+# should also stop and remove the old privileged helper if a prior build installed it.
+IOS_TUNNEL_PLIST_DST="/Library/LaunchDaemons/com.interceptor.ios-tunnel.plist"
+IOS_TUNNEL_SERVICE="system/com.interceptor.ios-tunnel"
+if [[ -f "$IOS_TUNNEL_PLIST_DST" ]] || /bin/launchctl print "$IOS_TUNNEL_SERVICE" >/dev/null 2>&1; then
+  log_install "removing obsolete iOS tunnel LaunchDaemon"
+  /bin/launchctl bootout "$IOS_TUNNEL_SERVICE" >>"$INSTALL_LOG_PATH" 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8; do
+    /bin/launchctl print "$IOS_TUNNEL_SERVICE" >/dev/null 2>&1 || break
+    sleep 1
+  done
+  /bin/rm -f "$IOS_TUNNEL_PLIST_DST" /var/run/interceptor-ios-tunnel.sock 2>>"$INSTALL_LOG_PATH" || true
+fi
+
 exit 0

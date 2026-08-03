@@ -3,6 +3,15 @@ import ApplicationServices
 import AppKit
 
 final class MenuDomain: DomainHandler, @unchecked Sendable {
+    // route menu-bar AX traversal through the transport and
+    // replace the `menuBarValue as! AXUIElement` force casts with codec
+    // type-checked downcasts. Behavior unchanged.
+    private let transport: any AXTransport
+
+    init(transport: any AXTransport = LiveAXTransport()) {
+        self.transport = transport
+    }
+
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         switch command {
         case "menu":
@@ -32,39 +41,33 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
-        let appElement = AXUIElementCreateApplication(pid)
-        var menuBarValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarValue) == .success else {
+        let appElement = transport.createApplication(pid: pid)
+        let (menuBarResult, menuBarValue) = transport.copyAttributeValue(appElement, kAXMenuBarAttribute as String)
+        guard menuBarResult == .success, let menuBar = AXValueCodec.asElement(menuBarValue) else {
             completion(WireFormat.error("could not read menu bar"))
             return
         }
-        let menuBar = menuBarValue as! AXUIElement
 
-        var childrenValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(menuBar, kAXChildrenAttribute as CFString, &childrenValue) == .success,
-              let children = childrenValue as? [AXUIElement] else {
+        let (childrenResult, childrenValue) = transport.copyAttributeValue(menuBar, kAXChildrenAttribute as String)
+        guard childrenResult == .success, let children = childrenValue as? [AXUIElement] else {
             completion(WireFormat.error("could not read menu bar children"))
             return
         }
 
         var lines: [String] = []
         for menuItem in children {
-            var titleValue: CFTypeRef?
-            AXUIElementCopyAttributeValue(menuItem, kAXTitleAttribute as CFString, &titleValue)
-            let title = titleValue as? String ?? "(untitled)"
+            let (_, titleValue) = transport.copyAttributeValue(menuItem, kAXTitleAttribute as String)
+            let title = AXValueCodec.displayString(titleValue) ?? "(untitled)"
             lines.append(title)
 
-            var submenuValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(menuItem, kAXChildrenAttribute as CFString, &submenuValue) == .success,
-               let submenus = submenuValue as? [AXUIElement] {
+            let (submenuResult, submenuValue) = transport.copyAttributeValue(menuItem, kAXChildrenAttribute as String)
+            if submenuResult == .success, let submenus = submenuValue as? [AXUIElement] {
                 for submenu in submenus {
-                    var subChildrenValue: CFTypeRef?
-                    if AXUIElementCopyAttributeValue(submenu, kAXChildrenAttribute as CFString, &subChildrenValue) == .success,
-                       let subChildren = subChildrenValue as? [AXUIElement] {
+                    let (subResult, subChildrenValue) = transport.copyAttributeValue(submenu, kAXChildrenAttribute as String)
+                    if subResult == .success, let subChildren = subChildrenValue as? [AXUIElement] {
                         for child in subChildren {
-                            var childTitle: CFTypeRef?
-                            AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &childTitle)
-                            let name = childTitle as? String ?? ""
+                            let (_, childTitle) = transport.copyAttributeValue(child, kAXTitleAttribute as String)
+                            let name = AXValueCodec.displayString(childTitle) ?? ""
                             if !name.isEmpty {
                                 lines.append("  \(name)")
                             }
@@ -84,38 +87,36 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
-        let appElement = AXUIElementCreateApplication(pid)
-        var menuBarValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXMenuBarAttribute as CFString, &menuBarValue) == .success else {
+        let appElement = transport.createApplication(pid: pid)
+        let (menuBarResult, menuBarValue) = transport.copyAttributeValue(appElement, kAXMenuBarAttribute as String)
+        guard menuBarResult == .success, let menuBar = AXValueCodec.asElement(menuBarValue) else {
             completion(WireFormat.error("could not read menu bar"))
             return
         }
 
-        var currentElement: AXUIElement = menuBarValue as! AXUIElement
+        var currentElement: AXUIElement = menuBar
         var path = items
 
         while !path.isEmpty {
             let target = path.removeFirst()
-            var childrenValue: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(currentElement, kAXChildrenAttribute as CFString, &childrenValue) == .success,
-                  let children = childrenValue as? [AXUIElement] else {
+            let (childrenResult, childrenValue) = transport.copyAttributeValue(currentElement, kAXChildrenAttribute as String)
+            guard childrenResult == .success, let children = childrenValue as? [AXUIElement] else {
                 completion(WireFormat.error("could not traverse menu to: \(target)"))
                 return
             }
 
             var found = false
             for child in children {
-                var titleValue: CFTypeRef?
-                AXUIElementCopyAttributeValue(child, kAXTitleAttribute as CFString, &titleValue)
-                let title = titleValue as? String ?? ""
+                let (_, titleValue) = transport.copyAttributeValue(child, kAXTitleAttribute as String)
+                let title = AXValueCodec.displayString(titleValue) ?? ""
                 if title == target {
                     if path.isEmpty {
-                        AXUIElementPerformAction(child, kAXPressAction as CFString)
+                        _ = transport.performAction(child, kAXPressAction as String)
                         completion(WireFormat.success("invoked menu: \(items.joined(separator: " → "))"))
                         return
                     } else {
-                        var submenuValue: CFTypeRef?
-                        if AXUIElementCopyAttributeValue(child, kAXChildrenAttribute as CFString, &submenuValue) == .success,
+                        let (submenuResult, submenuValue) = transport.copyAttributeValue(child, kAXChildrenAttribute as String)
+                        if submenuResult == .success,
                            let submenus = submenuValue as? [AXUIElement], let submenu = submenus.first {
                             currentElement = submenu
                         } else {

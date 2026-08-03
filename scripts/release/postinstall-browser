@@ -76,4 +76,13 @@ if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
   done
 fi
 
+# ── skills-refresh marker ────────────────────────────────────────
+# Written on every install AND every (Sparkle-driven) update. The CLI's
+# rate-limited skills hint uses live filesystem probing; this marker records
+# what shipped and when. Failure here must never fail the install.
+{
+  printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf 'skills=%s\n' "$(ls "$INSTALL_ROOT/skills" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+} >"$INSTALL_ROOT/.skills-refresh" 2>/dev/null || true
+
 exit 0

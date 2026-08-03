@@ -14,6 +14,7 @@ import { handleInputText, handleSelectOption, handleCheck } from "./content/acti
 import { handleScroll, handleScrollAbsolute, handleScrollTo, handleGetPageDimensions } from "./content/actions/scroll"
 import { handleWait, handleWaitFor, handleWaitStable } from "./content/actions/wait"
 import { handleDrag } from "./content/actions/drag"
+import { handleFileUpload, handleFileUploadChunk } from "./content/actions/file"
 import { handleHover } from "./content/actions/hover"
 import { handleFocus, handleBlur, handleGetFocus } from "./content/actions/focus"
 import { handleExtractText, handleExtractMarkdown, handleExtractHtml } from "./content/data/extract"
@@ -30,7 +31,20 @@ import { handleDomScreenshot } from "./content/dom-screenshot"
 type Action = { type: string; [key: string]: unknown }
 type ActionResult = { success: boolean; error?: string; warning?: string; data?: unknown; changes?: unknown }
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// Idempotency guard. content.js is injected by the manifest at document_idle AND
+// re-injected programmatically (chrome.scripting.executeScript) on retry / eager
+// paths — e.g. `interceptor open` reading a fresh tab before document_idle fires.
+// Both injections share this frame's isolated world, so without a guard the page
+// accrues TWO action listeners and every action runs twice. That double-dispatch
+// was historically masked (isolated-world synthetic clicks rarely drove framework
+// handlers), but once clicks are bridged to the page MAIN world a doubled click
+// toggles pointerdown-driven menus (Radix / Floating UI) right back shut. Register
+// the action listener (and the keepalive) only on the first load in this world.
+const __interceptorContentGlobal = globalThis as unknown as { __interceptorContentLoaded?: boolean }
+const __interceptorContentAlreadyLoaded = __interceptorContentGlobal.__interceptorContentLoaded === true
+__interceptorContentGlobal.__interceptorContentLoaded = true
+
+if (!__interceptorContentAlreadyLoaded) chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "execute_action") {
     handleAction(msg.action)
       .then(sendResponse)
@@ -71,6 +85,8 @@ async function executeAction(action: Action): Promise<ActionResult> {
       case "dblclick":            return handleDblclick(action)
       case "rightclick":          return handleRightclick(action)
       case "drag":                return handleDrag(action)
+      case "file_upload":         return handleFileUpload(action)
+      case "file_upload_chunk":   return handleFileUploadChunk(action)
       case "input_text":          return handleInputText(action)
       case "select_option":       return handleSelectOption(action)
       case "check":               return handleCheck(action)
@@ -216,7 +232,7 @@ async function executeAction(action: Action): Promise<ActionResult> {
 
 // --- SW Keepalive Heartbeat (leader-elected, zero network) ---
 let _swKeepaliveLeader = true
-setInterval(() => {
+if (!__interceptorContentAlreadyLoaded) setInterval(() => {
   if (!_swKeepaliveLeader) return
   try {
     chrome.runtime.sendMessage({ type: "sw_keepalive" })

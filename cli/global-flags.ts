@@ -21,6 +21,18 @@ export function buildFilteredArgs(args: string[]): string[] {
     if (args[ctxIdx + 1] !== undefined) skipIndices.add(ctxIdx + 1)
   }
 
+  const groupIdx = args.indexOf("--group")
+  if (groupIdx !== -1) {
+    skipIndices.add(groupIdx)
+    if (args[groupIdx + 1] !== undefined) skipIndices.add(groupIdx + 1)
+  }
+
+  const groupColorIdx = args.indexOf("--group-color")
+  if (groupColorIdx !== -1) {
+    skipIndices.add(groupColorIdx)
+    if (args[groupColorIdx + 1] !== undefined) skipIndices.add(groupColorIdx + 1)
+  }
+
   return args.filter((arg, index) => {
     if (skipIndices.has(index)) return false
     if (arg === "--json") return index > 1

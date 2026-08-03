@@ -16,12 +16,58 @@ async function injectContentScript(
   }
 }
 
-async function sendToContentScriptOnce(
+type ContentScriptResult = { success: boolean; error?: string; data?: unknown }
+
+const NAVIGATION_CAPABLE_ACTIONS = new Set(["click", "click_at", "dblclick", "find_and_click"])
+
+/**
+ * Safari can unload a content script before delivering its async sendResponse
+ * callback when a click starts a navigation. Chrome closes the message channel
+ * in that case; Safari may leave it pending forever. Treat a loading/url update
+ * on the exact target tab as the acknowledgement for click-like actions only.
+ */
+export async function sendToContentScriptOnce(
   tabId: number,
   action: { type: string; [key: string]: unknown },
   frameId?: number
-): Promise<{ success: boolean; error?: string; data?: unknown }> {
+): Promise<ContentScriptResult> {
+  const watchesNavigation = NAVIGATION_CAPABLE_ACTIONS.has(action.type)
+  let initialUrl: string | undefined
+  if (watchesNavigation) {
+    try { initialUrl = (await chrome.tabs.get(tabId)).url } catch {}
+  }
+
   return new Promise((resolve) => {
+    let settled = false
+    let navigationFailureTimer: ReturnType<typeof setTimeout> | null = null
+    let navigationListener: ((
+      updatedTabId: number,
+      changeInfo: chrome.tabs.OnUpdatedInfo,
+      tab: chrome.tabs.Tab,
+    ) => void) | null = null
+
+    const finish = (result: ContentScriptResult): void => {
+      if (settled) return
+      settled = true
+      if (navigationFailureTimer) clearTimeout(navigationFailureTimer)
+      if (navigationListener) chrome.tabs.onUpdated.removeListener(navigationListener)
+      resolve(result)
+    }
+
+    const navigationResult = (url?: string): ContentScriptResult => ({
+      success: true,
+      data: { navigated: true, url },
+    })
+
+    if (watchesNavigation) {
+      navigationListener = (updatedTabId, changeInfo, tab) => {
+        if (updatedTabId !== tabId) return
+        if (changeInfo.status !== "loading" && typeof changeInfo.url !== "string") return
+        finish(navigationResult(changeInfo.url ?? tab.url))
+      }
+      chrome.tabs.onUpdated.addListener(navigationListener)
+    }
+
     const targetFrame = frameId !== undefined ? frameId : 0
     chrome.tabs.sendMessage(
       tabId,
@@ -29,9 +75,30 @@ async function sendToContentScriptOnce(
       { frameId: targetFrame } as chrome.tabs.MessageSendOptions,
       (response) => {
         if (chrome.runtime.lastError) {
-          resolve({ success: false, error: chrome.runtime.lastError.message })
+          const error = chrome.runtime.lastError.message
+          if (watchesNavigation && shouldRetryContentScript(error)) {
+            // Chromium reports the closing message channel before onUpdated;
+            // Safari can omit the callback and deliver only onUpdated. Keep the
+            // listener alive briefly, then use the exact tab's URL/status as a
+            // fallback instead of replaying a click against the new document.
+            navigationFailureTimer = setTimeout(async () => {
+              try {
+                const tab = await chrome.tabs.get(tabId)
+                if (
+                  tab.status === "loading" ||
+                  (typeof initialUrl === "string" && typeof tab.url === "string" && tab.url !== initialUrl)
+                ) {
+                  finish(navigationResult(tab.url))
+                  return
+                }
+              } catch {}
+              finish({ success: false, error })
+            }, 250)
+          } else {
+            finish({ success: false, error })
+          }
         } else {
-          resolve(response ?? { success: false, error: "no response from content script" })
+          finish(response ?? { success: false, error: "no response from content script" })
         }
       }
     )

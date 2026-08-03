@@ -41,3 +41,40 @@ export function parseContextFlag(args: string[]): string | undefined {
   }
   return args[idx + 1]
 }
+
+// per-agent named tab groups. Labels become part of a tab-strip title.
+export const GROUP_LABEL_RE = /^[A-Za-z0-9_-]{1,32}$/
+
+/** --group <label>, falling back to $INTERCEPTOR_GROUP (flag wins). */
+export function parseGroupFlag(args: string[], env: Record<string, string | undefined> = process.env): string | undefined {
+  const idx = args.indexOf("--group")
+  let label: string | undefined
+  if (idx !== -1) {
+    if (!args[idx + 1] || args[idx + 1].startsWith("--")) {
+      console.error("error: --group requires a label")
+      process.exit(1)
+    }
+    label = args[idx + 1]
+  } else if (env.INTERCEPTOR_GROUP) {
+    label = env.INTERCEPTOR_GROUP
+  }
+  if (label !== undefined && !GROUP_LABEL_RE.test(label)) {
+    console.error(`error: invalid group label '${label}' — must match [A-Za-z0-9_-]{1,32}`)
+    process.exit(1)
+  }
+  return label
+}
+
+const GROUP_COLORS = ["grey", "blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange"]
+
+/** --group-color <color>, validated against the closed Chrome tabGroups enum. */
+export function parseGroupColorFlag(args: string[]): string | undefined {
+  const idx = args.indexOf("--group-color")
+  if (idx === -1) return undefined
+  const color = args[idx + 1]
+  if (!color || !GROUP_COLORS.includes(color)) {
+    console.error(`error: invalid --group-color '${color ?? ""}' (must be one of: ${GROUP_COLORS.join(", ")})`)
+    process.exit(1)
+  }
+  return color
+}

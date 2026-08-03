@@ -10,6 +10,9 @@ enum InputError: Error {
 final class InputDomain: DomainHandler, @unchecked Sendable {
     private let refRegistry: RefRegistry
     private let selector: InputTargetSelector
+    // AX press / value-set / role-probe / center-point reads
+    // route through the transport + codec (removes `posValue as! AXValue`).
+    private let transport: any AXTransport = LiveAXTransport()
 
     init(refRegistry: RefRegistry = .shared) {
         self.refRegistry = refRegistry
@@ -84,7 +87,7 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         // AX press doesn't model double-click or right-click semantics;
         // those keep going through synthesized CGEvents.
         if case .axPress(let element) = target, !double, !right {
-            let err = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            let err = transport.performAction(element, kAXPressAction as String)
             if err == .success {
                 completion(WireFormat.success("ax-pressed ref"))
                 return
@@ -168,8 +171,8 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         // Apple documents this as the supported way to programmatically
         // populate text fields.
         if let ref = action["ref"] as? String, let element = refRegistry.resolve(ref) {
-            if Self.isTextRole(element) {
-                let err = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
+            if isTextRole(element) {
+                let err = transport.setAttributeValue(element, kAXValueAttribute as String, text as CFString)
                 if err == .success {
                     completion(WireFormat.success("ax-set value (\(text.count) chars)"))
                     return
@@ -181,7 +184,7 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             }
             // Focus the element first so synthesized keys land in it,
             // even though the app stays in the background.
-            AXUIElementPerformAction(element, kAXPressAction as CFString)
+            _ = transport.performAction(element, kAXPressAction as String)
             usleep(100_000)
         }
 
@@ -227,10 +230,9 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     // Roles that we accept programmatic value-set on. These are the
     // standard text-bearing AX roles per Apple's accessibility
     // documentation.
-    private static func isTextRole(_ element: AXUIElement) -> Bool {
-        var role: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              let r = role as? String else {
+    private func isTextRole(_ element: AXUIElement) -> Bool {
+        let (result, role) = transport.copyAttributeValue(element, kAXRoleAttribute as String)
+        guard result == .success, let r = AXValueCodec.displayString(role) else {
             return false
         }
         switch r {
@@ -528,18 +530,13 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     }
 
     private func centerPoint(of element: AXUIElement) -> CGPoint? {
-        var posValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posValue) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success else {
+        let (posResult, posValue) = transport.copyAttributeValue(element, kAXPositionAttribute as String)
+        let (sizeResult, sizeValue) = transport.copyAttributeValue(element, kAXSizeAttribute as String)
+        guard posResult == .success, sizeResult == .success,
+              let position = AXValueCodec.point(from: posValue),
+              let size = AXValueCodec.size(from: sizeValue) else {
             return nil
         }
-
-        var position = CGPoint.zero
-        var size = CGSize.zero
-        AXValueGetValue(posValue as! AXValue, .cgPoint, &position)
-        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
-
         return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
     }
 }

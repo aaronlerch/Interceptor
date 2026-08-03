@@ -17,20 +17,30 @@ import { handleSearchActions } from "./capabilities/search"
 import { handleBrowsingDataActions } from "./capabilities/browsing-data"
 import { handleHeaderActions } from "./capabilities/headers"
 import { handleEvaluateActions } from "./capabilities/evaluate"
+import { handleBinarySinkActions } from "./capabilities/binary-sink"
 import { handleStyleActions } from "./capabilities/style"
 import { handleFrameActions } from "./capabilities/frames"
 import { handleMetaActions } from "./capabilities/meta"
 import { handlePassiveNetActions, restorePageCommCaptureConfig } from "./capabilities/passive-net"
 import { handleCdpNetworkActions } from "./capabilities/cdp-network-actions"
 import { handleMonitorActions, registerMonitorListeners } from "./capabilities/monitor"
+import { handlePowerIdleActions } from "./keepawake"
 
-registerMonitorListeners()
-restorePageCommCaptureConfig()
+// Keep this module import-safe. `transport.ts` imports the message dispatcher,
+// which imports this router, so any top-level browser API call here runs before
+// an entrypoint can select its browser-specific transport and capabilities.
+// Safari treats an exception during that phase as a background-content load
+// failure and never reaches the daemon. Each entrypoint calls this explicitly
+// after it has configured its own runtime.
+export function initializeActionRouter(): void {
+  registerMonitorListeners()
+  restorePageCommCaptureConfig()
+}
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
 const OS_INPUT_ACTIONS = new Set(["os_click", "os_key", "os_type", "os_move"])
-const SCREENSHOT_ACTIONS = new Set(["screenshot", "screenshot_background", "page_capture"])
+const SCREENSHOT_ACTIONS = new Set(["screenshot", "screenshot_background", "page_capture", "ocr"])
 const CAPTURE_STREAM_ACTIONS = new Set(["capture_start", "capture_frame", "capture_stop", "canvas_diff"])
 const CANVAS_ACTIONS = new Set([
   "canvas_list",
@@ -45,7 +55,8 @@ const CANVAS_ACTIONS = new Set([
 const TAB_ACTIONS = new Set([
   "tab_create", "tab_close", "tab_switch", "tab_list", "tab_duplicate",
   "tab_reload", "tab_mute", "tab_pin", "tab_zoom_get", "tab_zoom_set",
-  "tab_group", "tab_ungroup", "tab_move", "tab_discard"
+  "tab_group", "tab_ungroup", "tab_move", "tab_discard",
+  "group_list", "group_close"
 ])
 const WINDOW_ACTIONS = new Set([
   "window_create", "window_close", "window_focus", "window_resize", "window_list", "window_get_all"
@@ -66,9 +77,10 @@ const NOTIFICATION_ACTIONS = new Set(["notification_create", "notification_clear
 const BROWSING_DATA_ACTIONS = new Set(["browsing_data_remove"])
 const HEADER_ACTIONS = new Set(["headers_modify"])
 const EVALUATE_ACTIONS = new Set(["evaluate"])
+const BINARY_SINK_ACTIONS = new Set(["binary_sink_save"])
 const STYLE_ACTIONS = new Set(["style_inject", "style_remove"])
 const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"])
-const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree"])
+const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group"])
 const PASSIVE_NET_ACTIONS = new Set([
   "net_log", "net_clear", "net_headers", "sse_log", "sse_streams", "sse_chunk",
   "set_net_overrides", "clear_net_overrides",
@@ -76,6 +88,7 @@ const PASSIVE_NET_ACTIONS = new Set([
 ])
 const CDP_NETWORK_ACTIONS = new Set(["network_intercept", "network_log", "network_override"])
 const MONITOR_ACTIONS = new Set(["monitor_start", "monitor_stop", "monitor_status", "monitor_pause", "monitor_resume"])
+const POWER_IDLE_ACTIONS = new Set(["keepawake", "idle_state"])
 const SCENE_ACTIONS = new Set([
   "scene_list", "scene_click", "scene_dblclick", "scene_select", "scene_hit",
   "scene_selected", "scene_text", "scene_insert", "scene_cursor_to", "scene_cursor",
@@ -104,12 +117,14 @@ export async function routeAction(
   if (BROWSING_DATA_ACTIONS.has(action.type)) return handleBrowsingDataActions(action, tabId)
   if (HEADER_ACTIONS.has(action.type)) return handleHeaderActions(action, tabId)
   if (EVALUATE_ACTIONS.has(action.type)) return handleEvaluateActions(action, tabId)
+  if (BINARY_SINK_ACTIONS.has(action.type)) return handleBinarySinkActions(action, tabId)
   if (STYLE_ACTIONS.has(action.type)) return handleStyleActions(action, tabId)
   if (FRAME_ACTIONS.has(action.type)) return handleFrameActions(action, tabId)
   if (META_ACTIONS.has(action.type)) return handleMetaActions(action, tabId)
   if (PASSIVE_NET_ACTIONS.has(action.type)) return handlePassiveNetActions(action, tabId)
   if (CDP_NETWORK_ACTIONS.has(action.type)) return handleCdpNetworkActions(action, tabId)
   if (MONITOR_ACTIONS.has(action.type)) return handleMonitorActions(action, tabId)
+  if (POWER_IDLE_ACTIONS.has(action.type)) return handlePowerIdleActions(action)
 
   // Default: forward to content script
   const contentResult = await sendToContentScript(

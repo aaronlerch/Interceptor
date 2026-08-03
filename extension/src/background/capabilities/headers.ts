@@ -27,7 +27,16 @@ export async function handleHeaderActions(
         value: r.value
       }]
     },
-    condition: { urlFilter: "*" }
+    // resourceTypes must be explicit: when omitted, DNR excludes main_frame, so a
+    // header rule silently never applies to top-level navigations (Chrome + Safari
+    // both). List Safari's full supported set (also valid in Chrome).
+    condition: {
+      urlFilter: "*",
+      resourceTypes: [
+        "main_frame", "sub_frame", "stylesheet", "script", "image",
+        "font", "xmlhttprequest", "ping", "media", "websocket", "other"
+      ] as chrome.declarativeNetRequest.ResourceType[]
+    }
   }))
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: dnrRules.map(r => r.id),

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.interceptor.ios-tunnel — the ONE privileged piece (legacy path).
+  A system LaunchDaemon (root) that owns the utun / RemoteXPC tunnel so the
+  unprivileged user daemon needs no per-use sudo. Installed + bootstrapped by
+  scripts/release/postinstall-full (already runs as root).
+
+  It runs the SAME installed daemon binary with `--ios-tunnel-helper` (no second
+  compiled binary). Scope is hard-limited: it creates a tunnel only on request
+  for an already-trusted, connected device and exposes ONLY the RSD multiplex
+  over /var/run/interceptor-ios-tunnel.sock — no general command channel.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.interceptor.ios-tunnel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/Interceptor/interceptor-daemon</string>
+        <string>--ios-tunnel-helper</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Adaptive</string>
+    <key>StandardOutPath</key>
+    <string>/var/log/interceptor-ios-tunnel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/interceptor-ios-tunnel.log</string>
+</dict>
+</plist>

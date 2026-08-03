@@ -18,6 +18,7 @@ import { resolve } from "node:path"
 
 import { rewriteCspEvalError } from "../cli/format"
 import { helpForCommand } from "../cli/help"
+import { parseMacosCommand } from "../cli/commands/macos"
 import { formatStatus, type StatusSnapshot } from "../cli/lib/status-renderer"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
@@ -83,6 +84,21 @@ describe("helpForCommand (#51)", () => {
     expect(help).toContain("--trusted")
   })
 
+  test("returns the curated full-contract block for `save`", () => {
+    const help = helpForCommand("save")
+    expect(help).toBeDefined()
+    expect(help).toContain("interceptor save")
+    // flags an agent needs to form a correct invocation
+    expect(help).toContain("--out")
+    expect(help).toContain("--isolated")
+    expect(help).toContain("--chunk-size")
+    expect(help).toContain("--json")
+    // accepted inputs, response shape, and a runnable example
+    expect(help).toContain("ArrayBuffer")
+    expect(help).toContain("sha256")
+    expect(help).toContain('interceptor save --json')
+  })
+
   test("returns null for an unknown command", () => {
     expect(helpForCommand("not-a-real-command-xyz")).toBeNull()
   })
@@ -103,11 +119,80 @@ describe("helpForCommand (#51)", () => {
     expect(r.stdout).toContain("interceptor act <ref>")
   })
 
-  test("CLI: bare `--help` falls back to full HELP", () => {
+  test("CLI: bare `--help` prints the tier-0 capability map", () => {
     const r = runCli(["--help"])
     expect(r.status).toBe(0)
-    expect(r.stdout).toContain("interceptor — browser control CLI")
-    expect(r.stdout).toContain("Compound (agent-optimized)")
+    expect(r.stdout).toContain("drive a real browser, macOS, and iPhone")
+    expect(r.stdout).toContain("interceptor help --all")
+    // A capability MAP: every surface's verbs are named so a skill-less agent
+    // knows the full out-of-box surface — but flag-level detail stays deferred.
+    expect(r.stdout).toContain("BROWSER")
+    expect(r.stdout).toContain("open <url>")
+    expect(r.stdout).toContain("net")
+    expect(r.stdout).toContain("interceptor manifest")
+    // still far smaller than the exhaustive per-flag dump behind --all
+    const all = runCli(["help", "--all"])
+    expect(r.stdout.length).toBeLessThan(all.stdout.length)
+    expect(r.stdout).not.toContain("Compound (agent-optimized)")
+  })
+
+  test("CLI: nested macos cdp/app help short-circuits without spawning daemon", () => {
+    const cdp = runCli(["macos", "cdp", "--help"])
+    expect(cdp.status).toBe(0)
+    expect(cdp.stdout).toContain("interceptor macos cdp <subcommand>")
+    expect(cdp.stderr).not.toContain("daemon not running")
+
+    const app = runCli(["macos", "cdp", "app", "--help"])
+    expect(app.status).toBe(0)
+    expect(app.stdout).toContain("interceptor macos cdp app <subcommand>")
+    expect(app.stderr).not.toContain("daemon not running")
+  })
+
+  test("CLI: nested macos runtime help short-circuits without spawning daemon", () => {
+    const runtime = runCli(["macos", "runtime", "--help"])
+    expect(runtime.status).toBe(0)
+    expect(runtime.stdout).toContain("interceptor macos runtime <subcommand>")
+    expect(runtime.stdout).toContain("runtime:<app>")
+    expect(runtime.stderr).not.toContain("daemon not running")
+  })
+
+  test("CLI: removed top-level cdp/app commands are rejected before daemon spawn", () => {
+    const cdp = runCli(["cdp", "status"])
+    expect(cdp.status).toBe(1)
+    expect(cdp.stderr).toContain("unknown command 'cdp'")
+    expect(cdp.stderr).not.toContain("daemon not running")
+
+    const app = runCli(["app", "status"])
+    expect(app.status).toBe(1)
+    expect(app.stderr).toContain("unknown command 'app'")
+    expect(app.stderr).not.toContain("daemon not running")
+  })
+
+  test("CLI: removed top-level native aliases are rejected before daemon spawn", () => {
+    const native = runCli(["native", "status"])
+    expect(native.status).toBe(1)
+    expect(native.stderr).toContain("unknown command 'native'")
+    expect(native.stderr).not.toContain("daemon not running")
+
+    const mutate = runCli(["mutate", "--ref", "n1", "--set-text", "Hi"])
+    expect(mutate.status).toBe(1)
+    expect(mutate.stderr).toContain("unknown command 'mutate'")
+    expect(mutate.stderr).not.toContain("daemon not running")
+
+    const intercept = runCli(["intercept", "--class", "X", "--selector", "y"])
+    expect(intercept.status).toBe(1)
+    expect(intercept.stderr).toContain("unknown command 'intercept'")
+    expect(intercept.stderr).not.toContain("daemon not running")
+  })
+
+  test("CLI: macos cdp app namespace does not shadow macos app lifecycle", () => {
+    expect(parseMacosCommand(["macos", "app", "activate", "Finder"])).toEqual({
+      type: "macos_app",
+      subcommand: "activate",
+      app: "Finder",
+      pid: undefined,
+      bundleId: undefined,
+    })
   })
 })
 

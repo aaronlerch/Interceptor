@@ -30,15 +30,16 @@
   <img src="https://img.shields.io/github/v/release/Hacker-Valley-Media/Interceptor?label=release" alt="Latest release">
   <img src="https://img.shields.io/github/license/Hacker-Valley-Media/Interceptor" alt="License">
   <img src="https://img.shields.io/badge/macOS-supported-black?logo=apple" alt="macOS supported">
-  <img src="https://img.shields.io/badge/Chrome%20%26%20Brave-supported-4285F4?logo=googlechrome" alt="Chrome and Brave supported">
+  <img src="https://img.shields.io/badge/Chrome%2C%20Brave%20%26%20Safari-supported-4285F4?logo=googlechrome" alt="Chrome, Brave, and Safari supported">
 </p>
 
 ![Interceptor running cinematic overlays on top of a live website](docs/assets/interceptor-cook-mode.jpg)
 
 Interceptor gives agents human-style control of the tools you already use — **computer-use** for the native macOS apps on your desktop, **browser-use** for the web apps in your browser. Work happens in both places, so Interceptor meets you in the middle. One CLI, two product surfaces:
 
-- **Interceptor Browser** — runs as a Chrome extension inside your actual browser. Your cookies, sessions, logins, and tabs stay intact. Read pages, click, type, navigate, observe network traffic, automate rich editors, record-and-replay user flows.
+- **Interceptor Browser** — runs as a WebExtension inside your actual Chrome, Brave, or Safari session. Your cookies, sessions, logins, and tabs stay intact. Read pages, click, type, navigate, observe network traffic, automate rich editors, record-and-replay user flows.
 - **Interceptor macOS** — runs as a Swift bridge daemon. Drives native macOS apps the same way: structured accessibility trees, OS-level trusted input, on-device vision/speech/NLP, system-wide event monitoring.
+- **Interceptor iOS** — drives any installed app on an owned, unlocked, Developer-Mode iPhone via an on-device XCUITest runner that dials into the daemon over WiFi: ref-tagged element trees, deterministic coordinate taps, reliable text entry, screenshots, and app lifecycle. Plus runner-free **Instruments/telemetry** (`ios proc / top / spawn / kill / location / gpu / shot`), an **on-device JS brain** (`ios eval` — a whole observe→decide→act loop runs on the phone in one round-trip), **WebKit inspection** (`ios web`), and classic-Lockdown **device services** (`ios logs / diag / fs / crash / profiles`). Addressed as `--on <phone>` / `ios:<udid>`. See `interceptor ios help`.
 
 The agent calls `interceptor` CLI commands, reads the output, and decides what to do next. No MCP required. No API keys required.
 
@@ -72,12 +73,13 @@ Click the preview to watch the current walkthrough. It shows the CLI flow and li
 
 Download a signed installer and double-click. macOS does the rest.
 
-Two installers ship per release. Pick the one that matches what you actually need:
+Two core installers ship per release, plus an optional Safari add-on. Pick the core installer that matches what you need, then add Safari if desired:
 
 | Installer | What it installs | macOS TCC consents | When to pick it |
 |---|---|---|---|
 | **`Interceptor-Browser-<version>.pkg`** *(recommended default)* | CLI + daemon + extension | **None.** No Screen Recording / Accessibility / Apple Events prompts. | You drive web pages. Web scraping, CI flow tests, browser automation. macOS 11+. |
 | **`Interceptor-Full-<version>.pkg`** | All of the above **plus** `interceptor-bridge.app` + LaunchAgent | Screen Recording, Accessibility, Apple Events (per target app, on first dispatch) | You also drive native macOS apps (Finder, Slack, Notes), need on-screen text capture, dispatch keystrokes outside the browser. macOS 14+. |
+| **`Interceptor-Safari-<version>.pkg`** *(add-on)* | Safari containing app + Safari Web Extension | Safari extension/site-access consent; requires either core pkg for the CLI + daemon | You want the browser surface in Safari. macOS 14+. |
 
 Both download from the same [Releases](https://github.com/Hacker-Valley-Media/Interceptor/releases) page. Start with **Browser** unless you know you need native macOS commands — you can always upgrade to Full later via `interceptor upgrade --full`.
 
@@ -86,7 +88,8 @@ Both download from the same [Releases](https://github.com/Hacker-Valley-Media/In
 1. Download the matching `.pkg` from Releases.
 2. Double-click it. Walk through the installer (admin password required once).
 3. *(Full pkg only)* Open **System Settings → Privacy & Security**. The first time you run `interceptor macos *`, macOS will prompt for **Accessibility**, **Screen Recording**, and **Apple Events** access for `interceptor-bridge` — allow each. The Browser pkg never triggers these prompts.
-4. Open a terminal:
+4. *(Safari add-on only)* Install `Interceptor-Safari-<version>.pkg`, open **InterceptorSafari** once, then enable **Interceptor** in **Safari → Settings → Extensions** and grant website access.
+5. Open a terminal:
 
 ```bash
 interceptor open "https://example.com"        # browser surface (works in both pkgs)
@@ -110,16 +113,51 @@ interceptor macos tree                         # macOS surface (Full pkg only, a
 | `interceptor-bridge.app` | `/Applications/interceptor-bridge.app` |
 | LaunchAgent (auto-start at login) | `/Library/LaunchAgents/com.interceptor.bridge.plist` |
 
-**Browser extension load** is the one manual step neither installer can do for you, because Chrome and Brave do not allow programmatic extension installation outside of the Web Store. After install:
+**Chrome/Brave extension load** is the one manual step the core installers cannot do for you, because those browsers do not allow programmatic extension installation outside of the Web Store. After install:
 
 - **Brave:** open `brave://extensions/`, enable Developer Mode, click **Load unpacked**, select `/Library/Application Support/Interceptor/extension/`.
 - **Chrome:** open `chrome://extensions/`, enable Developer Mode, click **Load unpacked**, select `/Library/Application Support/Interceptor/extension/`.
+
+**Safari extension load** uses its signed containing app:
+
+1. Install `Interceptor-Safari-<version>.pkg` after either core pkg.
+2. Open `/Applications/InterceptorSafari.app` once (it need not stay open).
+3. In **Safari → Settings → Extensions**, enable **Interceptor** and allow access to the sites you want to drive. This is a protected, user-present action; Safari may require Touch ID or the account password and it cannot be completed by the installer or CLI.
+4. Verify that the fixed Safari context is connected:
+
+```bash
+interceptor contexts                 # includes: safari
+interceptor --context safari open "https://example.com"
+```
+
+If `safari` is absent, confirm the extension is enabled before reinstalling anything. Until the user approves that switch, Safari does not run the background worker and no context can connect. A production package build rebuilds the extension bytes from source, runs `scripts/verify-safari-extension.swift`, notarizes and staples the app, and requires Gatekeeper to accept the exact app bytes placed in the installer. Its postinstall also moves identifier-verified legacy `.InterceptorSafari-*.noindex` backups out of `/Applications` to recoverable storage so LaunchServices cannot expose duplicate extensions. `INTERCEPTOR_SKIP_NOTARIZE=1` produces an explicitly named `*-UNNOTARIZED.pkg` for developer-mode testing; do not install it as a production replacement.
+
+Safari's background worker reaches the daemon through the signed native appex: the worker exchanges bounded long-poll messages with `runtime.sendNativeMessage`, and the appex owns the loopback WebSocket to `127.0.0.1:19222`. This is intentional—direct WebSockets from Safari extension JavaScript did not establish a socket in public WebKit-host probes.
 
 Verify after install with `interceptor status` — the `mode:` line reports `browser-only` or `full` depending on which pkg you installed.
 
 To uninstall later: `sudo bash "/Library/Application Support/Interceptor/uninstall.sh"`. To downgrade Full → Browser: `sudo bash "/Library/Application Support/Interceptor/uninstall.sh" --bridge-only`.
 
 Prefer to build from source instead of using the installer? See [Developer Setup](#developer-setup-build-from-source) below.
+
+## MCP: drive Interceptor from any AI client
+
+Interceptor is also an MCP server. Any MCP-native client — Claude Code, Codex, Gemini CLI, Cursor, Claude Desktop — can drive every surface as a small set of typed, safety-gated tools. Because Interceptor is a local binary already on your `PATH`, there is no `npx`, no remote URL, and no auth step. One command registers it everywhere:
+
+```bash
+interceptor mcp install        # auto-configures every detected AI client
+interceptor mcp status         # show where it's registered
+```
+
+Restart the client and you're live. Under the hood the client runs `interceptor mcp serve` (stdio), exposing `interceptor_browser`, `interceptor_macos`, `interceptor_ios`, `interceptor_read`, `interceptor_local`, and `interceptor_raw`, plus `interceptor://…` discovery resources for the full verb reference.
+
+**Safety is operator-controlled.** Read and UI-mutation verbs run by default; irreversible or code-executing verbs (delete, quit, `eval`, `script`, `runtime`, `share`) are refused unless you opt in at launch:
+
+```bash
+interceptor mcp install --allow destructive,arbitrary-exec
+```
+
+A connected model can never lift that restriction, and captured page/file/network content is fenced as untrusted data. Full details in [`docs/mcp.md`](docs/mcp.md).
 
 ## Quick Start
 
@@ -130,6 +168,7 @@ Examples below assume `interceptor` is on your `PATH`. From a repo install, use 
 interceptor open "https://example.com"        # Open, wait, return tree + text (1 command)
 interceptor act e1                             # Click element, return updated tree + diff
 interceptor inspect                            # Tree + text + network log + headers
+interceptor --context safari read              # Target Safari when several browsers are connected
 
 # macOS surface (bridge installed)
 interceptor macos open "Finder"                # Activate + tree + windows
@@ -157,10 +196,12 @@ Interceptor ships one CLI binary with two product surfaces. Pick by what you're 
 | Real-time speech, sound classification, OCR, on-device NLP/LLM | macOS | `interceptor macos listen / sounds / vision / nlp / ai` |
 | Record & replay a human's native-app flow | macOS | `interceptor macos monitor *` |
 | Drive Apple Events to background apps without raising them | macOS | `interceptor macos intent dispatch` |
+| Drive any app on an owned, unlocked iPhone (tree/tap/type/screenshot/app lifecycle) | iOS | `interceptor ios tree / find / click / type / screenshot / app *` |
+| Runner-free iPhone process/telemetry, launch/kill, GPS simulation; on-device JS brain; WebKit inspection | iOS | `interceptor ios proc / top / spawn / kill / location / eval`, `ios web *` |
 
-If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS.
+If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS. If the task is an app on your **iPhone**, use iOS.
 
-The deep dives live in the per-surface sections below. Skill packages mirror this split: agent operators load `.agents/skills/interceptor-browser/` for web work and `.agents/skills/interceptor-macos/` for native work.
+The deep dives live in the per-surface sections below. Skill packages mirror this split: agent operators load `.agents/skills/interceptor-browser/` for web work, `.agents/skills/interceptor-macos/` for native work, and `.agents/skills/interceptor-ios/` for iPhone work.
 
 ---
 
@@ -168,7 +209,9 @@ The deep dives live in the per-surface sections below. Skill packages mirror thi
 
 # Surface 1: Interceptor Browser
 
-`interceptor` (no prefix) drives a real Chrome / Brave session. Pages, network, scene graph, monitor, screenshots — every browser command lives at the top of the CLI namespace.
+`interceptor` (no prefix) drives a real Chrome, Brave, or Safari session. Pages, network, scene graph, monitor, screenshots — every browser command lives at the top of the CLI namespace. Safari registers the stable context id `safari`; use `--context safari` whenever more than one browser is connected.
+
+Safari reuses the portable DOM/content engine and the same command envelope. APIs Safari does not expose (`debugger`, `tabGroups`, `offscreen`, `tabCapture`, `power`, and related Chromium-only capabilities) degrade explicitly or route through `interceptor macos`; they are never allowed to abort the Safari background worker.
 
 ## Why Browser
 
@@ -220,6 +263,7 @@ bash scripts/build.sh
 bash scripts/install.sh --browser-only --brave --profile Default   # browser only, no TCC
 bash scripts/install.sh --full --brave --profile Default           # browser + macOS bridge
 bash scripts/install.sh --brave --profile Default                  # interactive prompt
+bash scripts/install.sh --chrome-beta --browser-only               # a Chrome channel (also --chrome-canary/--chrome-dev/--chrome-for-testing)
 bash scripts/install.sh --full --dry-run                           # print steps without running
 ```
 
@@ -248,14 +292,18 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/dist/interceptor" ~/.local/bin/interceptor
 ```
 
-#### Chrome Development Path
+#### Chrome channels & the Development Path
 
-Google Chrome ignores `--load-extension` in branded desktop builds. `scripts/install.sh --chrome` still writes the native messaging manifest, but load the extension manually:
+`scripts/install.sh` can target any Chrome channel: `--chrome` (stable), `--chrome-beta`, `--chrome-canary`, `--chrome-dev`, and `--chrome-for-testing` (macOS; Linux deferred, same as the Edge/Vivaldi gap).
+
+All **branded** Google Chrome builds — stable, Beta, Canary, and Dev — ignore `--load-extension` in desktop builds (Chrome 137+ removed the switch for branded builds). For those, `scripts/install.sh` still writes the native messaging manifest, but load the extension manually:
 
 1. Open Chrome and navigate to `chrome://extensions`
 2. Enable **Developer mode**
 3. Click **Load unpacked**
 4. Select `extension/dist/`
+
+**Chrome for Testing** is Google's unbranded automation build and *does* respect `--load-extension`, so `--chrome-for-testing` loads the extension automatically. Two caveats: its native-messaging host directory is `~/Library/Application Support/Google/ChromeForTesting/` as of Chrome 146 (the installer writes there), and it is typically installed as a standalone binary rather than into `/Applications`, so auto-detection may not find it — pass `--chrome-for-testing` explicitly.
 
 #### Uninstall
 
@@ -288,6 +336,7 @@ bash scripts/uninstall.sh --bridge-only     # Remove only the macOS bridge (down
 |---|---|---|
 | `interceptor open <url>` returns `error: timeout: no response for 'tab_create' after 15s` | Browser extension is not loaded — most often because **Developer mode is off** in the target profile. Chromium silently drops `--load-extension` when Dev mode is off. | Open `brave://extensions/` or `chrome://extensions/`, toggle Developer mode ON. Quit the browser fully. Re-run `bash scripts/install.sh` (it will preflight Dev mode and re-launch). |
 | `interceptor status --verbose` says `extension: not reachable` | Same as above, or extension is registered but the Interceptor extension was disabled in the browser. | Open the extensions page, confirm Interceptor (ID `hkjbaciefhhgekldhncknbjkofbpenng`) is present and enabled. If missing, click **Load unpacked** and select `extension/dist/`. |
+| Chrome's extension error page shows `A preload for ... is found, but is not used because the request credentials mode does not match` attributed to `inject-net.js` | A page-level Chromium preload warning was attributed to Interceptor because the passive network shim calls through to the page's original `fetch()` there. The warning is not the same as an Interceptor connection failure. | Treat it as a site warning unless commands fail. If Interceptor commands fail, check the `extension: not reachable` row above. |
 | `chrome://extensions/` reports the extension as version `0.10.0` while `interceptor --version` reports a higher version | Extension manifest drift fixed in this release — rebuild from current source: `bash scripts/build.sh` then re-run `scripts/install.sh`. | Restart the browser after re-loading the extension so Chromium picks up the bumped manifest. |
 
 In browser-only mode, running an `interceptor macos *` command returns a structured "requires full computer-use install" error within 1 second instead of timing out at 15 seconds.
@@ -308,11 +357,11 @@ The legacy individual commands (`interceptor tab new`, `interceptor tree`, `inte
 
 **Element Refs** — `interceptor tree` returns elements with refs like `e1`, `e5`, `e23`. Use these to click, type, hover. Refs survive between commands until the DOM changes.
 
-**Interceptor Group** — Every `interceptor tab new` adds tabs to a cyan "interceptor" group. Commands only work on tabs in this group. Your personal tabs are never touched. Use `--any-tab` to override.
+**Interceptor Group** — Every `interceptor tab new` adds tabs to a cyan "interceptor" group. Commands only work on tabs in this group. Your personal tabs are never touched. Use `--any-tab` to override. `tab close <id>` and `tab switch <id>` act on exactly the id you pass — the group check validates that same tab, and an explicit id takes precedence over `--tab`. Ids must be numeric; a malformed id is a CLI error rather than a silent fallback to the active tab.
 
 **Focus Model (Background-First Contract)** — Interceptor never steals focus from the tab you're working in. `interceptor open <url>` and `interceptor tab new <url>` create their tabs in the **background** by default — the tab you had active stays active. Only four browser verbs intentionally move focus: `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>`. The reuse path preserves the reused tab's existing focus state; add `--activate` to bring it forward. All other operations (`click`, `type`, `read`, `screenshot`, `net`, `scene`, `monitor`, etc.) work against the target tab without touching whichever tab you're looking at. This mirrors the macOS surface's same background-first contract — see `AGENTS.md` "Background First (Browser + macOS)" for the full inventory.
 
-**Named Contexts** — When two browser profiles (or Chrome + Brave) both connect to the same daemon, the daemon tracks each extension as a separate named context. Each profile's extension auto-generates a stable UUID on first run (stored in `chrome.storage.local`). Run `interceptor contexts` to list connected IDs, then pass `--context <id>` to route a command to a specific profile. Without `--context`, a command succeeds only when exactly one context is connected — the daemon errors (fail-fast) when zero or multiple contexts are present. Primary use case: cross-account security testing where you need Account A and Account B active simultaneously.
+**Named Contexts** — When two browser profiles (or Chrome + Brave) both connect to the same daemon, the daemon tracks each extension as a separate named context. Each profile's extension auto-generates a stable UUID on first run (stored in `chrome.storage.local`). Run `interceptor contexts` to list connected IDs, then pass `--context <id>` to route a command to a specific profile. Without `--context`, a command succeeds only when exactly one context is connected — the daemon errors (fail-fast) when zero or multiple contexts are present. Primary use case: cross-account security testing where you need Account A and Account B active simultaneously. If two profiles are configured with the same context ID, the second profile is rejected and the extension shows a red `!` badge; open that profile's Interceptor popup, choose a unique Context ID, and it will re-register without needing an extension reload.
 
 **Passive Network** — `fetch()` and `XMLHttpRequest` traffic on every page is captured automatically. SSE streams are exposed with `interceptor sse log`. WebSocket, Beacon, and BroadcastChannel activity is captured as page communication with `interceptor net page-comm log`; use `interceptor net monitor on --reload` when you need sockets opened during page startup. No debugger, no infobanner.
 
@@ -389,7 +438,11 @@ interceptor focus e5                         # Focus element
 interceptor drag e5 --from 0,0 --to 100,50  # Drag gesture
 interceptor dblclick e5                      # Double-click
 interceptor rightclick e5                    # Right-click (context menu)
+interceptor upload e5 ./resume.pdf           # Attach a local file to an <input type=file> or dropzone (no OS dialog, no CDP)
+interceptor upload e5 ./clip.mp4 --dropzone  # Force the drag-and-drop path (skip input detection)
+interceptor upload e5 ./photo.png --picker   # Stage for a File System Access picker, then click the trigger
 ```
+`upload` handles `<input type=file>`, drag-and-drop dropzones, and File System Access pickers. Files of any size work — large files are split into frames and reassembled automatically. The result reports the `method` used and a `verified` flag. `read` marks an uploadable element with an `upload=` hint. If a site creates its file input only on click, `interceptor click` the upload button first, then `upload`.
 
 ### Navigate
 ```bash
@@ -406,11 +459,17 @@ interceptor wait-stable                      # Wait for DOM to stop changing
 ```bash
 interceptor tabs                             # List all tabs (* = active)
 interceptor tab new "https://example.com"    # Open new tab
-interceptor tab switch 12345                 # Switch to tab by ID
-interceptor tab close                        # Close current tab
-interceptor tab close 12345                  # Close specific tab
+interceptor tab switch 12345                 # Switch to tab by ID (acts on that exact id)
+interceptor tab close                        # Close the auto-target tab
+interceptor tab close 12345                  # Close specific tab (acts on that exact id)
 interceptor window new "https://example.com" # New window
 interceptor window list                      # List all windows
+interceptor window focus 123                 # Focus a window (explicit focus move)
+interceptor window resize 123 1200 800       # Resize by ID
+interceptor window resize 123 --left 0 --top 0 --width 960 --height 1080
+                                             # Move + resize by ID
+interceptor window resize --state maximized  # State change for current window; do not combine
+                                             # maximized/fullscreen/minimized with geometry
 ```
 
 ### Network — Passive Capture (always on)
@@ -545,10 +604,13 @@ interceptor screenshot --region X,Y,W,H      # Render full + crop to region in c
 interceptor screenshot --scale 2             # Override pixel ratio
 interceptor screenshot --pixel               # Pixel-true compositor capture (legacy captureVisibleTab)
 interceptor screenshot --pixel --full        # Pixel-true full-page (scroll + in-SW stitch)
+interceptor screenshot --no-fallback         # Forbid the DOM-render→pixel auto-fallback (see below)
 interceptor screenshot --format webp         # png (default), jpeg, or webp
 interceptor screenshot --quality 80          # Encode quality 0-100 (defaults: png 92, jpeg 92, webp 85)
 interceptor screenshot --target-max-long-edge 1568   # Auto-resize at capture (clamps long edge)
 ```
+
+When the DOM renderer fails outright on a heavy page (the serialized SVG won't decode), a default whole-page `screenshot` automatically retries via the pixel path so the command still produces an image. The fallback preserves the DOM path's PNG default (no silent JPEG downgrade), only applies to whole-page captures (element/ref/region requests fail honestly instead of cropping wrong), and reports itself in a `fallback` note — including that the pixel path transiently borrowed tab focus and scrolled the page (both restored). `--no-fallback` forbids the retry entirely.
 
 `screenshot` invocations are auto-routed through the WebSocket transport because base64 dataUrl responses larger than ~50KB are unreliable over the native-messaging port on Brave/Chromium. Override with `--no-ws` if needed.
 
@@ -585,8 +647,8 @@ interceptor capabilities                     # Check available input layers
 | Flag | Effect |
 |------|--------|
 | `--json` | JSON output instead of plain text |
-| `--tab <id>` | Target specific tab by ID |
-| `--any-tab` | Operate outside the interceptor group |
+| `--tab <id>` | Target specific tab by ID. When an action names its own tab (`tab close <id>`, `tab switch <id>`), the explicit id wins over `--tab`. |
+| `--any-tab` | Operate outside the interceptor group (also required to `tab close <id>` / `tab switch <id>` an unmanaged tab) |
 | `--context <id>` | Route command to a specific browser context (profile). See `interceptor contexts`. Omitting this flag succeeds only when exactly one context is connected; the daemon errors when zero or multiple contexts are present. |
 | `--os` | FALLBACK: use OS-level CGEvent (macOS) when synthetic input is observed to fail. Default to synthetic — the pre-load `userActivation` override + `__interceptor_trust` event marker satisfy most `isTrusted` checks. |
 | `--frame <id>` | Target specific iframe |
@@ -824,12 +886,17 @@ The Swift bridge exposes 28 domains. The five **daily-driver domains** are surfa
 
 Refs (`e1`, `e2`, ...) work the same as browser refs. AXObserver auto-invalidates when the tree changes.
 
+**Bounded by construction.** `tree` and `find` walk under a per-command budget (node cap + wall-clock deadline). A large or slow app returns a **partial result** ending in a `… (stopped: <reason>)` marker rather than hanging — widen with `--max-nodes` / `--max-ms`, or scope with `--app` / `--depth`. **Secure fields are never emitted:** `interceptor macos text` on a password field (`AXSecureTextField`) returns `•••`, never the contents.
+
 ```bash
 interceptor macos tree                           # AX tree for frontmost app
 interceptor macos tree --app "Finder"            # Specific app
 interceptor macos tree --filter interactive      # Only actionable elements (default)
 interceptor macos tree --depth 5                 # Limit depth
+interceptor macos tree --app Finder --max-nodes 500   # Bound nodes visited (partial + stop marker)
+interceptor macos tree --app Finder --max-ms 3000     # Bound wall-clock time
 interceptor macos find "Save" --role button      # Find elements by name/role
+interceptor macos find "Save" --pid 1234         # --pid targets find/focused/windows too
 interceptor macos inspect e5                     # All attributes + actions for ref
 interceptor macos value e5                       # Read element value
 interceptor macos value e5 "new text"            # Set element value

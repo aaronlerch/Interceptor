@@ -1,0 +1,629 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		5FA45912300E2868000B5D4C /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FA45911300E2868000B5D4C /* AppDelegate.swift */; };
+		5FA45916300E2868000B5D4C /* Main.html in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45914300E2868000B5D4C /* Main.html */; };
+		5FA45918300E2868000B5D4C /* Icon.png in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45917300E2868000B5D4C /* Icon.png */; };
+		5FA4591A300E2868000B5D4C /* Style.css in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45919300E2868000B5D4C /* Style.css */; };
+		5FA4591C300E2868000B5D4C /* Script.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4591B300E2868000B5D4C /* Script.js */; };
+		5FA4591E300E2868000B5D4C /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FA4591D300E2868000B5D4C /* ViewController.swift */; };
+		5FA45921300E2868000B5D4C /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4591F300E2868000B5D4C /* Main.storyboard */; };
+		5FA45923300E2869000B5D4C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45922300E2869000B5D4C /* Assets.xcassets */; };
+		5FA4592A300E2869000B5D4C /* InterceptorSafari Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 5FA45929300E2869000B5D4C /* InterceptorSafari Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		5FA4592F300E2869000B5D4C /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FA4592E300E2869000B5D4C /* SafariWebExtensionHandler.swift */; };
+		5FA45944300E2869000B5D4C /* background-safari.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4593B300E2869000B5D4C /* background-safari.js */; };
+		5FA45945300E2869000B5D4C /* popup.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4593C300E2869000B5D4C /* popup.js */; };
+		5FA45946300E2869000B5D4C /* net-buffer-content.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4593D300E2869000B5D4C /* net-buffer-content.js */; };
+		5FA45947300E2869000B5D4C /* popup.html in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4593E300E2869000B5D4C /* popup.html */; };
+		5FA45948300E2869000B5D4C /* inject-canvas.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA4593F300E2869000B5D4C /* inject-canvas.js */; };
+		5FA45949300E2869000B5D4C /* icons in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45940300E2869000B5D4C /* icons */; };
+		5FA4594A300E2869000B5D4C /* manifest.json in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45941300E2869000B5D4C /* manifest.json */; };
+		5FA4594B300E2869000B5D4C /* content.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45942300E2869000B5D4C /* content.js */; };
+		5FA4594C300E2869000B5D4C /* inject-net.js in Resources */ = {isa = PBXBuildFile; fileRef = 5FA45943300E2869000B5D4C /* inject-net.js */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5FA4592B300E2869000B5D4C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5FA45906300E2868000B5D4C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5FA45928300E2869000B5D4C;
+			remoteInfo = "InterceptorSafari Extension";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		5FA45936300E2869000B5D4C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				5FA4592A300E2869000B5D4C /* InterceptorSafari Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		5FA4590E300E2868000B5D4C /* InterceptorSafari.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = InterceptorSafari.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5FA45911300E2868000B5D4C /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		5FA45915300E2868000B5D4C /* Base */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = Base; path = Base.lproj/Main.html; sourceTree = "<group>"; };
+		5FA45917300E2868000B5D4C /* Icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = Icon.png; sourceTree = "<group>"; };
+		5FA45919300E2868000B5D4C /* Style.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = Style.css; sourceTree = "<group>"; };
+		5FA4591B300E2868000B5D4C /* Script.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = Script.js; sourceTree = "<group>"; };
+		5FA4591D300E2868000B5D4C /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		5FA45920300E2868000B5D4C /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		5FA45922300E2869000B5D4C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5FA45924300E2869000B5D4C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5FA45929300E2869000B5D4C /* InterceptorSafari Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "InterceptorSafari Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		5FA4592E300E2869000B5D4C /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		5FA45930300E2869000B5D4C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		5FA4593B300E2869000B5D4C /* background-safari.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "background-safari.js"; path = "Resources/background-safari.js"; sourceTree = "<group>"; };
+		5FA4593C300E2869000B5D4C /* popup.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = popup.js; path = Resources/popup.js; sourceTree = "<group>"; };
+		5FA4593D300E2869000B5D4C /* net-buffer-content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "net-buffer-content.js"; path = "Resources/net-buffer-content.js"; sourceTree = "<group>"; };
+		5FA4593E300E2869000B5D4C /* popup.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; name = popup.html; path = Resources/popup.html; sourceTree = "<group>"; };
+		5FA4593F300E2869000B5D4C /* inject-canvas.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "inject-canvas.js"; path = "Resources/inject-canvas.js"; sourceTree = "<group>"; };
+		5FA45940300E2869000B5D4C /* icons */ = {isa = PBXFileReference; lastKnownFileType = folder; name = icons; path = Resources/icons; sourceTree = "<group>"; };
+		5FA45941300E2869000B5D4C /* manifest.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = manifest.json; path = Resources/manifest.json; sourceTree = "<group>"; };
+		5FA45942300E2869000B5D4C /* content.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = content.js; path = Resources/content.js; sourceTree = "<group>"; };
+		5FA45943300E2869000B5D4C /* inject-net.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; name = "inject-net.js"; path = "Resources/inject-net.js"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		5FA4590B300E2868000B5D4C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5FA45926300E2869000B5D4C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		5FA45905300E2868000B5D4C = {
+			isa = PBXGroup;
+			children = (
+				5FA45910300E2868000B5D4C /* InterceptorSafari */,
+				5FA4592D300E2869000B5D4C /* InterceptorSafari Extension */,
+				5FA4590F300E2868000B5D4C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		5FA4590F300E2868000B5D4C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				5FA4590E300E2868000B5D4C /* InterceptorSafari.app */,
+				5FA45929300E2869000B5D4C /* InterceptorSafari Extension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		5FA45910300E2868000B5D4C /* InterceptorSafari */ = {
+			isa = PBXGroup;
+			children = (
+				5FA45911300E2868000B5D4C /* AppDelegate.swift */,
+				5FA4591D300E2868000B5D4C /* ViewController.swift */,
+				5FA4591F300E2868000B5D4C /* Main.storyboard */,
+				5FA45922300E2869000B5D4C /* Assets.xcassets */,
+				5FA45924300E2869000B5D4C /* Info.plist */,
+				5FA45913300E2868000B5D4C /* Resources */,
+			);
+			path = InterceptorSafari;
+			sourceTree = "<group>";
+		};
+		5FA45913300E2868000B5D4C /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				5FA45914300E2868000B5D4C /* Main.html */,
+				5FA45917300E2868000B5D4C /* Icon.png */,
+				5FA45919300E2868000B5D4C /* Style.css */,
+				5FA4591B300E2868000B5D4C /* Script.js */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		5FA4592D300E2869000B5D4C /* InterceptorSafari Extension */ = {
+			isa = PBXGroup;
+			children = (
+				5FA4593A300E2869000B5D4C /* Resources */,
+				5FA4592E300E2869000B5D4C /* SafariWebExtensionHandler.swift */,
+				5FA45930300E2869000B5D4C /* Info.plist */,
+			);
+			path = "InterceptorSafari Extension";
+			sourceTree = "<group>";
+		};
+		5FA4593A300E2869000B5D4C /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				5FA4593B300E2869000B5D4C /* background-safari.js */,
+				5FA4593C300E2869000B5D4C /* popup.js */,
+				5FA4593D300E2869000B5D4C /* net-buffer-content.js */,
+				5FA4593E300E2869000B5D4C /* popup.html */,
+				5FA4593F300E2869000B5D4C /* inject-canvas.js */,
+				5FA45940300E2869000B5D4C /* icons */,
+				5FA45941300E2869000B5D4C /* manifest.json */,
+				5FA45942300E2869000B5D4C /* content.js */,
+				5FA45943300E2869000B5D4C /* inject-net.js */,
+			);
+			name = Resources;
+			path = "InterceptorSafari Extension";
+			sourceTree = SOURCE_ROOT;
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5FA4590D300E2868000B5D4C /* InterceptorSafari */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5FA45937300E2869000B5D4C /* Build configuration list for PBXNativeTarget "InterceptorSafari" */;
+			buildPhases = (
+				5FA4590A300E2868000B5D4C /* Sources */,
+				5FA4590B300E2868000B5D4C /* Frameworks */,
+				5FA4590C300E2868000B5D4C /* Resources */,
+				5FA45936300E2869000B5D4C /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5FA4592C300E2869000B5D4C /* PBXTargetDependency */,
+			);
+			name = InterceptorSafari;
+			packageProductDependencies = (
+			);
+			productName = InterceptorSafari;
+			productReference = 5FA4590E300E2868000B5D4C /* InterceptorSafari.app */;
+			productType = "com.apple.product-type.application";
+		};
+		5FA45928300E2869000B5D4C /* InterceptorSafari Extension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 5FA45933300E2869000B5D4C /* Build configuration list for PBXNativeTarget "InterceptorSafari Extension" */;
+			buildPhases = (
+				5FA45925300E2869000B5D4C /* Sources */,
+				5FA45926300E2869000B5D4C /* Frameworks */,
+				5FA45927300E2869000B5D4C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "InterceptorSafari Extension";
+			packageProductDependencies = (
+			);
+			productName = "InterceptorSafari Extension";
+			productReference = 5FA45929300E2869000B5D4C /* InterceptorSafari Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5FA45906300E2868000B5D4C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2610;
+				LastUpgradeCheck = 2610;
+				TargetAttributes = {
+					5FA4590D300E2868000B5D4C = {
+						CreatedOnToolsVersion = 26.1.1;
+					};
+					5FA45928300E2869000B5D4C = {
+						CreatedOnToolsVersion = 26.1.1;
+					};
+				};
+			};
+			buildConfigurationList = 5FA45909300E2868000B5D4C /* Build configuration list for PBXProject "InterceptorSafari" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 5FA45905300E2868000B5D4C;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 5FA4590F300E2868000B5D4C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5FA4590D300E2868000B5D4C /* InterceptorSafari */,
+				5FA45928300E2869000B5D4C /* InterceptorSafari Extension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5FA4590C300E2868000B5D4C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FA45918300E2868000B5D4C /* Icon.png in Resources */,
+				5FA45921300E2868000B5D4C /* Main.storyboard in Resources */,
+				5FA4591C300E2868000B5D4C /* Script.js in Resources */,
+				5FA45916300E2868000B5D4C /* Main.html in Resources */,
+				5FA45923300E2869000B5D4C /* Assets.xcassets in Resources */,
+				5FA4591A300E2868000B5D4C /* Style.css in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5FA45927300E2869000B5D4C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FA4594B300E2869000B5D4C /* content.js in Resources */,
+				5FA45944300E2869000B5D4C /* background-safari.js in Resources */,
+				5FA4594A300E2869000B5D4C /* manifest.json in Resources */,
+				5FA45947300E2869000B5D4C /* popup.html in Resources */,
+				5FA45948300E2869000B5D4C /* inject-canvas.js in Resources */,
+				5FA45949300E2869000B5D4C /* icons in Resources */,
+				5FA4594C300E2869000B5D4C /* inject-net.js in Resources */,
+				5FA45946300E2869000B5D4C /* net-buffer-content.js in Resources */,
+				5FA45945300E2869000B5D4C /* popup.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		5FA4590A300E2868000B5D4C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FA4591E300E2868000B5D4C /* ViewController.swift in Sources */,
+				5FA45912300E2868000B5D4C /* AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5FA45925300E2869000B5D4C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FA4592F300E2869000B5D4C /* SafariWebExtensionHandler.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5FA4592C300E2869000B5D4C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5FA45928300E2869000B5D4C /* InterceptorSafari Extension */;
+			targetProxy = 5FA4592B300E2869000B5D4C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		5FA45914300E2868000B5D4C /* Main.html */ = {
+			isa = PBXVariantGroup;
+			children = (
+				5FA45915300E2868000B5D4C /* Base */,
+			);
+			name = Main.html;
+			sourceTree = "<group>";
+		};
+		5FA4591F300E2868000B5D4C /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				5FA45920300E2868000B5D4C /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		5FA45931300E2869000B5D4C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		5FA45932300E2869000B5D4C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		5FA45934300E2869000B5D4C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "InterceptorSafari Extension/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "InterceptorSafari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.interceptor.safari.Extension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		5FA45935300E2869000B5D4C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "InterceptorSafari Extension/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "InterceptorSafari Extension";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 10.14;
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.interceptor.safari.Extension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		5FA45938300E2869000B5D4C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = InterceptorSafari/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = InterceptorSafari;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.interceptor.safari;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		5FA45939300E2869000B5D4C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_USER_SELECTED_FILES = readonly;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = InterceptorSafari/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = InterceptorSafari;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMainStoryboardFile = Main;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+					"-framework",
+					WebKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.interceptor.safari;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5FA45909300E2868000B5D4C /* Build configuration list for PBXProject "InterceptorSafari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5FA45931300E2869000B5D4C /* Debug */,
+				5FA45932300E2869000B5D4C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5FA45933300E2869000B5D4C /* Build configuration list for PBXNativeTarget "InterceptorSafari Extension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5FA45934300E2869000B5D4C /* Debug */,
+				5FA45935300E2869000B5D4C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		5FA45937300E2869000B5D4C /* Build configuration list for PBXNativeTarget "InterceptorSafari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5FA45938300E2869000B5D4C /* Debug */,
+				5FA45939300E2869000B5D4C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 5FA45906300E2868000B5D4C /* Project object */;
+}

@@ -4,8 +4,16 @@ import AppKit
 
 final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
     let refRegistry = RefRegistry.shared
+    // every AX C call in this domain now routes through the
+    // injectable transport, and every value decodes through AXValueCodec — no
+    // force casts on unverified AX values. Public command behavior is unchanged.
+    private let transport: any AXTransport
     private var observer: AXObserver?
     private var observedPID: pid_t = 0
+
+    init(transport: any AXTransport = LiveAXTransport()) {
+        self.transport = transport
+    }
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         switch command {
@@ -55,10 +63,19 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
 
         let pid = app.processIdentifier
         ensureObserver(pid: pid)
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         let depth = action["depth"] as? Int ?? 10
         let filter = action["filter"] as? String ?? "interactive"
         let maxChars = action["maxChars"] as? Int ?? 50000
+        // bound the traversal so a huge/slow tree returns a partial
+        // result instead of hanging until the CLI's 15s timeout. Overridable via
+        // --max-nodes / --max-ms; clamped to the safety hard caps.
+        let budget = AXBudget(
+            maxMs: AXBudget.clamp(action["maxMs"] as? Int, def: AXBudget.defaultMaxMs, hard: AXBudget.hardMaxMs),
+            maxNodes: AXBudget.clamp(action["maxNodes"] as? Int, def: AXBudget.defaultMaxNodes, hard: AXBudget.hardMaxNodes),
+            maxCalls: AXBudget.defaultMaxCalls
+        )
+        _ = transport.setMessagingTimeout(axApp, seconds: AXBudget.scanMessagingTimeoutSeconds)
 
         // wake up the AX tree for Electron / Chromium apps.
         // Electron and Chromium-based apps (Slack, Discord, Signal, VS Code,
@@ -68,12 +85,13 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         // tree generation. Without this, `mac_tree --app Signal` returns empty
         // when Signal is in the background.
         // Refs: AXUIElement.h, Apple a11y guides, Chromium a11y_extension.cc.
-        Self.wakeAXTree(app: axApp)
+        wakeAXTree(app: axApp)
 
         refRegistry.clear()
 
         var output = ""
-        buildTree(element: axApp, pid: pid, depth: 0, maxDepth: depth, filter: filter, output: &output, maxChars: maxChars)
+        buildTree(element: axApp, pid: pid, depth: 0, maxDepth: depth, filter: filter, output: &output, maxChars: maxChars, budget: budget)
+        if !budget.stopMarker.isEmpty { output += budget.stopMarker + "\n" }
 
         completion(WireFormat.success(output))
     }
@@ -91,16 +109,20 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
     /// foregrounding AppKit apps even after the CompoundDomain activation
     /// removal. AppKit apps don't need either flag — their AX tree is
     /// always populated. Chromium needs only AXManualAccessibility.
-    static func wakeAXTree(app: AXUIElement) {
-        AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    func wakeAXTree(app: AXUIElement) {
+        _ = transport.setAttributeValue(app, "AXManualAccessibility", kCFBooleanTrue)
         // Tiny grace so Chromium's BrowserAccessibilityManager has a chance
         // to assemble the tree before we walk it. ~30 ms is enough on M-series
         // for typical Electron renderers.
         usleep(30_000)
     }
 
-    private func buildTree(element: AXUIElement, pid: pid_t, depth: Int, maxDepth: Int, filter: String, output: inout String, maxChars: Int) {
-        guard depth < maxDepth, output.count < maxChars else { return }
+    // internal (not private) so the budget-bounded traversal is unit-testable
+    // with a FakeAXTransport, without depending on a live NSRunningApplication.
+    func buildTree(element: AXUIElement, pid: pid_t, depth: Int, maxDepth: Int, filter: String, output: inout String, maxChars: Int, budget: AXBudget) {
+        guard depth < maxDepth, output.count < maxChars, !budget.shouldStop() else { return }
+        budget.countNode()
+        budget.countCalls(5)   // 4 attribute reads + 1 children read below
 
         let role = getStringAttribute(element, kAXRoleAttribute as CFString) ?? "unknown"
         let title = getStringAttribute(element, kAXTitleAttribute as CFString)
@@ -139,51 +161,40 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             output += line + "\n"
         }
 
-        var children: CFTypeRef?
-        let childResult = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children)
+        let (childResult, children) = transport.copyAttributeValue(element, kAXChildrenAttribute as String)
         guard childResult == .success, let childArray = children as? [AXUIElement] else { return }
 
         for child in childArray {
-            buildTree(element: child, pid: pid, depth: depth + 1, maxDepth: maxDepth, filter: filter, output: &output, maxChars: maxChars)
+            buildTree(element: child, pid: pid, depth: depth + 1, maxDepth: maxDepth, filter: filter, output: &output, maxChars: maxChars, budget: budget)
         }
     }
 
     private func getStringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(element, attribute, &value)
+        let (result, value) = transport.copyAttributeValue(element, attribute as String)
         guard result == .success else { return nil }
-        if let str = value as? String { return str }
-        if let num = value as? NSNumber { return num.stringValue }
-        return nil
+        return AXValueCodec.displayString(value)
     }
 
     private func getFrame(_ element: AXUIElement) -> CGRect? {
-        var posValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posValue) == .success,
-              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success else {
-            return nil
-        }
-        var point = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &point),
-              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else {
+        let (posResult, posValue) = transport.copyAttributeValue(element, kAXPositionAttribute as String)
+        let (sizeResult, sizeValue) = transport.copyAttributeValue(element, kAXSizeAttribute as String)
+        guard posResult == .success, sizeResult == .success,
+              let point = AXValueCodec.point(from: posValue),
+              let size = AXValueCodec.size(from: sizeValue) else {
             return nil
         }
         return CGRect(origin: point, size: size)
     }
 
     private func searchRootElement(for app: AXUIElement) -> AXUIElement? {
-        var focusedWindow: CFTypeRef?
-        if AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
-           let window = focusedWindow {
-            return unsafeBitCast(window, to: AXUIElement.self)
+        let (focusedResult, focusedWindow) = transport.copyAttributeValue(app, kAXFocusedWindowAttribute as String)
+        if focusedResult == .success, let window = AXValueCodec.asElement(focusedWindow) {
+            return window
         }
 
-        var mainWindow: CFTypeRef?
-        if AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &mainWindow) == .success,
-           let window = mainWindow {
-            return unsafeBitCast(window, to: AXUIElement.self)
+        let (mainResult, mainWindow) = transport.copyAttributeValue(app, kAXMainWindowAttribute as String)
+        if mainResult == .success, let window = AXValueCodec.asElement(mainWindow) {
+            return window
         }
 
         return nil
@@ -200,21 +211,29 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         }
 
         let pid = app.processIdentifier
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         let roleFilter = action["role"] as? String
+        let budget = AXBudget(
+            maxMs: AXBudget.clamp(action["maxMs"] as? Int, def: AXBudget.defaultMaxMs, hard: AXBudget.hardMaxMs),
+            maxNodes: AXBudget.clamp(action["maxNodes"] as? Int, def: AXBudget.defaultMaxNodes, hard: AXBudget.hardMaxNodes),
+            maxCalls: AXBudget.defaultMaxCalls
+        )
+        _ = transport.setMessagingTimeout(axApp, seconds: AXBudget.scanMessagingTimeoutSeconds)
 
-        Self.wakeAXTree(app: axApp)
+        wakeAXTree(app: axApp)
         refRegistry.clear()
         let searchRoot = searchRootElement(for: axApp) ?? axApp
 
         var matches: [[String: Any]] = []
-        findElements(element: searchRoot, pid: pid, query: query.lowercased(), roleFilter: roleFilter?.lowercased(), depth: 0, maxDepth: 15, maxMatches: 25, matches: &matches)
+        findElements(element: searchRoot, pid: pid, query: query.lowercased(), roleFilter: roleFilter?.lowercased(), depth: 0, maxDepth: 15, maxMatches: 25, matches: &matches, budget: budget)
 
         completion(WireFormat.success(matches))
     }
 
-    private func findElements(element: AXUIElement, pid: pid_t, query: String, roleFilter: String?, depth: Int, maxDepth: Int, maxMatches: Int, matches: inout [[String: Any]]) {
-        guard depth < maxDepth, matches.count < maxMatches else { return }
+    private func findElements(element: AXUIElement, pid: pid_t, query: String, roleFilter: String?, depth: Int, maxDepth: Int, maxMatches: Int, matches: inout [[String: Any]], budget: AXBudget) {
+        guard depth < maxDepth, matches.count < maxMatches, !budget.shouldStop() else { return }
+        budget.countNode()
+        budget.countCalls(6)   // 6 attribute reads per node
 
         let role = getStringAttribute(element, kAXRoleAttribute as CFString) ?? ""
         let identifier = getStringAttribute(element, kAXIdentifierAttribute as CFString) ?? ""
@@ -251,11 +270,10 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             }
         }
 
-        var children: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
-              let childArray = children as? [AXUIElement] else { return }
+        let (childResult, children) = transport.copyAttributeValue(element, kAXChildrenAttribute as String)
+        guard childResult == .success, let childArray = children as? [AXUIElement] else { return }
         for child in childArray {
-            findElements(element: child, pid: pid, query: query, roleFilter: roleFilter, depth: depth + 1, maxDepth: maxDepth, maxMatches: maxMatches, matches: &matches)
+            findElements(element: child, pid: pid, query: query, roleFilter: roleFilter, depth: depth + 1, maxDepth: maxDepth, maxMatches: maxMatches, matches: &matches, budget: budget)
         }
     }
 
@@ -266,9 +284,8 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
-        var attrNames: CFArray?
-        guard AXUIElementCopyAttributeNames(element, &attrNames) == .success,
-              let names = attrNames as? [String] else {
+        let (namesResult, namesOpt) = transport.copyAttributeNames(element)
+        guard namesResult == .success, let names = namesOpt else {
             completion(WireFormat.error("failed to read attributes"))
             return
         }
@@ -285,9 +302,8 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
                              "width": frame.size.width, "height": frame.size.height]
         }
 
-        var actionNames: CFArray?
-        if AXUIElementCopyActionNames(element, &actionNames) == .success,
-           let actions = actionNames as? [String] {
+        let (actionsResult, actionsOpt) = transport.copyActionNames(element)
+        if actionsResult == .success, let actions = actionsOpt {
             attrs["actions"] = actions.map { $0.replacingOccurrences(of: "AX", with: "") }
         }
 
@@ -302,7 +318,7 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         }
 
         if let newValue = action["value"] as? String {
-            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, newValue as CFTypeRef)
+            let result = transport.setAttributeValue(element, kAXValueAttribute as String, newValue as CFTypeRef)
             if result == .success {
                 completion(WireFormat.success("value set"))
             } else {
@@ -324,11 +340,13 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
         let actionName = action["action"] as? String ?? "press"
         let axAction = "AX" + actionName.prefix(1).uppercased() + actionName.dropFirst()
 
-        let result = AXUIElementPerformAction(element, axAction as CFString)
+        let result = transport.performAction(element, axAction)
         if result == .success {
             completion(WireFormat.success("ok"))
         } else {
-            // Auto-escalation: try CGEvent click using element frame
+            // Auto-escalation: try CGEvent click using element frame.
+            // NOTE (future work): this global-click fallback is slated for removal
+            // in favor of PID-routed InputDomain delegation; G0 preserves it.
             if let frame = getFrame(element) {
                 let centerX = frame.origin.x + frame.size.width / 2
                 let centerY = frame.origin.y + frame.size.height / 2
@@ -358,15 +376,14 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        Self.wakeAXTree(app: axApp)
-        var focused: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focused) == .success else {
+        let axApp = transport.createApplication(pid: app.processIdentifier)
+        wakeAXTree(app: axApp)
+        let (focusedResult, focused) = transport.copyAttributeValue(axApp, kAXFocusedUIElementAttribute as String)
+        guard focusedResult == .success, let element = AXValueCodec.asElement(focused) else {
             completion(WireFormat.error("no focused element"))
             return
         }
 
-        let element = focused as! AXUIElement
         let ref = refRegistry.register(element, pid: app.processIdentifier)
         let role = getStringAttribute(element, kAXRoleAttribute as CFString) ?? "unknown"
         let title = getStringAttribute(element, kAXTitleAttribute as CFString) ?? ""
@@ -389,11 +406,10 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
-        let axApp = AXUIElementCreateApplication(app.processIdentifier)
-        Self.wakeAXTree(app: axApp)
-        var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsRef) == .success,
-              let windows = windowsRef as? [AXUIElement] else {
+        let axApp = transport.createApplication(pid: app.processIdentifier)
+        wakeAXTree(app: axApp)
+        let (windowsResult, windowsRef) = transport.copyAttributeValue(axApp, kAXWindowsAttribute as String)
+        guard windowsResult == .success, let windows = windowsRef as? [AXUIElement] else {
             completion(WireFormat.success([]))
             return
         }
@@ -520,27 +536,26 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
     private func setSize(_ element: AXUIElement, _ size: CGSize) -> AXError? {
         var s = size
         guard let axSize = AXValueCreate(.cgSize, &s) else { return .failure }
-        let result = AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, axSize)
+        let result = transport.setAttributeValue(element, kAXSizeAttribute as String, axSize)
         return result == .success ? nil : result
     }
 
     private func setPosition(_ element: AXUIElement, _ point: CGPoint) -> AXError? {
         var p = point
         guard let axPoint = AXValueCreate(.cgPoint, &p) else { return .failure }
-        let result = AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, axPoint)
+        let result = transport.setAttributeValue(element, kAXPositionAttribute as String, axPoint)
         return result == .success ? nil : result
     }
 
     private func settabilityError(element: AXUIElement, attribute: CFString, verb: String) -> [String: Any]? {
-        var settable: DarwinBoolean = false
-        let probe = AXUIElementIsAttributeSettable(element, attribute, &settable)
+        let (probe, settable) = transport.isAttributeSettable(element, attribute as String)
         if probe != .success {
             // If the probe itself fails (e.g. .cannotComplete), surface that —
             // but don't block the verb on it; some apps refuse the probe yet
             // honor the set. Fall through.
             return nil
         }
-        if !settable.boolValue {
+        if settable == false {
             return WireFormat.error("\(verb) failed: attribute not settable on this element (use a top-level window ref)")
         }
         return nil
@@ -619,22 +634,22 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
 
         // Clean up old observer
         if let old = observer {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(old), .defaultMode)
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), transport.observerGetRunLoopSource(old), .defaultMode)
             observer = nil
         }
 
-        var newObserver: AXObserver?
         let callback: AXObserverCallback = { _, element, notification, refcon in
             let domain = Unmanaged<AccessibilityDomain>.fromOpaque(refcon!).takeUnretainedValue()
             domain.refRegistry.clear()
             Platform.emitEvent("ax_notification", data: ["notification": notification as String])
         }
 
-        guard AXObserverCreate(pid, callback, &newObserver) == .success, let obs = newObserver else {
+        let (createResult, newObserver) = transport.observerCreate(pid: pid, callback: callback)
+        guard createResult == .success, let obs = newObserver else {
             return
         }
 
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         let notifications: [String] = [
             kAXUIElementDestroyedNotification as String,
             kAXWindowCreatedNotification as String,
@@ -644,10 +659,10 @@ final class AccessibilityDomain: DomainHandler, @unchecked Sendable {
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for note in notifications {
-            AXObserverAddNotification(obs, axApp, note as CFString, refcon)
+            _ = transport.observerAddNotification(obs, axApp, note, refcon)
         }
 
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), transport.observerGetRunLoopSource(obs), .defaultMode)
         observer = obs
         observedPID = pid
     }

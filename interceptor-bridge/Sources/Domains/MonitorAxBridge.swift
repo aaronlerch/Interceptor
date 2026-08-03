@@ -45,9 +45,29 @@ final class MonitorAxBridge: @unchecked Sendable {
     ]
 
     private let lock = NSLock()
+    // observer create/add/remove/run-loop and attribute reads
+    // route through the transport (removes the `as! AXValue` casts in mergeFrame).
+    private let transport: any AXTransport = LiveAXTransport()
     private var observers: [pid_t: AXObserver] = [:]
     private var registered: [pid_t: [String]] = [:]
     private var callback: EventCallback?
+
+    // coalesce the two highest-rate AX notifications
+    // (kAXValueChanged → "input", kAXLayoutChanged → "layout_change"). These
+    // fire continuously during scroll/typing; debouncing them per (pid,kind)
+    // within `coalesceMs` collapses a storm into one event carrying the latest
+    // value + a coalesced count, without dropping lower-rate notifications.
+    // 0 = emit every notification (truly everything).
+    private var coalesceMs = 0
+    private var pendingCoalesced: [String: (event: String, data: [String: Any])] = [:]
+    private var coalesceCounts: [String: Int] = [:]
+    private var coalesceTimer: DispatchSourceTimer?
+    private let coalesceQueue = DispatchQueue(label: "interceptor.monitor.ax.coalesce")
+
+    func setCoalesceMs(_ ms: Int) {
+        lock.lock(); defer { lock.unlock() }
+        coalesceMs = max(0, ms)
+    }
 
     // Holds context the C-style AXObserverCallback needs. The void * `refcon`
     // is an Unmanaged<MonitorAxBridge> opaque pointer; the per-PID context is
@@ -75,18 +95,17 @@ final class MonitorAxBridge: @unchecked Sendable {
         }
         lock.unlock()
 
-        var newObserver: AXObserver?
-        let createStatus = AXObserverCreate(pid, MonitorAxBridge.cCallback, &newObserver)
+        let (createStatus, newObserver) = transport.observerCreate(pid: pid, callback: MonitorAxBridge.cCallback)
         guard createStatus == .success, let observer = newObserver else {
             Platform.log("MonitorAxBridge: AXObserverCreate failed for pid \(pid) → \(createStatus.rawValue)")
             return []
         }
 
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         var accepted: [String] = []
         for note in notifications {
-            let st = AXObserverAddNotification(observer, axApp, note as CFString, refcon)
+            let st = transport.observerAddNotification(observer, axApp, note, refcon)
             if st == .success {
                 accepted.append(note)
             }
@@ -100,7 +119,7 @@ final class MonitorAxBridge: @unchecked Sendable {
         // doesn't have to cross an isolation boundary.
         CFRunLoopAddSource(
             CFRunLoopGetMain(),
-            AXObserverGetRunLoopSource(observer),
+            transport.observerGetRunLoopSource(observer),
             .defaultMode
         )
 
@@ -118,18 +137,19 @@ final class MonitorAxBridge: @unchecked Sendable {
         lock.unlock()
 
         guard let observer = observerOpt else { return }
-        let axApp = AXUIElementCreateApplication(pid)
+        let axApp = transport.createApplication(pid: pid)
         for note in registeredNotes {
-            AXObserverRemoveNotification(observer, axApp, note as CFString)
+            _ = transport.observerRemoveNotification(observer, axApp, note)
         }
         CFRunLoopRemoveSource(
             CFRunLoopGetMain(),
-            AXObserverGetRunLoopSource(observer),
+            transport.observerGetRunLoopSource(observer),
             .defaultMode
         )
     }
 
     func detachAll() {
+        flushCoalesced()
         lock.lock()
         let pids = Array(observers.keys)
         lock.unlock()
@@ -156,8 +176,8 @@ final class MonitorAxBridge: @unchecked Sendable {
         // element to enrich the event. We deliberately avoid reading kAXValue
         // for kAXSecureTextField — the role is read first and the value is
         // masked.
-        var pid: pid_t = 0
-        AXUIElementGetPid(element, &pid)
+        let (_, pidOpt) = transport.pid(element)
+        let pid: pid_t = pidOpt ?? 0
 
         var role: String?
         var subrole: String?
@@ -187,7 +207,7 @@ final class MonitorAxBridge: @unchecked Sendable {
             } else if isSecure {
                 data["v"] = "***SECURE***"
             }
-            cb("input", data)
+            emitMaybeCoalesced("input", data: data, pid: pid, cb: cb)
 
         case kAXFocusedUIElementChangedNotification as String:
             cb("focus", data)
@@ -211,7 +231,8 @@ final class MonitorAxBridge: @unchecked Sendable {
             cb("menu_select", data)
 
         case kAXSheetCreatedNotification as String:  cb("sheet", data)
-        case kAXLayoutChangedNotification as String: cb("layout_change", data)
+        case kAXLayoutChangedNotification as String:
+            emitMaybeCoalesced("layout_change", data: data, pid: pid, cb: cb)
 
         case kAXSelectedRowsChangedNotification as String,
              kAXSelectedCellsChangedNotification as String:
@@ -250,10 +271,49 @@ final class MonitorAxBridge: @unchecked Sendable {
         }
     }
 
+    // debounce a high-rate notification per (pid,kind).
+    private func emitMaybeCoalesced(_ event: String, data: [String: Any], pid: pid_t, cb: @escaping EventCallback) {
+        let ms = lock.withLock { self.coalesceMs }
+        if ms <= 0 { cb(event, data); return }
+        let key = "\(pid):\(event)"
+        lock.lock()
+        pendingCoalesced[key] = (event, data)
+        coalesceCounts[key] = (coalesceCounts[key] ?? 0) + 1
+        let needTimer = coalesceTimer == nil
+        if needTimer {
+            let timer = DispatchSource.makeTimerSource(queue: coalesceQueue)
+            timer.schedule(deadline: .now() + .milliseconds(ms))
+            timer.setEventHandler { [weak self] in self?.flushCoalesced() }
+            coalesceTimer = timer
+            lock.unlock()
+            timer.resume()
+        } else {
+            lock.unlock()
+        }
+    }
+
+    private func flushCoalesced() {
+        lock.lock()
+        let cb = callback
+        let pending = pendingCoalesced
+        let counts = coalesceCounts
+        pendingCoalesced.removeAll()
+        coalesceCounts.removeAll()
+        coalesceTimer?.cancel()
+        coalesceTimer = nil
+        lock.unlock()
+        guard let cb = cb else { return }
+        for (key, entry) in pending {
+            var data = entry.data
+            let n = counts[key] ?? 1
+            if n > 1 { data["coalesced"] = n }
+            cb(entry.event, data)
+        }
+    }
+
     private func readStringAttribute(_ element: AXUIElement, _ key: String, into target: inout String?) {
-        var ref: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, key as CFString, &ref)
-        if status == .success, let v = ref as? String {
+        let (status, ref) = transport.copyAttributeValue(element, key)
+        if status == .success, let v = AXValueCodec.displayString(ref) {
             target = v
         }
     }
@@ -261,18 +321,10 @@ final class MonitorAxBridge: @unchecked Sendable {
     private func mergeFrame(_ element: AXUIElement, into data: inout [String: Any]) {
         // kAXPositionAttribute is CGPoint, kAXSizeAttribute is CGSize.
         // Both are AXValueRefs and need AXValueGetValue to extract.
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef)
-        AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef)
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        if let p = posRef, CFGetTypeID(p) == AXValueGetTypeID() {
-            AXValueGetValue(p as! AXValue, .cgPoint, &origin)
-        }
-        if let s = sizeRef, CFGetTypeID(s) == AXValueGetTypeID() {
-            AXValueGetValue(s as! AXValue, .cgSize, &size)
-        }
+        let (_, posRef) = transport.copyAttributeValue(element, kAXPositionAttribute as String)
+        let (_, sizeRef) = transport.copyAttributeValue(element, kAXSizeAttribute as String)
+        let origin = AXValueCodec.point(from: posRef) ?? .zero
+        let size = AXValueCodec.size(from: sizeRef) ?? .zero
         data["frame"] = [
             "x": Int(origin.x),
             "y": Int(origin.y),

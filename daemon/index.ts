@@ -1,7 +1,13 @@
-import { unlinkSync, existsSync, appendFileSync, statSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  unlinkSync, existsSync, appendFileSync, statSync, readFileSync, writeFileSync,
+  mkdirSync, openSync, writeSync, closeSync, renameSync,
+} from "node:fs"
 import { spawn, spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
+import { dirname } from "node:path"
+import { validateBinarySinkPath, binarySinkIntegrityError } from "./binary-sink"
 import { osClick, osKey, osType, osMove, generateBezierPath, translateCoords } from "./os-input-loader"
-import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, transportLabel } from "../shared/platform"
+import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOCK_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, MAX_UPLOAD_FRAME_BYTES, transportLabel } from "../shared/platform"
 import {
   MONITOR_EVENT_NAMES,
   appendSessionEvent,
@@ -11,9 +17,34 @@ import {
   type MonitorSessionMeta,
   updateSessionMeta,
 } from "../shared/monitor-artifacts"
-import { chooseOutboundTransport, validateContextRouting } from "./outbound-routing"
+import { chooseOutboundTransport, isRelayPing, relaySlotAfterClose, validateContextRouting } from "./outbound-routing"
+import { claimContextId, type ContextSocket } from "./context-registration"
 import { formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
-import { clearDaemonRuntimeFiles, decideDaemonStartupRole, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon } from "./lifecycle"
+import { clearDaemonRuntimeFiles, clearLockFile, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
+import { VERSION } from "../cli/version"
+import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
+import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
+import { IosManager } from "./ios/manager"
+import { IosWebManager } from "./ios/web-manager"
+import { IosDeviceServiceManager } from "./ios/service-manager"
+import { IosDevServiceManager } from "./ios/dev-manager"
+import { IOS_ACTION_TYPES, IOS_CONTEXT_PREFIX, IOS_REGISTER_TYPE, IOS_VERB_TYPES } from "../shared/ios-device"
+import { IOS_WEB_ACTION_TYPES } from "../shared/ios-web"
+import { IOS_SVC_ACTION_TYPES } from "../shared/ios-service"
+import { IOS_DEV_ACTION_TYPES } from "../shared/ios-dev"
+import {
+  NATIVE_REGISTER_TYPE, NATIVE_DELEGATE_TYPE, NATIVE_CONTEXT_PREFIX,
+  type NativeAgentState, type CodeSlice, type NativeWayIn,
+} from "../shared/native-agent"
+
+// Legacy experiment: older packages could run this binary as the
+// com.interceptor.ios-tunnel root helper. Current packages remove that helper;
+// keep the branch only so old installs fail predictably instead of falling into
+// normal daemon startup.
+if (process.argv.includes("--ios-tunnel-helper")) {
+  const { runTunnelHelper } = await import("./ios/tunnel-helper/helper")
+  await runTunnelHelper()
+}
 
 // ── Native Bridge (interceptor-bridge) connection ────────────────────────────────
 const BRIDGE_SOCKET_PATH = "/tmp/interceptor-bridge.sock"
@@ -220,6 +251,49 @@ function sendToBridge(id: string, action: Record<string, unknown>, cliSocket: { 
     startTime: Date.now(),
     actionType
   })
+}
+
+// Runtime Agent surface: forward a `delegate` frame from an in-process
+// agent to the Swift bridge (a macos_* action), then send the bridge's
+// {id,result} back to the agent's WebSocket. This is how the injected agent
+// piggybacks on the bridge's already-granted TCC (Accessibility / Screen
+// Recording / Apple Events) instead of the re-signed target's reset grants.
+function forwardDelegateToBridge(
+  id: string,
+  action: Record<string, unknown>,
+  agentWs: { send: (data: string) => void },
+  contextId: string,
+): void {
+  const actionType = (action?.type as string) || "unknown"
+  emitEvent("native_delegate", { contextId, action: actionType, requestId: id })
+  const fail = (error: string) => {
+    try { agentWs.send(JSON.stringify({ id, result: { success: false, error } })) } catch {}
+  }
+  const dispatch = () => {
+    const payload = JSON.stringify({ id, action })
+    const encoded = Buffer.from(payload, "utf-8")
+    const header = Buffer.alloc(4)
+    header.writeUInt32LE(encoded.byteLength, 0)
+    try {
+      ;(bridgeSocket as any).write(Buffer.concat([header, encoded]))
+    } catch {
+      fail("bridge connection lost")
+      return
+    }
+    const timer = setTimeout(() => {
+      bridgePending.delete(id)
+      fail("bridge timeout")
+    }, REQUEST_TIMEOUT_MS)
+    bridgePending.set(id, {
+      resolve: (response: string) => { clearTimeout(timer); try { agentWs.send(response) } catch {} },
+      timer,
+      cliSocket: { write: () => 0 } as any,
+      startTime: Date.now(),
+      actionType,
+    })
+  }
+  if (bridgeSocket) dispatch()
+  else connectBridge().then((ok) => { (ok && bridgeSocket) ? dispatch() : fail("bridge unavailable for delegation") })
 }
 
 // Start bridge connection on daemon startup
@@ -454,7 +528,7 @@ async function startNativeRelay(existingPid: number): Promise<never> {
 
 function lifecycleDeps() {
   return {
-    ...defaultLifecycleDeps({ pidPath: PID_PATH, socketPath: SOCKET_PATH, isWin: IS_WIN }),
+    ...defaultLifecycleDeps({ pidPath: PID_PATH, lockPath: LOCK_PATH, socketPath: SOCKET_PATH, isWin: IS_WIN }),
     log,
   }
 }
@@ -488,7 +562,43 @@ async function bootstrapDaemonRole(): Promise<void> {
 
 await bootstrapDaemonRole()
 
-try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH) } catch {}
+// Singleton election (atomic): the WebSocket port is the one OS-exclusive token that both
+// the CLI socket and the extension channel must agree on. Bind it BEFORE claiming the CLI
+// socket, so two daemons can never split-brain (one owning the socket, another the WS port).
+// Losing this race is fatal: exit instead of becoming a second, extension-less singleton.
+let wsServer: ReturnType<typeof Bun.serve> | null = null
+let wsBindError: Error | null = null
+try {
+  wsServer = startWsServer()
+} catch (err) {
+  wsBindError = err as Error
+}
+const singletonGate = decideSingletonGate({ wsPortAcquired: wsServer !== null, standalone: STANDALONE })
+if (singletonGate.action === "exit") {
+  log(`ws port ${WS_PORT} already held by another daemon — ${singletonGate.reason}${wsBindError ? ` (${wsBindError.message})` : ""}`)
+  process.exit(singletonGate.exitCode)
+}
+log(`ws server listening on port ${WS_PORT}`)
+
+// Write lock file — metadata record of this instance, read by `interceptor
+// diagnose` for binary-mismatch detection. Written only after winning the
+// singleton gate so a losing duplicate can never clobber the winner's record.
+// Duplicate *prevention* is the WS-port gate above, not this file.
+// A non-standalone process only reaches here via the spawn-failure fallback,
+// where it serves as the daemon in-process — hence "native-singleton".
+writeLockFile(LOCK_PATH, {
+  pid: process.pid,
+  version: VERSION,
+  execPath: process.execPath,
+  startedAt: new Date().toISOString(),
+  socketPath: SOCKET_PATH,
+  wsPort: WS_PORT,
+  mode: STANDALONE ? "standalone" : "native-singleton",
+})
+// Lock cleanup rides the existing shutdown paths (gracefulShutdown + the
+// process "exit" listener below) — a separate signal handler here would
+// register first and its process.exit(0) would stop gracefulShutdown from
+// ever running, skipping the CDP/iOS manager teardown.
 
 const pendingRequests = new Map<string, {
   resolve: (v: string) => void
@@ -676,7 +786,12 @@ function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: u
   }
 }
 
-const extensionWsMap = new Map<string, { send: (data: string) => void }>()
+const extensionWsMap = new Map<string, ContextSocket>()
+// Runtime Agent surface: per-agent metadata for `macos runtime status`.
+// The agent's ws is stored in extensionWsMap under its runtime:<app> contextId so the
+// normal verb-routing / contexts / disambiguation paths work unchanged; this map
+// only adds the descriptive metadata those paths don't carry.
+const nativeAgentMeta = new Map<string, NativeAgentState>()
 let nativeRelaySocket: Bun.Socket<undefined> | null = null
 const wsOutboundQueues = new Map<string, string[]>()
 const WS_QUEUE_CAP = 50
@@ -686,6 +801,72 @@ function resolveExtensionWs(contextId?: string): { send: (data: string) => void 
   if (extensionWsMap.size === 1) return [...extensionWsMap.values()][0]
   return null
 }
+
+// Resolve where the MV2 sibling extension (loaded into Electron apps) lives.
+function resolveMv2ExtDir(): string {
+  const env = process.env.INTERCEPTOR_MV2_EXT_DIR
+  if (env) return env
+  const candidates = [
+    `${import.meta.dir}/../extension/dist-mv2`,
+    `${process.env.HOME ?? ""}/.interceptor/extension-mv2`,
+    "/Library/Application Support/Interceptor/extension-mv2",
+  ]
+  for (const c of candidates) {
+    try { if (existsSync(c)) return c } catch {}
+  }
+  return candidates[0]
+}
+
+// CDP-app surface: direct CDP (cdp:) contexts live here; inspector
+// bootstrap loads the MV2 extension which registers as an app: extension context.
+const cdpManager = new CdpManager({
+  emit: (event, data) => emitEvent(event, data || {}),
+  hasExtensionContext: (ctxId: string) => extensionWsMap.has(ctxId),
+  mv2ExtensionDir: resolveMv2ExtDir,
+})
+
+// iOS device surface: our own on-device InterceptorRunner (XCUITest)
+// dials INTO this daemon WS and registers {type:"ios"}, exactly like the browser
+// extension and the in-process native agent. The manager drives it over that
+// socket (RunnerChannel) — no WebDriverAgent. Keyed by ios:<udid>, parallel to
+// cdpManager. A legacy --wda-url HTTP path remains as a deprecated escape hatch.
+const iosManager = new IosManager({
+  emit: (event, data) => emitEvent(event, data || {}),
+  wsPort: WS_PORT,
+})
+
+// web lane. Reuses iosManager's runner for native-lane work (screenshot,
+// native input) but the web lane itself needs no runner / Developer Mode.
+const iosWebManager = new IosWebManager({
+  nativeLane: {
+    isAvailable: (ctx) => iosManager.contextIds().includes(ctx),
+    screenshot: (ctx, max) => iosManager.executeVerb(ctx, { type: "ios_screenshot", targetMaxLongEdge: max }),
+    tap: (ctx, x, y) => iosManager.executeVerb(ctx, { type: "ios_click", x, y }),
+    type: (ctx, text) => iosManager.executeVerb(ctx, { type: "ios_type", text }),
+    keys: (ctx, text) => iosManager.executeVerb(ctx, { type: "ios_keys", text }),
+    tree: (ctx) => iosManager.executeVerb(ctx, { type: "ios_tree" }),
+  },
+  managerDescriptors: () => iosManager.contextIds()
+    .filter((c) => c.startsWith(IOS_CONTEXT_PREFIX))
+    .map((c) => ({ udid: c.slice(IOS_CONTEXT_PREFIX.length), contextId: c })),
+})
+
+// device-service introspection lane. Runner-free classic Lockdown
+// (diagnostics/logs/filesystem/crashes/profiles/notifications/springboard).
+const iosServiceManager = new IosDeviceServiceManager({
+  managerDescriptors: () => iosManager.contextIds()
+    .filter((c) => c.startsWith(IOS_CONTEXT_PREFIX))
+    .map((c) => ({ udid: c.slice(IOS_CONTEXT_PREFIX.length), contextId: c })),
+})
+
+// Instruments/DTX + telemetry + developer-service lanes. Runner-free by
+// default; `shot`/`screen` fall back to the on-device XCUITest runner via runnerVerb.
+const iosDevManager = new IosDevServiceManager({
+  managerDescriptors: () => iosManager.contextIds()
+    .filter((c) => c.startsWith(IOS_CONTEXT_PREFIX))
+    .map((c) => ({ udid: c.slice(IOS_CONTEXT_PREFIX.length), contextId: c })),
+  runnerVerb: (contextId, action) => iosManager.executeVerb(contextId, action),
+})
 
 function drainWsOutboundQueue(ctxId: string): void {
   const ws = extensionWsMap.get(ctxId)
@@ -737,18 +918,23 @@ function sendNativeMessage(msg: unknown, contextId?: string): void {
   if (preferred === "relay" && nativeRelaySocket) {
     if (failOversizedNativeMessage("native relay")) return
     log(`forwarding via relay: ${json.slice(0, 200)}`)
+    const relayAtSend = nativeRelaySocket
     try {
-      socketWriteFramed(nativeRelaySocket, json)
+      socketWriteFramed(relayAtSend, json)
       return
     } catch (err) {
       log(`relay send error: ${(err as Error).message}`)
-      nativeRelaySocket = null
+      // Identity-checked release. This block is synchronous (no yield between
+      // capture and check), so unlike the close handler this guard is
+      // belt-and-suspenders, not a race fix — kept so the invariant
+      // "only the owner releases the slot" holds at every release site.
+      if (nativeRelaySocket === relayAtSend) nativeRelaySocket = null
     }
   }
 
   if (preferred === "native" && !STANDALONE && stdinAlive) {
     if (failOversizedNativeMessage("native stdio")) return
-    log(`forwarding via native: ${json.slice(0, 200)}`)
+    log(`forwarding via runtime agent: ${json.slice(0, 200)}`)
     const encoded = Buffer.from(json, "utf-8")
     const header = Buffer.alloc(4)
     header.writeUInt32LE(encoded.byteLength, 0)
@@ -770,18 +956,19 @@ function sendNativeMessage(msg: unknown, contextId?: string): void {
   if (nativeRelaySocket) {
     if (failOversizedNativeMessage("fallback native relay")) return
     log(`fallback via relay: ${json.slice(0, 200)}`)
+    const relayAtSend = nativeRelaySocket
     try {
-      socketWriteFramed(nativeRelaySocket, json)
+      socketWriteFramed(relayAtSend, json)
       return
     } catch (err) {
       log(`fallback relay send error: ${(err as Error).message}`)
-      nativeRelaySocket = null
+      if (nativeRelaySocket === relayAtSend) nativeRelaySocket = null
     }
   }
 
   if (!STANDALONE && stdinAlive) {
     if (failOversizedNativeMessage("fallback native stdio")) return
-    log(`fallback via native: ${json.slice(0, 200)}`)
+    log(`fallback via runtime agent: ${json.slice(0, 200)}`)
     const encoded = Buffer.from(json, "utf-8")
     const header = Buffer.alloc(4)
     header.writeUInt32LE(encoded.byteLength, 0)
@@ -821,6 +1008,205 @@ if (!STANDALONE) {
 }
 
 const REQUEST_TIMEOUT_MS = 180_000
+const LONG_REQUEST_TIMEOUT_MS = 600_000
+const BINARY_SINK_MAGIC = Buffer.from("IBS1")
+const BINARY_SINK_MAX_HEADER_BYTES = 64 * 1024
+
+type BinarySinkState = {
+  fd: number
+  finalPath: string
+  tempPath: string
+  expectedBytes?: number
+  mime?: string
+  sourceUrl?: string
+  bytes: number
+  chunks: number
+  lastSeq: number
+  hash: ReturnType<typeof createHash>
+  startedAt: number
+}
+
+const binarySinks = new Map<string, BinarySinkState>()
+
+function requestTimeoutForAction(actionType: string): number {
+  if (actionType === "binary_sink_save") return LONG_REQUEST_TIMEOUT_MS
+  // iOS XCUITest AX ops (element-tree snapshot, app activate/launch) are slow —
+  // the FIRST snapshot initializes the on-device accessibility bridge and waits
+  // for app quiescence, which routinely exceeds the generic 15s budget.
+  if (actionType.startsWith("ios_")) return 60_000
+  return REQUEST_TIMEOUT_MS
+}
+
+function sendWsResult(ws: { send: (data: string) => unknown }, id: unknown, result: Record<string, unknown>) {
+  if (typeof id !== "string" || id.length === 0) return
+  try { ws.send(JSON.stringify({ id, result })) } catch {}
+}
+
+// validateBinarySinkPath + binarySinkIntegrityError live in ./binary-sink so the
+// path policy and the close-time integrity rule are unit-testable.
+
+function handleBinarySinkOpen(
+  ws: { send: (data: string) => unknown },
+  request: { id?: string; sinkId?: unknown; path?: unknown; expectedBytes?: unknown; mime?: unknown; sourceUrl?: unknown }
+): boolean {
+  const id = request.id
+  const sinkId = typeof request.sinkId === "string" && request.sinkId.length > 0
+    ? request.sinkId
+    : crypto.randomUUID()
+  const validated = validateBinarySinkPath(request.path)
+  if (!validated.path) {
+    sendWsResult(ws, id, { success: false, error: validated.error || "invalid path" })
+    return true
+  }
+
+  if (binarySinks.has(sinkId)) {
+    sendWsResult(ws, id, { success: false, error: `binary_sink_open: duplicate sinkId ${sinkId}` })
+    return true
+  }
+
+  const tempPath = `${validated.path}.interceptor-${sinkId}.tmp`
+  try {
+    mkdirSync(dirname(validated.path), { recursive: true, mode: 0o700 })
+    const fd = openSync(tempPath, "w", 0o600)
+    binarySinks.set(sinkId, {
+      fd,
+      finalPath: validated.path,
+      tempPath,
+      expectedBytes: typeof request.expectedBytes === "number" ? request.expectedBytes : undefined,
+      mime: typeof request.mime === "string" ? request.mime : undefined,
+      sourceUrl: typeof request.sourceUrl === "string" ? request.sourceUrl : undefined,
+      bytes: 0,
+      chunks: 0,
+      lastSeq: -1,
+      hash: createHash("sha256"),
+      startedAt: Date.now(),
+    })
+    sendWsResult(ws, id, { success: true, data: { sinkId, path: validated.path, tempPath } })
+  } catch (err) {
+    sendWsResult(ws, id, { success: false, error: `binary_sink_open failed: ${(err as Error).message}` })
+  }
+  return true
+}
+
+function closeBinarySink(sinkId: string): { success: boolean; error?: string; data?: Record<string, unknown> } {
+  const sink = binarySinks.get(sinkId)
+  if (!sink) return { success: false, error: `binary sink not found: ${sinkId}` }
+  binarySinks.delete(sinkId)
+
+  try {
+    closeSync(sink.fd)
+    // Integrity gate: never promote a short / truncated temp file to the final
+    // path. When the source size is known (expectedBytes), require an exact byte
+    // match before the atomic rename; otherwise discard the partial file and
+    // fail. This closes the silent-truncation hole where a mid-stream write
+    // error — whose error frame the streamer cannot ack — would still rename a
+    // partial file as a successful save.
+    const integrityError = binarySinkIntegrityError(sink.expectedBytes, sink.bytes)
+    if (integrityError) {
+      try { if (existsSync(sink.tempPath)) unlinkSync(sink.tempPath) } catch {}
+      return { success: false, error: integrityError }
+    }
+    renameSync(sink.tempPath, sink.finalPath)
+    const sha256 = sink.hash.digest("hex")
+    return {
+      success: true,
+      data: {
+        sinkId,
+        path: sink.finalPath,
+        bytes: sink.bytes,
+        chunks: sink.chunks,
+        sha256,
+        mime: sink.mime,
+        expectedBytes: sink.expectedBytes,
+        durationMs: Date.now() - sink.startedAt,
+      }
+    }
+  } catch (err) {
+    try { closeSync(sink.fd) } catch {}
+    try { if (existsSync(sink.tempPath)) unlinkSync(sink.tempPath) } catch {}
+    return { success: false, error: `binary_sink_close failed: ${(err as Error).message}` }
+  }
+}
+
+function abortBinarySink(sinkId: string): { success: boolean; error?: string } {
+  const sink = binarySinks.get(sinkId)
+  if (!sink) return { success: true }
+  binarySinks.delete(sinkId)
+  try { closeSync(sink.fd) } catch {}
+  try { if (existsSync(sink.tempPath)) unlinkSync(sink.tempPath) } catch {}
+  return { success: true }
+}
+
+function handleBinarySinkControl(
+  ws: { send: (data: string) => unknown },
+  request: { id?: string; type?: string; sinkId?: unknown; [key: string]: unknown }
+): boolean {
+  if (request.type === "binary_sink_open") {
+    return handleBinarySinkOpen(ws, request)
+  }
+  if (request.type === "binary_sink_close") {
+    const sinkId = typeof request.sinkId === "string" ? request.sinkId : ""
+    sendWsResult(ws, request.id, closeBinarySink(sinkId))
+    return true
+  }
+  if (request.type === "binary_sink_abort") {
+    const sinkId = typeof request.sinkId === "string" ? request.sinkId : ""
+    sendWsResult(ws, request.id, abortBinarySink(sinkId))
+    return true
+  }
+  return false
+}
+
+function handleBinarySinkFrame(ws: { send: (data: string) => unknown }, raw: Buffer): boolean {
+  if (raw.byteLength < 8) return false
+  if (!raw.subarray(0, 4).equals(BINARY_SINK_MAGIC)) return false
+
+  const headerLen = raw.readUInt32LE(4)
+  if (headerLen <= 0 || headerLen > BINARY_SINK_MAX_HEADER_BYTES || raw.byteLength < 8 + headerLen) {
+    try { ws.send(JSON.stringify({ result: { success: false, error: "invalid binary sink frame header" } })) } catch {}
+    return true
+  }
+
+  let header: { sinkId?: unknown; seq?: unknown; id?: unknown }
+  try {
+    header = JSON.parse(raw.subarray(8, 8 + headerLen).toString("utf-8"))
+  } catch {
+    try { ws.send(JSON.stringify({ result: { success: false, error: "invalid binary sink frame JSON" } })) } catch {}
+    return true
+  }
+
+  const sinkId = typeof header.sinkId === "string" ? header.sinkId : ""
+  const sink = binarySinks.get(sinkId)
+  if (!sink) {
+    sendWsResult(ws, header.id, { success: false, error: `binary sink not found: ${sinkId}` })
+    return true
+  }
+
+  const seq = typeof header.seq === "number" ? header.seq : sink.lastSeq + 1
+  if (seq !== sink.lastSeq + 1) {
+    sendWsResult(ws, header.id, { success: false, error: `binary sink sequence mismatch: expected ${sink.lastSeq + 1}, got ${seq}` })
+    return true
+  }
+
+  const payload = raw.subarray(8 + headerLen)
+  try {
+    writeSync(sink.fd, payload)
+    sink.hash.update(payload)
+    sink.bytes += payload.byteLength
+    sink.chunks += 1
+    sink.lastSeq = seq
+  } catch (err) {
+    // A write failure aborts the whole sink: close the fd, discard the temp
+    // file, and drop it from the registry so a later close() cannot promote a
+    // truncated file (and so the fd / temp file are not leaked). The subsequent
+    // close() will report "binary sink not found", surfacing the failure.
+    binarySinks.delete(sinkId)
+    try { closeSync(sink.fd) } catch {}
+    try { if (existsSync(sink.tempPath)) unlinkSync(sink.tempPath) } catch {}
+    sendWsResult(ws, header.id, { success: false, error: `binary sink write failed: ${(err as Error).message}` })
+  }
+  return true
+}
 
 async function handleOsAction(
   id: string,
@@ -898,8 +1284,21 @@ try {
 
         while (buf.length >= 4) {
           const msgLen = buf.readUInt32LE(0)
-          if (msgLen === 0 || msgLen > 1024 * 1024) {
-            log(`invalid socket message length: ${msgLen}, discarding`)
+          if (msgLen === 0 || msgLen > MAX_UPLOAD_FRAME_BYTES) {
+            // Oversized/corrupt frame. Recover the request id from the buffered
+            // prefix — it sits at the front of the JSON ({"id":"…","action":…}) —
+            // so the CLI gets an honest error instead of a silent 15s timeout,
+            // then drop the buffer.
+            let recoveredId: string | undefined
+            try {
+              const prefix = buf.subarray(4, Math.min(buf.length, 4 + 256)).toString("utf-8")
+              const m = prefix.match(/"id"\s*:\s*"([^"]+)"/)
+              if (m) recoveredId = m[1]
+            } catch {}
+            log(`oversized socket frame: ${msgLen} bytes exceeds ${MAX_UPLOAD_FRAME_BYTES}, discarding${recoveredId ? ` (id ${recoveredId})` : ""}`)
+            if (recoveredId) {
+              socketWriteFramed(socket, JSON.stringify({ id: recoveredId, result: { success: false, error: `payload too large: ${msgLen} bytes exceeds transport limit ${MAX_UPLOAD_FRAME_BYTES} — split the upload or use a smaller file` } }))
+            }
             buf = Buffer.alloc(0)
             break
           }
@@ -919,6 +1318,9 @@ try {
           // Native relay registration — relay process identifies itself
           if (request.type === "native-relay") {
             ;(socket as any).__nativeRelay = true
+            if (nativeRelaySocket && nativeRelaySocket !== socket) {
+              log("native relay superseded — previous registration replaced (reconnect or second browser)")
+            }
             nativeRelaySocket = socket
             log("native relay registered via IPC socket")
             continue
@@ -926,6 +1328,16 @@ try {
 
           // Native relay message forwarding — route to extension protocol handler
           if ((socket as any).__nativeRelay) {
+            // Keepalive pings are answered directly on the originating socket:
+            // the extension's pong timer must measure THIS link, not the
+            // relay-slot routing state (a superseded slot starved pongs and
+            // forced endless 15s-timeout reconnects).
+            if (isRelayPing(request)) {
+              log("received ping (relay), sending pong to origin")
+              socketWriteFramed(socket, JSON.stringify({ type: "pong" }))
+              emitEvent("keepalive_ping")
+              continue
+            }
             handleNativeMessage(request as any)
             continue
           }
@@ -937,8 +1349,68 @@ try {
           emitEvent("request_received", { requestId: id, action: actionType })
 
           if (action?.type === "contexts") {
-            const list = [...extensionWsMap.keys()]
+            const list = [...extensionWsMap.keys(), ...cdpManager.contextIds(), ...iosManager.contextIds()]
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: list } }))
+            continue
+          }
+
+          // Runtime Agent surface: list connected in-process agents.
+          if (action?.type === "native_status") {
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: true, data: [...nativeAgentMeta.values()] } }))
+            continue
+          }
+
+          // CDP-app surface: lifecycle actions → manager; verbs for
+          // cdp: contexts → manager (app: contexts are extensions, handled below).
+          if (action?.type && CDP_ACTION_TYPES.has(action.type)) {
+            cdpManager.handle(action as { type: string; [k: string]: unknown })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `cdp dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          if (request.contextId && request.contextId.startsWith(CDP_CONTEXT_PREFIX)) {
+            cdpManager.executeVerb(request.contextId, (action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `cdp verb failed: ${(err as Error).message}` } })))
+            continue
+          }
+
+          // iOS device surface: lifecycle actions → manager; verbs for ios: contexts → manager.
+          if (action?.type && IOS_ACTION_TYPES.has(action.type)) {
+            iosManager.handle(action as { type: string; [k: string]: unknown })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          // iOS WEB lane: MUST be tested before the broad `ios:` fallback
+          // below so a web action never reaches ensureRunner just for carrying a
+          // device context. The web lane needs no runner / Developer Mode.
+          if (action?.type && IOS_WEB_ACTION_TYPES.has(action.type)) {
+            iosWebManager.handle(action as { type: string; [k: string]: unknown }, request.contextId)
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios web dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          // iOS device-service introspection lane: tested before the
+          // broad `ios:` fallback so service actions never reach ensureRunner.
+          if (action?.type && IOS_SVC_ACTION_TYPES.has(action.type)) {
+            iosServiceManager.handle(action as { type: string; [k: string]: unknown }, request.contextId)
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios svc dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          // iOS Instruments/DTX + telemetry + developer-service lanes:
+          // tested before the broad `ios:` fallback so they never reach ensureRunner.
+          if (action?.type && IOS_DEV_ACTION_TYPES.has(action.type)) {
+            iosDevManager.handle(action as { type: string; [k: string]: unknown }, request.contextId)
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios dev dispatch failed: ${(err as Error).message}` } })))
+            continue
+          }
+          if ((action?.type && IOS_VERB_TYPES.has(action.type)) || (request.contextId && request.contextId.startsWith(IOS_CONTEXT_PREFIX))) {
+            iosManager.executeVerb(request.contextId ?? "", (action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+              .then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+              .catch((err) => socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `ios verb failed: ${(err as Error).message}` } })))
             continue
           }
 
@@ -977,6 +1449,8 @@ try {
             contextId: request.contextId,
             connectedContexts: [...extensionWsMap.keys()],
             nativeRelayAvailable: !!nativeRelaySocket,
+            cdpContexts: cdpManager.contextIds(),
+            iosContexts: iosManager.contextIds(),
           })
           if (!contextValidation.ok) {
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
@@ -990,7 +1464,7 @@ try {
             log(`request timeout: ${id}`)
             emitEvent("request_timeout", { requestId: id, action: actionType })
             socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: "timeout" } }))
-          }, REQUEST_TIMEOUT_MS)
+          }, requestTimeoutForAction(actionType))
           pendingRequests.set(id, {
             resolve: (response: string) => {
               clearTimeout(timer)
@@ -1012,8 +1486,13 @@ try {
       },
       close(socket: Bun.Socket<undefined>) {
         if ((socket as any).__nativeRelay) {
-          nativeRelaySocket = null
-          log("native relay disconnected")
+          const { slot, released } = relaySlotAfterClose(nativeRelaySocket, socket)
+          nativeRelaySocket = slot
+          if (released) {
+            log("native relay disconnected")
+          } else {
+            log("stale native relay closed — current relay registration kept")
+          }
         }
         socketBuffers.delete(socket)
         socketWriteQueues.delete(socket)
@@ -1026,20 +1505,22 @@ try {
   if (IS_WIN) {
     socketServer = Bun.listen({ hostname: "127.0.0.1", port: IPC_PORT, socket: socketHandlers })
   } else {
+    // We hold the WS port (the singleton token), so any leftover socket file is ours to clear.
+    try { if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH) } catch {}
     socketServer = Bun.listen({ unix: SOCKET_PATH, socket: socketHandlers })
   }
   log(`socket listening on ${transportLabel()}`)
 } catch (err) {
   log(`socket listen failed: ${(err as Error).message}`)
+  if (wsServer) wsServer.stop(true)
   process.exit(1)
 }
 
 Bun.write(PID_PATH, `${process.pid}\n${transportLabel()}\n`)
 log(`pid file written: ${process.pid}`)
 
-let wsServer: ReturnType<typeof Bun.serve> | null = null
-try {
-  wsServer = Bun.serve<undefined>({
+function startWsServer(): ReturnType<typeof Bun.serve> {
+  return Bun.serve<undefined>({
     port: WS_PORT,
     fetch(req, server) {
       if (server.upgrade(req, {})) return
@@ -1050,6 +1531,9 @@ try {
         log(`ws client connected`)
       },
       message(ws, raw) {
+        if (typeof raw !== "string" && handleBinarySinkFrame(ws, Buffer.from(raw))) {
+          return
+        }
         const rawStr = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf-8")
         log(`ws recv: ${rawStr.slice(0, 300)}`)
         let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string; result?: unknown }
@@ -1060,21 +1544,105 @@ try {
           return
         }
 
+        if (handleBinarySinkControl(ws, request as any)) {
+          return
+        }
+
+        // iOS InterceptorRunner: once a socket has registered as a
+        // runner, all its frames are {id,result} verb replies — route them to the
+        // manager's RunnerChannel before any generic {id,result} handling.
+        if (iosManager.isRunnerSocket(ws as any)) {
+          iosManager.handleRunnerMessage(ws as any, request as { id?: string; result?: { success: boolean; data?: unknown; error?: string } })
+          return
+        }
+
         if (request.type === "extension") {
           const ctxId = request.contextId ?? "default"
-          const oldCtxId = (ws as any).__contextId
-          if (oldCtxId && oldCtxId !== ctxId && extensionWsMap.get(oldCtxId) === ws) {
-            extensionWsMap.delete(oldCtxId)
+          const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId)
+          ws.send(JSON.stringify(claim.message))
+          if (claim.status === "conflict") {
+            return
           }
-          ;(ws as any).__contextId = ctxId
-          extensionWsMap.set(ctxId, ws)
           log(`ws extension registered [context: ${ctxId}]`)
           drainWsOutboundQueue(ctxId)
           return
         }
 
+        // Runtime Agent surface: an in-process agent dylib registers
+        // here. We store it in extensionWsMap under its runtime:<app> contextId
+        // so verb routing / contexts / disambiguation all work unchanged, plus
+        // nativeAgentMeta for `macos runtime status`.
+        if (request.type === NATIVE_REGISTER_TYPE) {
+          const r = request as { contextId?: string; pid?: number; slice?: string; appName?: string; frameworks?: string[]; wayIn?: string }
+          const ctxId = r.contextId && r.contextId.startsWith(NATIVE_CONTEXT_PREFIX) ? r.contextId : NATIVE_CONTEXT_PREFIX + (r.contextId ?? "app")
+          const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId)
+          ws.send(JSON.stringify(claim.message))
+          if (claim.status === "conflict") {
+            return
+          }
+          if (claim.previousContextId) {
+            nativeAgentMeta.delete(claim.previousContextId)
+          }
+          ;(ws as any).__native = true
+          nativeAgentMeta.set(ctxId, {
+            contextId: ctxId,
+            appName: r.appName ?? ctxId.slice(NATIVE_CONTEXT_PREFIX.length),
+            pid: typeof r.pid === "number" ? r.pid : undefined,
+            slice: (r.slice as CodeSlice) ?? "unknown",
+            wayIn: r.wayIn as NativeWayIn | undefined,
+            frameworks: Array.isArray(r.frameworks) ? r.frameworks : undefined,
+            registeredAt: Date.now(),
+            connection: "connected",
+          })
+          log(`ws native agent registered [context: ${ctxId} pid: ${r.pid ?? "?"} slice: ${r.slice ?? "?"}]`)
+          emitEvent("native_agent_registered", { contextId: ctxId, pid: r.pid, slice: r.slice, appName: r.appName })
+          drainWsOutboundQueue(ctxId)
+          return
+        }
+
+        // Runtime Agent surface: the agent delegates a TCC-gated /
+        // OS-level op to the bridge. Routes the macos_* action to the bridge and
+        // returns {id,result} back to the agent's ws.
+        if (request.type === NATIVE_DELEGATE_TYPE) {
+          const id = request.id ?? crypto.randomUUID()
+          const action = (request.action as Record<string, unknown> | undefined) ?? { type: "unknown" }
+          const ctxId = (ws as any).__contextId ?? "runtime:?"
+          forwardDelegateToBridge(id, action, ws, ctxId)
+          return
+        }
+
+        // iOS device surface: the on-device InterceptorRunner dials in
+        // and registers {type:"ios", udid, token}. The manager validates the
+        // per-session token, binds the socket to a RunnerChannel, and the daemon
+        // tags it so subsequent frames route to handleRunnerMessage (above).
+        if (request.type === IOS_REGISTER_TYPE) {
+          const r = request as { udid?: string; token?: string; contextId?: string }
+          const ack = iosManager.registerRunner(ws as any, r)
+          try { ws.send(JSON.stringify({ type: IOS_REGISTER_TYPE, ...ack })) } catch {}
+          if (ack.ok) log(`ws ios runner registered [context: ${ack.contextId}]`)
+          else log(`ws ios runner registration rejected: ${ack.error}`)
+          return
+        }
+
         if (request.type === "keepalive") {
           log("ws keepalive")
+          // Ack so the extension can detect a half-open socket. After MV3 SW
+          // hibernation the OS socket can wedge OPEN-but-dead: the extension's
+          // outbound keepalives keep flowing while its ws.onmessage is silently
+          // severed. The ack is the inbound frame the extension watches for; N
+          // consecutive unacked keepalives means the read side is gone and it
+          // must force a reconnect. Older extensions ignore this frame.
+          //
+          // This app-level ack is NOT redundant with Bun's protocol-level pings
+          // (sendPings, on by default): those are RFC 6455 control frames the
+          // browser's ws stack answers internally — extension JS never sees
+          // them, so they can't drive half-open detection on the client side.
+          //
+          // Bun's ServerWebSocket.send() reports failure via return value, not
+          // exceptions: -1 = enqueued with backpressure, 0 = dropped due to a
+          // connection issue, 1+ = bytes sent.
+          const ackSent = ws.send(JSON.stringify({ type: "keepalive_ack", timestamp: Date.now() }))
+          if (ackSent === 0) log("ws keepalive_ack dropped (connection issue) — extension will detect via miss limit")
           return
         }
 
@@ -1094,10 +1662,61 @@ try {
 
         const actionType = (request.action as { type?: string })?.type || "unknown"
 
+        // CDP-app surface over the WebSocket transport (screenshot etc.).
+        if (CDP_ACTION_TYPES.has(actionType)) {
+          cdpManager.handle(request.action as { type: string; [k: string]: unknown })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `cdp dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        if (request.contextId && request.contextId.startsWith(CDP_CONTEXT_PREFIX)) {
+          cdpManager.executeVerb(request.contextId, (request.action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `cdp verb failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+
+        // iOS device surface over the WebSocket transport (screenshot etc.).
+        if (IOS_ACTION_TYPES.has(actionType)) {
+          iosManager.handle(request.action as { type: string; [k: string]: unknown })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        // iOS WEB lane: tested before the broad `ios:` fallback below.
+        if (IOS_WEB_ACTION_TYPES.has(actionType)) {
+          iosWebManager.handle(request.action as { type: string; [k: string]: unknown }, request.contextId)
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios web dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        // iOS device-service introspection lane: before the broad `ios:` fallback.
+        if (IOS_SVC_ACTION_TYPES.has(actionType)) {
+          iosServiceManager.handle(request.action as { type: string; [k: string]: unknown }, request.contextId)
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios svc dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        // iOS Instruments/DTX + telemetry + developer-service lanes: before the broad `ios:` fallback.
+        if (IOS_DEV_ACTION_TYPES.has(actionType)) {
+          iosDevManager.handle(request.action as { type: string; [k: string]: unknown }, request.contextId)
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios dev dispatch failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+        if ((IOS_VERB_TYPES.has(actionType)) || (request.contextId && request.contextId.startsWith(IOS_CONTEXT_PREFIX))) {
+          iosManager.executeVerb(request.contextId ?? "", (request.action as { type: string; [k: string]: unknown }) ?? { type: "unknown" })
+            .then((result) => ws.send(JSON.stringify({ id, result })))
+            .catch((err) => { try { ws.send(JSON.stringify({ id, result: { success: false, error: `ios verb failed: ${(err as Error).message}` } })) } catch {} })
+          return
+        }
+
         const contextValidation = validateContextRouting({
           contextId: request.contextId,
           connectedContexts: [...extensionWsMap.keys()],
           nativeRelayAvailable: !!nativeRelaySocket,
+          cdpContexts: cdpManager.contextIds(),
+          iosContexts: iosManager.contextIds(),
         })
         if (!contextValidation.ok) {
           ws.send(JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
@@ -1110,7 +1729,7 @@ try {
           setTimeout(() => timedOutRequests.delete(id), 60_000)
           log(`ws request timeout: ${id}`)
           ws.send(JSON.stringify({ id, result: { success: false, error: "timeout" } }))
-        }, REQUEST_TIMEOUT_MS)
+        }, requestTimeoutForAction(actionType))
 
         pendingRequests.set(id, {
           resolve: (response: string) => {
@@ -1126,17 +1745,22 @@ try {
         sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
       },
       close(ws) {
+        // iOS InterceptorRunner socket closed → drop its channel + context.
+        if (iosManager.isRunnerSocket(ws as any)) {
+          iosManager.handleRunnerClose(ws as any)
+        }
         const ctxId = (ws as any).__contextId
         if (ctxId && extensionWsMap.get(ctxId) === ws) {
           extensionWsMap.delete(ctxId)
+        }
+        if (ctxId && nativeAgentMeta.has(ctxId)) {
+          nativeAgentMeta.delete(ctxId)
+          emitEvent("native_agent_disconnected", { contextId: ctxId })
         }
         log(`ws client disconnected [context: ${ctxId ?? "unknown"}]`)
       }
     }
   })
-  log(`ws server listening on port ${WS_PORT}`)
-} catch (err) {
-  log(`ws server failed (port ${WS_PORT} in use?) — continuing without WebSocket: ${(err as Error).message}`)
 }
 
 function gracefulShutdown(signal: string) {
@@ -1146,6 +1770,8 @@ function gracefulShutdown(signal: string) {
     socketWriteFramed(req.socket, JSON.stringify({ id, result: { success: false, error: "daemon shutting down" } }))
   }
   pendingRequests.clear()
+  try { cdpManager.shutdown() } catch {} // close outbound CDP sockets + disable Fetch/Network on targets
+  try { iosManager.shutdown() } catch {} // close WDA sessions + kill tunnel/forward/runner processes
   if (socketServer) {
     socketServer.stop(true)
     socketServer = null
@@ -1153,6 +1779,7 @@ function gracefulShutdown(signal: string) {
   if (wsServer) wsServer.stop(true)
   try { unlinkSync(SOCKET_PATH) } catch {}
   try { unlinkSync(PID_PATH) } catch {}
+  try { clearLockFile(LOCK_PATH) } catch {}
   log("shutdown complete")
   process.exit(0)
 }
@@ -1161,9 +1788,11 @@ process.on("exit", (code) => {
   log(`exiting with code ${code}`)
   try { unlinkSync(SOCKET_PATH) } catch {}
   try { unlinkSync(PID_PATH) } catch {}
+  try { clearLockFile(LOCK_PATH) } catch {}
 })
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
 process.on("SIGINT", () => gracefulShutdown("SIGINT"))
+process.on("SIGHUP", () => gracefulShutdown("SIGHUP"))
 process.on("uncaughtException", (err) => {
   log(`uncaught exception: ${err.message}\n${err.stack}`)
 })

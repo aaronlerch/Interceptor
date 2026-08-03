@@ -3,9 +3,14 @@ import ApplicationServices
 
 final class TextDomain: DomainHandler, @unchecked Sendable {
     private let refRegistry: RefRegistry
+    // route AX calls through the transport + codec (removes the
+    // `rangeValue as! AXValue` force cast) and apply central secure redaction so
+    // a secure text field never returns its contents (a security correction).
+    private let transport: any AXTransport
 
-    init(refRegistry: RefRegistry = .shared) {
+    init(refRegistry: RefRegistry = .shared, transport: any AXTransport = LiveAXTransport()) {
         self.refRegistry = refRegistry
+        self.transport = transport
     }
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
@@ -28,45 +33,45 @@ final class TextDomain: DomainHandler, @unchecked Sendable {
             return
         }
 
+        // Secure-field correction: never emit the contents of a password field.
+        if AXSecureRedaction.isSecureElement(element, transport: transport) {
+            completion(WireFormat.success(AXSecureRedaction.placeholder))
+            return
+        }
+
         let mode = action["mode"] as? String ?? "full"
 
         switch mode {
         case "selection":
-            var value: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXSelectedTextAttribute as CFString, &value) == .success,
-               let text = value as? String {
+            let (result, value) = transport.copyAttributeValue(element, kAXSelectedTextAttribute as String)
+            if result == .success, let text = AXValueCodec.displayString(value) {
                 completion(WireFormat.success(text))
             } else {
                 completion(WireFormat.error("no selected text"))
             }
         case "visible":
             // Try visible character range, then fall back to full value
-            var rangeValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXVisibleCharacterRangeAttribute as CFString, &rangeValue) == .success {
-                var range = CFRange(location: 0, length: 0)
-                AXValueGetValue(rangeValue as! AXValue, .cfRange, &range)
+            let (rangeResult, rangeValue) = transport.copyAttributeValue(element, kAXVisibleCharacterRangeAttribute as String)
+            if rangeResult == .success, var range = AXValueCodec.range(from: rangeValue) {
                 // Use parameterized attribute to get text for range
-                var textValue: CFTypeRef?
-                var cfRange = range
-                let rangeVal = AXValueCreate(.cfRange, &cfRange)!
-                if AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, rangeVal, &textValue) == .success,
-                   let text = textValue as? String {
-                    completion(WireFormat.success(text))
-                    return
+                if let rangeVal = AXValueCreate(.cfRange, &range) {
+                    let (textResult, textValue) = transport.copyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as String, rangeVal)
+                    if textResult == .success, let text = AXValueCodec.displayString(textValue) {
+                        completion(WireFormat.success(text))
+                        return
+                    }
                 }
             }
             // Fallback to full value
-            var fullValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &fullValue) == .success,
-               let text = fullValue as? String {
+            let (fullResult, fullValue) = transport.copyAttributeValue(element, kAXValueAttribute as String)
+            if fullResult == .success, let text = AXValueCodec.displayString(fullValue) {
                 completion(WireFormat.success(text))
             } else {
                 completion(WireFormat.error("no visible text"))
             }
         default: // "full"
-            var value: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
-               let text = value as? String {
+            let (result, value) = transport.copyAttributeValue(element, kAXValueAttribute as String)
+            if result == .success, let text = AXValueCodec.displayString(value) {
                 completion(WireFormat.success(text))
             } else {
                 completion(WireFormat.error("no text value"))

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs"
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 
 export type PidState =
@@ -16,6 +16,39 @@ export type StartupDecision =
   | { action: "clear-and-continue"; reason: string }
   | { action: "clear-and-spawn"; reason: string }
 
+// Metadata record of the running singleton, read by `interceptor diagnose`
+// for binary-mismatch detection. NOT a duplicate-prevention mechanism — the
+// WS-port bind is the authoritative singleton token (see decideSingletonGate).
+export type LockFileData = {
+  pid: number
+  version: string
+  execPath: string
+  startedAt: string
+  socketPath: string
+  wsPort: number
+  // "native-singleton": a non-standalone process that fell back to serving
+  // in-process after failing to spawn a detached standalone daemon.
+  mode: "standalone" | "native-singleton"
+}
+
+export function readLockFile(lockPath: string): LockFileData | null {
+  try {
+    return JSON.parse(readFileSync(lockPath, "utf-8")) as LockFileData
+  } catch {
+    return null
+  }
+}
+
+export function writeLockFile(lockPath: string, data: LockFileData): void {
+  try {
+    writeFileSync(lockPath, JSON.stringify(data, null, 2), "utf-8")
+  } catch {}
+}
+
+export function clearLockFile(lockPath: string): void {
+  try { unlinkSync(lockPath) } catch {}
+}
+
 type SpawnedProcess = { unref(): void }
 
 export type LifecycleDeps = {
@@ -29,12 +62,13 @@ export type LifecycleDeps = {
   execPath: string
   argv: string[]
   pidPath: string
+  lockPath: string
   socketPath: string
   isWin: boolean
   log: (msg: string) => void
 }
 
-export function defaultLifecycleDeps(paths: { pidPath: string; socketPath: string; isWin: boolean }): LifecycleDeps {
+export function defaultLifecycleDeps(paths: { pidPath: string; lockPath: string; socketPath: string; isWin: boolean }): LifecycleDeps {
   return {
     existsSync,
     readFileSync,
@@ -46,6 +80,7 @@ export function defaultLifecycleDeps(paths: { pidPath: string; socketPath: strin
     execPath: process.execPath,
     argv: process.argv,
     pidPath: paths.pidPath,
+    lockPath: paths.lockPath,
     socketPath: paths.socketPath,
     isWin: paths.isWin,
     log: () => {},
@@ -79,12 +114,13 @@ export function readPidState(deps: Pick<LifecycleDeps, "existsSync" | "readFileS
   }
 }
 
-export function clearDaemonRuntimeFiles(deps: Pick<LifecycleDeps, "unlinkSync" | "pidPath" | "socketPath" | "isWin" | "log">, reason: string): void {
+export function clearDaemonRuntimeFiles(deps: Pick<LifecycleDeps, "unlinkSync" | "pidPath" | "lockPath" | "socketPath" | "isWin" | "log">, reason: string): void {
   deps.log(`clearing daemon runtime files: ${reason}`)
   if (!deps.isWin) {
     try { deps.unlinkSync(deps.socketPath) } catch {}
   }
   try { deps.unlinkSync(deps.pidPath) } catch {}
+  try { deps.unlinkSync(deps.lockPath) } catch {}
 }
 
 export function decideDaemonStartupRole(standalone: boolean, state: PidState): StartupDecision {
@@ -106,6 +142,32 @@ export function decideDaemonStartupRole(standalone: boolean, state: PidState): S
   }
 
   return { action: "continue" }
+}
+
+export type SingletonGateDecision = {
+  action: "serve" | "exit"
+  reason: string
+  exitCode: number
+}
+
+// The pid-file election (decideDaemonStartupRole) is advisory and racy. The authoritative
+// singleton token is the WebSocket port: the OS lets exactly one process bind it. A daemon
+// that reaches the singleton code path must acquire that port BEFORE claiming the CLI socket;
+// if it can't, another singleton already owns it, so this process must never proceed — doing
+// so would split-brain the system (one daemon owning the CLI socket, another the extension
+// channel). Exiting cleanly lets the existing daemon serve everyone; a native parent will
+// simply re-resolve its relay to the surviving singleton.
+export function decideSingletonGate(input: { wsPortAcquired: boolean; standalone: boolean }): SingletonGateDecision {
+  if (input.wsPortAcquired) {
+    return { action: "serve", reason: "acquired the singleton port", exitCode: 0 }
+  }
+  return {
+    action: "exit",
+    reason: input.standalone
+      ? "another singleton is already running; exiting this duplicate"
+      : "another singleton owns the port; exiting so the existing daemon serves everyone",
+    exitCode: 0,
+  }
 }
 
 export function resolveStandaloneSpawnSpec(execPath: string, argv: string[]): { command: string; args: string[] } {

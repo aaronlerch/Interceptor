@@ -1,0 +1,57 @@
+#!/bin/bash
+# Safari component postinstall.
+#
+# Early development installs preserved the previous containing app as
+# /Applications/.InterceptorSafari-<version>.noindex. LaunchServices still
+# discovers those bundles despite the suffix, which can leave two enabled
+# Safari extensions with the same identifier. Move only verified Interceptor
+# backups out of /Applications, keep them recoverable, and register the newly
+# installed app as the sole candidate.
+set -eu
+
+APP_ID="com.interceptor.safari"
+EXTENSION_ID="com.interceptor.safari.Extension"
+CURRENT_APP="/Applications/InterceptorSafari.app"
+RECOVERY_ROOT="/Library/Application Support/Interceptor/recovery/safari"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+bundle_identifier() {
+  /usr/bin/plutil -extract CFBundleIdentifier raw -o - "$1/Contents/Info.plist" 2>/dev/null || true
+}
+
+move_legacy_backup() {
+  legacy_app="$1"
+  legacy_appex="$legacy_app/Contents/PlugIns/InterceptorSafari Extension.appex"
+
+  # Never follow a symlink and never move a similarly named third-party app.
+  [ ! -L "$legacy_app" ] || return 0
+  [ "$(bundle_identifier "$legacy_app")" = "$APP_ID" ] || return 0
+  [ "$(bundle_identifier "$legacy_appex")" = "$EXTENSION_ID" ] || return 0
+
+  /usr/bin/pluginkit -r "$legacy_appex" >/dev/null 2>&1 || true
+  "$LSREGISTER" -u "$legacy_app" >/dev/null 2>&1 || true
+
+  /bin/mkdir -p "$RECOVERY_ROOT"
+  stamp="$(/bin/date -u +%Y%m%dT%H%M%SZ)"
+  target="$RECOVERY_ROOT/$(/usr/bin/basename "$legacy_app").disabled-$stamp"
+  suffix=0
+  while [ -e "$target" ]; do
+    suffix=$((suffix + 1))
+    target="$RECOVERY_ROOT/$(/usr/bin/basename "$legacy_app").disabled-$stamp-$suffix"
+  done
+
+  /bin/mv "$legacy_app" "$target"
+  echo "Interceptor Safari: moved stale duplicate to $target"
+}
+
+for legacy_app in /Applications/.InterceptorSafari-*.noindex; do
+  [ -d "$legacy_app" ] || continue
+  move_legacy_backup "$legacy_app"
+done
+
+if [ -d "$CURRENT_APP" ]; then
+  "$LSREGISTER" -f "$CURRENT_APP" >/dev/null 2>&1 || true
+  /usr/bin/pluginkit -a "$CURRENT_APP/Contents/PlugIns/InterceptorSafari Extension.appex" >/dev/null 2>&1 || true
+fi
+
+exit 0

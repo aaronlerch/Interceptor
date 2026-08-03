@@ -84,6 +84,123 @@ if ((window as any).__interceptor_net_installed) {
     }
   }) as EventListener)
 
+  // Main-world gesture dispatch. Synthetic pointer events fired from the content
+  // script's ISOLATED world don't drive some frameworks' `pointerdown` handlers
+  // (Radix / Floating UI menus open on pointerdown but ignore isolated-world
+  // events). The content script bridges here by dispatching an
+  // `__interceptor_click` CustomEvent on the target; we re-fire the gesture in
+  // the MAIN world — where the page's own listeners treat it as a real event —
+  // tagging each event trusted, and ack synchronously so the isolated side knows
+  // it does not need its legacy fallback dispatch.
+  document.addEventListener("__interceptor_click", ((e: CustomEvent) => {
+    const target = e.target as (Element & { focus?: () => void }) | null
+    if (!target || typeof (target as Element).dispatchEvent !== "function") return
+    const d = (e.detail || {}) as { x?: number; y?: number }
+    const base = {
+      bubbles: true, cancelable: true, composed: true,
+      clientX: d.x ?? 0, clientY: d.y ?? 0,
+      button: 0, pointerId: 1, pointerType: "mouse", isPrimary: true,
+    }
+    const fire = (ev: Event) => {
+      (ev as Event & { __interceptor_trust?: boolean }).__interceptor_trust = true
+      target.dispatchEvent(ev)
+    }
+    try {
+      fire(new PointerEvent("pointerover", { ...base, buttons: 1 }))
+      fire(new MouseEvent("mouseover", { ...base, buttons: 1 }))
+      fire(new PointerEvent("pointerdown", { ...base, buttons: 1 }))
+      fire(new MouseEvent("mousedown", { ...base, buttons: 1 }))
+      try { target.focus?.() } catch {}
+      fire(new PointerEvent("pointerup", { ...base, buttons: 0 }))
+      fire(new MouseEvent("mouseup", { ...base, buttons: 0 }))
+      fire(new MouseEvent("click", { ...base, buttons: 0 }))
+      target.dispatchEvent(new CustomEvent("__interceptor_click_ack", { bubbles: true }))
+    } catch {}
+  }) as EventListener, true)
+
+  // File-drop trust bridge. The content script (ISOLATED) can build a File and
+  // fire a drop, but that drop is isTrusted:false — some dropzones reject it.
+  // Here in MAIN we re-build the File from the blob: URL it handed us and fire
+  // the drag sequence *inside our own realm*, tagged trusted, so the page's own
+  // drop listener sees isTrusted:true (the tag only works in the realm that owns
+  // the isTrusted getter override above). Ack back with {id, ok} so the content
+  // side knows whether to fall back to its own isolated dispatch.
+  document.addEventListener("__interceptor_file_drop", ((e: CustomEvent) => {
+    const target = e.target as (Element & { dispatchEvent: (ev: Event) => boolean }) | null
+    const d = (e.detail || {}) as { id?: string; blobUrl?: string; name?: string; type?: string; x?: number; y?: number }
+    if (!target || !d.id || !d.blobUrl) return
+    const ack = (ok: boolean) => {
+      try {
+        target.dispatchEvent(new CustomEvent("__interceptor_file_drop_ack", { bubbles: true, detail: { id: d.id, ok } }))
+      } catch {}
+    }
+    ;(async () => {
+      try {
+        const resp = await fetch(d.blobUrl as string)
+        const blob = await resp.blob()
+        const file = new File([blob], d.name || "file", { type: d.type || blob.type || "application/octet-stream" })
+        const dt = new DataTransfer()
+        dt.items.add(file)
+        const base = {
+          bubbles: true, cancelable: true, composed: true,
+          clientX: d.x ?? 0, clientY: d.y ?? 0,
+        }
+        const fire = (type: string) => {
+          const ev = new DragEvent(type, { ...base, dataTransfer: dt }) as DragEvent & { __interceptor_trust?: boolean }
+          ev.__interceptor_trust = true
+          target.dispatchEvent(ev)
+        }
+        fire("dragenter")
+        fire("dragover")
+        fire("drop")
+        ack(true)
+      } catch {
+        ack(false)
+      }
+    })()
+  }) as EventListener, true)
+
+  // File System Access API shim. Sites whose "browse" button calls
+  // window.showOpenFilePicker() open a native OS panel the browser surface can't
+  // drive. The content script stages a file via __interceptor_stage_file; the
+  // next showOpenFilePicker() call resolves to that file instead of opening the
+  // panel. Only installed when the native API exists (Chromium), so we never
+  // fake support that would change a page's feature detection.
+  {
+    const stagedFiles: Array<{ blobUrl: string; name: string; type: string }> = []
+    document.addEventListener("__interceptor_stage_file", ((e: CustomEvent) => {
+      const d = (e.detail || {}) as { blobUrl?: string; name?: string; type?: string }
+      if (d.blobUrl) stagedFiles.push({ blobUrl: d.blobUrl, name: d.name || "file", type: d.type || "application/octet-stream" })
+    }) as EventListener)
+
+    const win = window as unknown as { showOpenFilePicker?: (...a: unknown[]) => Promise<unknown> }
+    if (typeof win.showOpenFilePicker === "function") {
+      const orig = win.showOpenFilePicker.bind(window)
+      try {
+        Object.defineProperty(window, "showOpenFilePicker", {
+          configurable: true,
+          writable: true,
+          value: async function (...args: unknown[]) {
+            const staged = stagedFiles.shift()
+            if (!staged) return orig(...args)
+            const resp = await fetch(staged.blobUrl)
+            const blob = await resp.blob()
+            const file = new File([blob], staged.name, { type: staged.type || blob.type || "application/octet-stream" })
+            try { URL.revokeObjectURL(staged.blobUrl) } catch {}
+            return [{
+              kind: "file",
+              name: staged.name,
+              getFile: async () => file,
+              isSameEntry: async () => false,
+              queryPermission: async () => "granted",
+              requestPermission: async () => "granted",
+            }]
+          }
+        })
+      } catch {}
+    }
+  }
+
   function applyOverrides(rawUrl: string): string {
     if (!overrideRules.length) return rawUrl
     for (const rule of overrideRules) {

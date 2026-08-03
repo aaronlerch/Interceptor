@@ -8,6 +8,7 @@ export type PlatformConfig = {
   ipcPort: number
   wsPort: number
   pidPath: string
+  lockPath: string
   logPath: string
   eventsPath: string
   monitorSessionsDir: string
@@ -23,11 +24,12 @@ export function resolvePlatformConfig(platform: PlatformName = process.platform,
   const ipcPort = parseInt(process.env.INTERCEPTOR_IPC_PORT || "19221")
   const wsPort = parseInt(process.env.INTERCEPTOR_WS_PORT || "19222")
   const pidPath = process.env.INTERCEPTOR_PID_PATH || `${temp}${sep}interceptor.pid`
+  const lockPath = process.env.INTERCEPTOR_LOCK_PATH || `${temp}${sep}interceptor.lock`
   const logPath = process.env.INTERCEPTOR_LOG_PATH || `${temp}${sep}interceptor.log`
   const eventsPath = process.env.INTERCEPTOR_EVENTS_PATH || `${temp}${sep}interceptor-events.jsonl`
   const monitorSessionsDir = process.env.INTERCEPTOR_MONITOR_SESSIONS_DIR || `${temp}${sep}interceptor-monitor-sessions`
   const transportLabel = isWin ? `tcp:127.0.0.1:${ipcPort}` : `unix:${socketPath}`
-  return { isWin, temp, sep, socketPath, ipcPort, wsPort, pidPath, logPath, eventsPath, monitorSessionsDir, transportLabel }
+  return { isWin, temp, sep, socketPath, ipcPort, wsPort, pidPath, lockPath, logPath, eventsPath, monitorSessionsDir, transportLabel }
 }
 
 const current = resolvePlatformConfig()
@@ -39,10 +41,28 @@ export const SOCKET_PATH = current.socketPath
 export const IPC_PORT = current.ipcPort
 export const WS_PORT = current.wsPort
 export const PID_PATH = current.pidPath
+export const LOCK_PATH = current.lockPath
 export const LOG_PATH = current.logPath
 export const EVENTS_PATH = current.eventsPath
 export const MONITOR_SESSIONS_DIR = current.monitorSessionsDir
 export const EVENTS_MAX_SIZE = 10 * 1024 * 1024
+
+// File-upload transport sizing. The `upload` verb ships file bytes
+// base64-encoded inside the command JSON. Three limits gate the path:
+//  - MAX_UPLOAD_FRAME_BYTES: the largest single length-prefixed frame the
+//    CLI<->daemon Unix socket will accept. Raised from the historical 1 MiB
+//    (which silently discarded any file > ~768 KiB) to 64 MiB so a single-shot
+//    upload can ride the WS daemon<->extension transport up to the
+//    tabs.sendMessage ceiling.
+//  - UPLOAD_CHUNK_B64_BYTES: base64 length above which the CLI splits the file
+//    into sequential `file_upload_chunk` actions. Kept well under Chrome's hard
+//    1 MiB native-messaging host->extension limit so chunked uploads work on
+//    EVERY daemon<->extension transport (ws / native / relay), not just WS.
+//  - MAX_UPLOAD_FILE_BYTES: raw-file preflight ceiling. Above this the CLI
+//    fails fast with an honest error instead of a silent timeout.
+export const MAX_UPLOAD_FRAME_BYTES = 64 * 1024 * 1024
+export const UPLOAD_CHUNK_B64_BYTES = 512 * 1024
+export const MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024
 
 export function listenOptions(socketHandlers: Record<string, unknown>) {
   if (IS_WIN) {

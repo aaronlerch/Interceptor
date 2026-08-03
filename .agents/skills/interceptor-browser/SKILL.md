@@ -1,25 +1,29 @@
 ---
 name: interceptor-browser
-description: "Drive a signed-in Chrome / Brave session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser profiles with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native macOS apps, OS dialogs, browser chrome, or large scraping."
+description: "Drive a signed-in Chrome / Brave / Safari session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser contexts with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native macOS apps, Electron desktop app web contents, OS dialogs, browser chrome, or large scraping."
 metadata:
-  short-description: Drive a real signed-in Chrome / Brave session via the interceptor CLI
+  short-description: Drive a real signed-in Chrome / Brave / Safari session via the interceptor CLI
 ---
 
 # Interceptor Browser
 
-Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome / Brave session: pages, network, scene graph, monitor, screenshots. For native macOS apps load `interceptor-macos` instead.
+Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome, Brave, or Safari session: pages, network, scene graph, monitor, screenshots. For native macOS apps load `interceptor-macos` instead.
 
 This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `/Library/Application Support/Interceptor/skills`.
 
 ## Core Rules
 
 - Use compound commands (`open`, `read`, `act`, `inspect`) before low-level verbs.
-- Browser commands operate inside the cyan `interceptor` tab group. Do not use `--any-tab` unless the user explicitly authorizes acting outside that group.
+- Browser commands operate inside managed Interceptor tab groups. Do not use `--any-tab` unless the user explicitly authorizes acting outside those groups.
+- When other agents may share this browser, scope yourself with `--group <label>` on every command (or set `INTERCEPTOR_GROUP` once): your tabs live in their own colored group, resolution never leaves it, and cross-group targets are rejected. Run `interceptor group close <label>` when your job is done; `interceptor group list` shows what's running.
 - `interceptor open <url>` and `interceptor tab new <url>` create background tabs by default. Only `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus.
 - If multiple browser profiles are connected, run `interceptor contexts` and pass `--context <id>`.
+- Safari registers as the stable context `safari`; route with `interceptor --context safari <verb>`. If it is absent, verify the notarized Interceptor Safari extension is enabled before attempting page commands. Safari's enable switch is a protected user-present action; never try to bypass its Touch ID/password gate.
 - Prefer structured reads (`read`, `tree`, `text`, `inspect`, `scene`) before screenshots. Open `references/screenshot-policy.md` before screenshot-heavy work.
 - Default to plain text output. Use `--json` only when piping into scripts or when a downstream tool needs a machine-readable contract.
 - If an already-loaded unpacked extension behaves stale after a package update, reload it from `chrome://extensions` or `brave://extensions`, or run `interceptor reload` once the extension is reachable.
+- Safari package updates are loaded through the containing app/appex; do not look for a Chrome-style unpacked-extension reload button.
+- Safari suspends its background worker when idle, so `--context safari` can briefly report "context 'safari' not found" between commands and then self-heal. Re-issue the command rather than treating one transient drop as failure. Note two Safari capability limits: `headers add` only modifies recognized standard headers (arbitrary `X-…` names are refused — use `override` instead), and passive `net` capture reflects genuine page traffic, not requests you originate from `eval` (its world is separate from the page's).
 
 ## Fast Path
 
@@ -43,6 +47,11 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 | [`workflows/verify-deploy.md`](workflows/verify-deploy.md) | "Verify the deploy", "check that X works on the page", reproducing a bug before touching code |
 | [`workflows/read-and-extract.md`](workflows/read-and-extract.md) | Compound page read + SPA state extraction — pull a specific value off a page |
 | [`workflows/drive-rich-editor.md`](workflows/drive-rich-editor.md) | Canva, Google Docs, Google Slides, design-tool layer manipulation — anything where DOM refs aren't enough |
+| [`workflows/rich-editor-workflows.md`](workflows/rich-editor-workflows.md) | Canva shape insertion, Docs table build+fill, Slides table insert — what works natively vs the `eval --main` last mile |
+| [`workflows/google-docs-fill-empty-table-cells.md`](workflows/google-docs-fill-empty-table-cells.md) | Fill empty Docs table cells with the value above (canvas caret + per-char typing + Tab) |
+| [`workflows/canva-custom-size-creation.md`](workflows/canva-custom-size-creation.md) | Create a custom-size Canva design from home (normalized semantic replay) + monitor launch/handoff pattern |
+| [`workflows/cook-in-canvas.md`](workflows/cook-in-canvas.md) | Draw effects/markers directly through a page's own `CanvasRenderingContext2D` (Docs/Excalidraw), pixel-verified |
+| [`workflows/cook-on-top-of-pages.md`](workflows/cook-on-top-of-pages.md) | "Cook" a live page in-place — banners, HUDs, overlays that track real DOM, full-screen takeovers, over the real session |
 | [`workflows/override-xhr.md`](workflows/override-xhr.md) | Mutate a request before it hits the server — change params, force a status, throttle |
 | [`workflows/capture-page-communication.md`](workflows/capture-page-communication.md) | Capture WebSocket, Beacon, and BroadcastChannel activity without CDP |
 | [`workflows/record-and-replay.md`](workflows/record-and-replay.md) | Learn a real user flow, export a replay plan, run it back |
@@ -55,7 +64,11 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 |---|---|
 | [`references/browser-and-network.md`](references/browser-and-network.md) | Command selection, SPA extraction, request overrides, SSE capture, page-world `eval --main` cautions |
 | [`references/page-communication-capture.md`](references/page-communication-capture.md) | P1 WebSocket, Beacon, and BroadcastChannel capture mechanics, commands, event shapes, and limits |
-| [`references/rich-editors.md`](references/rich-editors.md) | Canva, Google Docs, Google Slides behavior, canvas-rendered editor input, WebGL camera apps, blob export capture |
+| [`references/rich-editors.md`](references/rich-editors.md) | Overview: Canva, Google Docs, Google Slides behavior, canvas-rendered editor input, WebGL camera apps, blob export capture (deep mechanics in the four `references/canvas-*`/`webgl-*`/`blob-*` files below) |
+| [`references/canvas-rendered-editor-input.md`](references/canvas-rendered-editor-input.md) | Deep mechanic: caret / typing / key-nav inside canvas-rendered editors (Docs/Slides/Sheets) via dispatched events + iframe-window `KeyboardEvent`. The `eval --main` + `__interceptor_trust`/`userActivation` foundation lives here. |
+| [`references/canvas-camera-overlays.md`](references/canvas-camera-overlays.md) | Deep mechanic: pan/zoom a WebGL map viewer + lat/lng DOM overlays (Web Mercator), URL-watcher pattern, CSS-filter restyle |
+| [`references/webgl-camera-control.md`](references/webgl-camera-control.md) | Deep mechanic: generic, app-agnostic WebGL camera control + overlay anchoring |
+| [`references/blob-export-capture.md`](references/blob-export-capture.md) | Deep mechanic: capture a webapp's client-side export bytes (PNG/PDF/SVG) with no Save dialog |
 | [`references/monitor-and-replay.md`](references/monitor-and-replay.md) | Monitor session behavior, replay-plan generation, cross-tab/focus-follow notes |
 | [`references/command-catalog.md`](references/command-catalog.md) | Full browser command surface with flags and examples |
 | [`references/screenshot-policy.md`](references/screenshot-policy.md) | VLM-aware screenshot budget table; agent-default recipe |
@@ -63,6 +76,8 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 ## When To Switch Surfaces
 
 If the target is **outside the page** - a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any non-browser macOS app - load `interceptor-macos` instead.
+
+If the target is an **Electron / Chromium desktop app's web contents** (Slack, VS Code, Notion, Descript, etc.), use the CDP/app reference from `interceptor-macos`: `references/cdp-app.md`.
 
 ## Do Not Default To Troubleshooting
 

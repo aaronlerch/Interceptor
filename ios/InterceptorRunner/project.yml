@@ -1,0 +1,68 @@
+# XcodeGen spec for InterceptorRunner — our own minimal XCUITest runner that
+# replaces WebDriverAgent. Generate the Xcode project with:
+#
+#   brew install xcodegen           # one-time
+#   cd ios/InterceptorRunner && xcodegen generate
+#
+# Then build + launch it on a device (Xcode owns the iOS 17+ tunnel + signing):
+#
+#   xcrun xcodebuild build-for-testing -project InterceptorRunner.xcodeproj \
+#     -scheme InterceptorRunner -destination "id=<UDID>" -allowProvisioningUpdates \
+#     DEVELOPMENT_TEAM=<TEAM> -derivedDataPath /tmp/runner-dd
+#
+# The daemon launches it for you when INTERCEPTOR_RUNNER_PROJECT points at this
+# .xcodeproj; it passes the WS URL + token via the test environment.
+name: InterceptorRunner
+options:
+  bundleIdPrefix: com.interceptor
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Automatic
+    # Operator supplies DEVELOPMENT_TEAM at build time (capability-blind: no team
+    # or signing material is committed here).
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  InterceptorRunner:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.interceptor.InterceptorRunner
+        PRODUCT_NAME: InterceptorRunner
+        GENERATE_INFOPLIST_FILE: NO
+        # Hostless UI test (drives whatever app is foreground, like WebDriverAgent).
+        TEST_TARGET_NAME: ""
+        USES_XCTRUNNER: YES
+        # Obj-C exception-catching shim (ObjCSupport.m) bridged into Swift.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/InterceptorRunner-Bridging-Header.h
+        CLANG_ENABLE_MODULES: YES
+    info:
+      path: Generated/InterceptorRunner-Info.plist
+      properties:
+        CFBundleDevelopmentRegion: "$(DEVELOPMENT_LANGUAGE)"
+        CFBundleExecutable: "$(EXECUTABLE_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleInfoDictionaryVersion: "6.0"
+        CFBundleName: "$(PRODUCT_NAME)"
+        CFBundlePackageType: BNDL
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+
+schemes:
+  InterceptorRunner:
+    build:
+      targets:
+        InterceptorRunner: [test]
+    test:
+      targets:
+        - InterceptorRunner

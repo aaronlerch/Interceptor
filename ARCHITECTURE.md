@@ -1,6 +1,8 @@
 # Interceptor — Architecture
 
-This document describes the live architecture as of the current monitor, CSP-fallback, and native-capture implementation. It is not a tutorial — it explains *how the pieces fit*, with file references. For user-facing usage see `README.md` / `AGENTS.md`.
+This document describes the live architecture as of the current monitor, CSP-fallback, native-capture, multi-surface control (CDP / native runtime agent + hook fabric), and capability-blind extension-fabric implementation. It is not a tutorial — it explains *how the pieces fit*, with file references. For user-facing usage see `README.md` / `AGENTS.md`.
+
+**Control surfaces.** Interceptor drives five surfaces, all brokered by the one daemon and addressed by `--context`: (1) the user's real **browser** (MV3 extension); (2) the macOS **bridge** (outside-in native control — AX, input, capture); (3) **CDP** for Electron/Chromium app web contents (`cdp:`/`app:`); (4) the in-process **native runtime agent** (`runtime:`); (5) the **iOS device** surface (`ios:<udid>`) — our own in-tree on-device XCUITest runner (InterceptorRunner) that dials INTO the daemon over WebSocket, launched over a pure-Bun developer channel (usbmux / lockdown / userspace RemoteXPC tunnel + testmanagerd on iOS 17+; no WebDriverAgent, no Xcode required). A **capability-blind extension fabric** lets operators add further surfaces without forking the product. The browser/monitor subsystems below are the oldest and deepest; the surface model and the fabric are documented in the *macOS bridge*, *CDP app control*, *Native Agent*, *iOS device surface*, and *Extension Fabric* subsections under **Other Subsystems**.
 
 ---
 
@@ -15,7 +17,8 @@ This document describes the live architecture as of the current monitor, CSP-fal
                                                      │ + WebSocket fallback
                                                      ▼
                                           ┌─────────────────────────┐
-                                          │ Chrome / Brave extension │
+                                          │ Browser WebExtensions     │
+                                          │ Chrome / Brave / Safari   │
                                           │ extension/src/*          │
                                           │ (background SW + content │
                                           │  scripts + inject-net)   │
@@ -32,7 +35,7 @@ This document describes the live architecture as of the current monitor, CSP-fal
 
 - **CLI** is a Bun-bundled standalone binary. It parses args, sends an action over `/tmp/interceptor.sock` to the daemon, and prints the response.
 - **Daemon** is a singleton (PID at `/tmp/interceptor.pid`). Spawned automatically by Chrome via native messaging, *or* started by the CLI on demand. It bridges CLI ⇄ extension ⇄ bridge, owns event persistence, and tracks per-session monitor artifacts.
-- **Extension** is an MV3 service worker plus content scripts + a MAIN-world inject script. It owns DOM capture, ref assignment, monitor session in-memory state, network monkey-patching, and scene-graph access for rich editors.
+- **Extension** is an MV3 service worker plus content scripts + a MAIN-world inject script. Chromium builds use `extension/src/background.ts`; Safari uses the native-relay `background-safari.ts` entrypoint inside a native containing app. Both own DOM capture, ref assignment, monitor session in-memory state, network monkey-patching, and scene-graph access for rich editors.
 - **Bridge** is a Swift LaunchAgent-style daemon that exposes macOS-native capabilities (AX tree, CGEvent input, ScreenCaptureKit, AVFoundation audio, Vision/NLP frameworks).
 
 ### CLI-first browser install
@@ -40,13 +43,14 @@ This document describes the live architecture as of the current monitor, CSP-fal
 - The primary repo install path builds `dist/interceptor`, `daemon/interceptor-daemon`, and `extension/dist/`, then runs `scripts/install.sh --brave --profile <profile>`.
 - `scripts/install.sh` writes native messaging host manifests for Chrome and Brave, then launches Brave with `--load-extension=extension/dist`. If Brave is already running, the script prompts before quitting and relaunching it.
 - Google Chrome branded desktop builds ignore `--load-extension`; the Chrome CLI path installs native messaging metadata, but the unpacked extension must be loaded manually from `chrome://extensions`.
+- Safari ships as the separate notarized `Interceptor-Safari-<version>.pkg` containing app. Opening the app once registers its appex; the user then enables Interceptor in Safari Settings through Safari's protected user-presence gate. Until that approval, Safari does not start the worker and no `safari` context exists. Its stable daemon context is `safari` after connection.
 - `interceptor macos trust` is a permission snapshot for native macOS automation. Browser runtime health should be checked through `interceptor status`, which confirms daemon, extension, and browser bridge state.
 
 ---
 
 ## Monitor Subsystem
 
-The monitor is the most architecturally interesting subsystem. Three PRDs shaped its current form.
+The monitor is the most architecturally interesting subsystem. Several design iterations shaped its current form.
 
 ### Core concepts
 
@@ -98,7 +102,7 @@ interface AttachmentRecord {
 
 ### Privacy boundary
 
-Focus-follow only attaches to tabs in the cyan **interceptor tab group** (`isTabInInterceptorGroup` in [`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts)). The user's personal tabs are never auto-attached. This boundary is preserved consistently across `tab new`, `tab switch`, and now focus-follow.
+Focus-follow only attaches to tabs in a **managed tab group** — the default interceptor group or any named per-agent group (`isTabInAnyManagedGroup` in [`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts)). The user's personal tabs are never auto-attached. This boundary is preserved consistently across `tab new`, `tab switch`, and now focus-follow.
 
 ### Lifecycle events
 
@@ -151,6 +155,8 @@ Plus:
 [`extension/src/background/safe-port-post.ts`](extension/src/background/safe-port-post.ts) is a pure helper with zero chrome dependency that traps a synchronous `Port.postMessage()` throw. [`extension/src/background/transport.ts`](extension/src/background/transport.ts) wraps both `nativePort.postMessage` call sites through it; on throw it nulls the reference, downgrades `activeTransport`, and the caller falls through to the WebSocket channel.
 
 `monitor_stop` (and `tabs.onRemoved`) wrap their `detachAttachment` + `sendToHost(mon_stop)` in `try` and run `sessions.delete` / `activeSessionByTab.delete` / `clearPendingChildTabsForSession` in `finally`. Cleanup is now guaranteed even if transport raises.
+
+**Half-open WebSocket detection.** After MV3 service-worker hibernation the ws to the daemon can wedge OPEN-but-dead: outbound keepalives keep flowing while `ws.onmessage` is silently severed, so ws-forwarded actions never get a reply. The daemon answers each ws keepalive with a `keepalive_ack`; the extension counts keepalives sent since the last inbound frame (pure reducers in `transport.ts`, `wsStateOn*`) and, once an ack has ever been seen on the connection, forces a reconnect through the shared `closeWsForReconnect` teardown after `WS_KEEPALIVE_MISS_LIMIT` consecutive unacked keepalives (~40s). The ack gate is re-learned per connection, so a daemon that never acks (older build) can never trip a false-positive reconnect loop. This is deliberately application-level: Bun's protocol pings (`sendPings`) are answered inside the browser's ws stack and are invisible to extension JS, so they cannot drive client-side detection.
 
 ### Network body persistence
 
@@ -207,7 +213,20 @@ Framed refs are round-trippable. `parseElementTarget` preserves `frameId` and `r
 
 ### Tab group isolation
 
-[`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts) maintains the cyan "interceptor" tab group. By default all interceptor commands operate only on tabs in this group; `--any-tab` opts out. Focus-follow respects this boundary.
+[`extension/src/background/tab-group.ts`](extension/src/background/tab-group.ts) maintains the default "interceptor" tab group (runtime-brandable title/color via `interceptor brand tab-group`). By default all interceptor commands operate only on tabs in managed groups; `--any-tab` opts out. Focus-follow respects this boundary.
+
+**Working-tab resolution** — the dispatcher resolves every request's working tab through [`extension/src/background/resolve-tab.ts`](extension/src/background/resolve-tab.ts): a well-formed explicit `action.tabId` (the `tab close <id>` / `tab switch <id>` argument) beats the `--tab` override (`msg.tabId`), which beats the stored auto-target / group tabs / browser-active fallback. The group gate therefore always validates the same tab the handler acts on. The auto-target is written exactly once per request, **after** the gate passes — there is no pre-gate persist, so a gate-rejected request (e.g. the browser-active tab is unmanaged) cannot poison the stored target for subsequent commands, and handlers do not write the auto-target themselves. All auto-target storage goes through a session-or-local fallback (`chrome.storage.session` is MV3-only; the MV2 Electron package shares these handlers). The CLI accepts tab ids only as strict numeric first non-flag arguments. Invariants are pinned by `extension/src/background/resolve-tab.test.ts` and `test/tab-id-args.test.ts`, and codified in `.agents/rules/tab-target-contract.md`.
+
+### Named per-agent tab groups
+
+Multiple agents can share one browser context without touching each other's tabs. `--group <label>` (or the `INTERCEPTOR_GROUP` env var; the flag wins) scopes an invocation to a named group rendered as `<brand>-<label>` on the tab strip with a deterministic per-label color (`--group-color` overrides):
+
+- **Registry** — `tab-group.ts` keeps a `label → groupId` map mirrored to `chrome.storage.session`, whose lifetime exactly matches Chrome's session-scoped group ids. Group creation is serialized per label (concurrent creators join one group instead of minting duplicates), and a `tabGroups.onRemoved` listener purges registry entries when a group is closed — by an agent or by hand.
+- **Scoped dispatch** — each group has its own auto-target key (`activeTabId:<label>`); grouped requests resolve strictly within their group (stored target → most-recent group tab → error) and never fall back to the browser-active tab. The privacy gate requires the target tab to be in the *caller's* group, and the auto-target is persisted only after that gate passes. Ungrouped requests require membership in *any* managed group, preserving single-agent behavior.
+- **Lifecycle** — `interceptor group list` reports every live group (label, title, color, tab count); `interceptor group close <label>` closes exactly that group's tabs in one atomic `tabs.remove`. Closing one group never affects another, so a human can clean up after a dead agent while others keep running.
+- **Group identity travels inside the action payload** (`action.group`), injected at the CLI transport choke point — the daemon relays it untouched, and browsers without the `tabGroups` API (the MV2 Electron bridge, Firefox) degrade gracefully to ungrouped behavior.
+- **Normal-window placement** — `tab_create` resolves a groupable *normal* window up front (`resolveNormalWindowPlacement` in `capabilities/tabs.ts`: focused normal → first normal → create one). Without it, `chrome.tabs.create` inherits whatever window last had focus — a popup/devtools/app window whose tabs `chrome.tabs.group` rejects. When a window must be created it carries the target url, and its initial tab *is* the requested tab (an empty window would ship a New Tab Page and leave an orphan next to the real tab). Grouping itself is tolerated-to-fail (guarded `chrome.tabs.group`, non-normal windows skipped), but failure is surfaced: when the group API exists and the tab still couldn't be grouped, the result carries a `groupWarning` — a silent `-1` would let two agents' tabs share a pile while both believe they're isolated.
+- **Monitor integration** — child tabs inherit their opener's group, and monitor auto-attach accepts any managed group.
 
 ### Transport routing (daemon)
 
@@ -216,10 +235,15 @@ The daemon talks to the extension via three channels, routed by [`daemon/outboun
 - **Native messaging stdio** — when daemon was spawned by Chrome
 - **WebSocket** (`ws://localhost:19222`) — fallback / preferred for action requests
 - **Native relay** — secondary daemon instances become transparent stdin/stdout bridges to the singleton (eliminates the every-30-second native-host disconnect noise; introduced in [#28](https://github.com/Hacker-Valley-Media/interceptor/pull/28))
+- **Safari native relay** — Safari's service worker long-polls its containing appex with `runtime.sendNativeMessage`; the appex owns a `URLSessionWebSocketTask` to `127.0.0.1:19222` and relays the unchanged command/response envelope
+
+Safari uses the Safari native relay because public `WKWebExtension` probes showed that its background JavaScript did not open a direct loopback WebSocket, even with both `localhost` and `127.0.0.1`. `background-safari.ts` calls `configureTransport({ contextId: "safari", safariNativeRelay: true })` before opening the relay and optional capabilities. One-shot native messages carry a bounded long-poll exchange; `SafariWebExtensionHandler.swift` keeps the daemon WebSocket alive between exchanges. Safari-absent APIs degrade locally. The shared action router is import-safe: entrypoints call `initializeActionRouter()` explicitly, preventing a missing WebExtension event from becoming a background-content load failure before registration.
+
+Two Safari-specific behaviors live above the transport. **Navigation acknowledgment:** Safari can unload a content script before delivering its async `sendResponse` when a click starts a navigation, leaving the message channel pending. `content-bridge.ts` treats a loading/url update on the exact target tab as the acknowledgement for click-like actions only, so a navigating click resolves instead of hanging or replaying against the new document (this also hardens Chrome). **Header modification:** DNR `modifyHeaders` rules declare an explicit `resourceTypes` set (omitting it excludes `main_frame`, so top-level requests are never rewritten on any browser), and the Safari manifest requests `declarativeNetRequestWithHostAccess`, which Safari requires for `modifyHeaders`/`redirect`. Safari additionally restricts modification to recognized standard header names; arbitrary custom headers are rejected at rule registration and must be rewritten through the MAIN-world override path instead.
 
 #### Named contexts (multi-browser isolation)
 
-The daemon tracks all connected extensions in `extensionWsMap: Map<string, WebSocket>` rather than a single scalar. On first startup each extension generates a UUID and persists it in `chrome.storage.local` (unique per Chrome profile, survives MV3 service-worker restarts). The UUID is announced in every WebSocket registration message `{ type: "extension", contextId: "<uuid>" }`.
+The daemon tracks all connected extensions in `extensionWsMap: Map<string, WebSocket>` rather than a single scalar. Chrome/Brave profiles generate a UUID and persist it in `chrome.storage.local`; Safari uses the fixed id `safari`, and its registration does not depend on storage being available. The id is announced in every WebSocket registration message `{ type: "extension", contextId: "<id>" }`; for Safari, the appex sends that registration over its relay-owned socket.
 
 CLI commands carry an optional `contextId` field in the IPC message. `sendNativeMessage` resolves the target WebSocket by:
 1. Exact `contextId` match from the map (when `--context <id>` is passed)
@@ -230,6 +254,15 @@ If no `contextId` is provided and zero or multiple extensions are connected, the
 Per-context outbound queues (`wsOutboundQueues: Map<string, string[]>`) replace the old global array; messages queued before the extension connects drain to the correct context on registration.
 
 `interceptor contexts` lists all connected context IDs. Use `--context <id>` on any command to route it to a specific profile.
+
+#### Message framing and large payloads (file upload)
+
+CLI↔daemon IPC and the daemon↔extension channels use length-prefixed frames (a 4-byte little-endian length followed by JSON). Two rules keep large frames intact:
+
+- **Backpressure.** `socket.write()` returns a partial byte count when a frame exceeds the socket send buffer; the unwritten remainder is queued and flushed on the `drain` event (`sendCommand` in `cli/transport.ts`, `socketWriteFramed` in `daemon/index.ts`). A single unchecked write silently truncates a large frame and the peer then blocks forever.
+- **Frame ceiling.** The IPC readers accept frames up to `MAX_UPLOAD_FRAME_BYTES` (`shared/platform.ts`). An oversized frame is dropped, but the request id is recovered from the buffered prefix so the caller gets an honest "payload too large" error instead of a silent timeout.
+
+**File-upload transport.** `interceptor upload` ships file bytes base64-encoded. Above `UPLOAD_CHUNK_B64_BYTES` the CLI splits the payload into sequential `file_upload_chunk` actions sharing an `uploadId`; the content script buffers them and a final `file_upload` assemble message reconstructs the file. Each chunk stays under the browser's ~1 MiB native-messaging host→extension limit, so uploads work on every daemon↔extension transport, not just WebSocket. The content handler prefers setting a resolved `<input type=file>`'s `.files` (which is `isTrusted`-independent), then falls back to a trusted synthetic drop and a File System Access `showOpenFilePicker` shim; every path returns a `verified` flag rather than claiming blind success.
 
 ### macOS bridge
 
@@ -251,7 +284,204 @@ The Router collapses an action `type` like `macos_nlp` into `command="nlp"` for 
 
 For screenshot saving, `interceptor-bridge/Sources/Domains/CaptureDomain.swift` no longer relies on `FileManager.default.currentDirectoryPath` when running under `launchd`. The CLI passes its working directory (`cli/commands/macos.ts`), and the bridge falls back through Downloads, home, then temp so `interceptor macos screenshot --save` works cleanly under LaunchAgent execution.
 
+#### AX transport seam, typed codec, and traversal budget
+
+Every Accessibility C call in the bridge routes through one injectable seam, `AXTransport` ([`interceptor-bridge/Sources/AXTransport.swift`](interceptor-bridge/Sources/AXTransport.swift)). `LiveAXTransport` is the only production implementation that imports `ApplicationServices`; a fake implementation drives the same surface in unit tests, so messaging timeouts, malformed values, and per-slot errors are testable without a live app. Nine domains route through it (`AccessibilityDomain`, `TextDomain`, `MenuDomain`, `InputDomain`, `MonitorAxBridge`, `MonitorInputBridge`, `MonitorDomain`, `DisplayDomain`, `TrustDomain`) — no domain calls an AX C function directly.
+
+Values decode through one non-trapping typed codec, `AXValueCodec`, which checks the CF type ID, then `AXValueGetType`, then the typed extraction result before touching a value. Failed extraction becomes a typed `decode_failed` instead of a trap, and the previous force casts (`as! AXValue`, `as! AXUIElement`, `unsafeBitCast`) are removed. Output is acyclic and JSON-safe: elements become ref tokens (never nested handles), integers outside the JS safe-integer range become decimal strings, and non-finite numbers never leak into JSON.
+
+Secure classification is centralized in `AXSecureRedaction`: a value from an `AXSecureTextField` is redacted to a fixed placeholder before serialization, logging, and error construction, and no flag can override it.
+
+`tree` and `find` walk under a per-command budget (`AXBudget`): a wall-clock deadline plus node and AX-call caps, checked cooperatively between calls, with a per-element messaging timeout as the in-flight bound for a single synchronous call. A large or slow tree returns a bounded partial ending in a `… (stopped: <reason>)` marker instead of running to the CLI timeout; callers tune it with `--max-nodes` / `--max-ms`, and the bridge clamps to safety hard caps.
+
+### CDP app control — Electron / Chromium desktop apps
+
+A third control surface (after browser and macOS bridge): drive the *web content
+inside* Electron/Chromium apps (Slack, VS Code, Descript, …). Lives in
+[`daemon/cdp/`](daemon/cdp/) + [`cli/commands/cdp.ts`](cli/commands/cdp.ts) +
+[`shared/cdp-app.ts`](shared/cdp-app.ts); no Swift bridge required.
+
+- **Path A (`interceptor cdp`)** — the daemon opens an **outbound** CDP WebSocket
+  (`daemon/cdp/connection.ts`) to a target's `webSocketDebuggerUrl` (discovered via
+  `daemon/cdp/discovery.ts`), registers it as a `cdp:<app>` context in a third
+  connection class (`cdpManager`, parallel to `extensionWsMap` and the bridge
+  socket), and translates verbs to CDP (`daemon/cdp/translate.ts`:
+  `eval`→`Runtime.evaluate`, `screenshot`→`Page.captureScreenshot`,
+  `click`→`Input.dispatch*`, `net`→`Network`/`Fetch`). Needs a relaunch with
+  `--remote-debugging-port` (gated by **no fuse** → works on every app incl.
+  hardened Slack/Claude).
+- **Path 0 (`interceptor app`)** — `SIGUSR1` activates the app's *own* Node
+  inspector at runtime (no restart; `daemon/cdp/inspector.ts`), then
+  `session.loadExtension` loads a resident extension that registers as an
+  `app:<name>` extension context. Gated by the `nodeCliInspect` fuse (Electron
+  default ON). Falls back to Path A when the fuse is off.
+
+Routing: a `cdp:`-prefixed `contextId` (or a `cdp_*`/`app_*` action) is routed to
+`cdpManager` in both the socket and WebSocket daemon handlers; `app:` contexts are
+ordinary extension contexts. `interceptor contexts` lists both alongside browser
+contexts. See `.agents/skills/interceptor-macos/references/cdp-app.md`.
+
+Why CDP here despite the browser surface's zero-CDP rule: that rule defends the
+user's *real browser* against anti-bot fingerprinting. These are the user's *own*
+apps — no adversary — so CDP is the correct primitive, not an escalation.
+
+### iOS device surface — on-device InterceptorRunner (`ios:<udid>`)
+
+The fifth surface: drive *any installed app* on an owned,
+unlocked, Developer-Mode iPhone via **our own in-tree XCUITest runner**,
+[`ios/InterceptorRunner/`](ios/InterceptorRunner/) — **not** WebDriverAgent. Host
+side lives in [`daemon/ios/`](daemon/ios/) + [`cli/commands/ios.ts`](cli/commands/ios.ts)
++ [`shared/ios-device.ts`](shared/ios-device.ts).
+
+**Topology mirrors the browser extension and the in-process `runtime:` agent, not
+the CDP app channel: the device dials IN.** The on-device InterceptorRunner opens
+a WebSocket to this daemon and registers `{type:"ios", udid, token}` (parallel to
+the extension's `{type:"extension"}`). `IosManager` (`daemon/ios/manager.ts`,
+parallel to `cdpManager`) validates the per-session `token` — injected into the
+runner at launch and never reused — binds the socket to a `RunnerChannel`
+(`daemon/ios/channel.ts`), and drives the runner over that socket with `{id,
+action}` → `{id, result}` frames. Registration is keyed by udid slug
+(case-insensitive) so a runner reporting either the raw devicectl UDID or a
+lower-cased context slug resolves to the same pending `enable`. Concurrent verbs
+on a not-yet-connected device share one in-flight launch (dedup by `contextId`),
+so they can't double-launch and orphan a runner.
+
+Two launch paths, selected by `preferNoXcodeIosPath()`:
+
+- **No-Xcode.** Everything is done in pure Bun with no Xcode,
+  no root helper, and the *end user's own* Apple ID. `daemon/ios/lockdown.ts`
+  speaks the lockdown/pairing protocol over macOS's own `usbmuxd`;
+  `daemon/ios/signer.ts` re-signs the bundled unsigned runner with the user's
+  cert/profile (`keychain.ts`); `daemon/ios/installer.ts` installs it over AFC;
+  `daemon/ios/usertunnel.ts` stands up the userspace CoreDeviceProxy tunnel + RSD
+  + DDI lookup and completes the `testmanagerd` DTX handshake
+  (`daemon/ios/testmanagerd.ts`) to launch the runner. `ddi.ts` mounts the
+  developer disk image. Certs/profiles are created at `interceptor ios setup`;
+  a 6-hour background timer re-signs before free-tier expiry (`state.ts`).
+- **Xcode (operator machines).** `xcodebuild test-without-building` against the
+  bundled `.xctestrun` installs + launches the runner and Xcode owns the iOS 17+
+  tunnel + DDI.
+
+Either way the runner then dials back into the daemon WS. A legacy `--wda-url`
+HTTP path (`daemon/ios/wda-client.ts`, `usbmux-forward.ts` port-forward — pure
+Bun, no `go-ios`/`pymobiledevice3`) remains only as a deprecated escape hatch.
+
+The runner's element-tree snapshot is parsed into a ref-registered tree
+(`daemon/ios/tree.ts`) mirroring the macOS AX output; **refs carry frames so
+actuation is a deterministic coordinate tap** (robust against handle staleness).
+Screenshots are VLM-budget resized via `sips -Z` (no new dependency). iOS
+XCUITest AX ops are slow, so `ios_*` actions get an elevated request timeout
+(`daemon/index.ts`, `cli/transport.ts`).
+
+Routing: an `ios:`-prefixed `contextId` (or an `ios_*` lifecycle/verb action) is
+routed to `iosManager` in both the socket and WebSocket daemon handlers, exactly
+like `cdp:`; `validateContextRouting` gains an `iosContexts` param; `interceptor
+contexts` lists `ios:<udid>` alongside the rest. Capability-blind: the shipped pkg
+carries an **unsigned** runner and **no** signing material — signing is delegated
+at runtime to the user's Apple ID (no-Xcode path) or the operator's Xcode config
+(`scripts/audit-capability-blind.sh` check #4). See `docs/ios/app-route.md`.
+
+**Beyond the runner — sibling lanes on the same `ios:<udid>` context.** These route
+*before* the runner fallback (their action sets in `shared/ios-dev.ts` /
+`shared/ios-service.ts` / `shared/ios-web.ts` are tested first), so they never wake
+the XCUITest runner and work even while it's idle. All are pure-Bun and add no
+runtime dependencies; NSKeyedArchiver replies decode through `daemon/ios/nskeyed.ts`.
+
+- **Instruments / DTX + telemetry** (`daemon/ios/instruments.ts`, `dev-manager.ts`,
+  `tunnel-pool.ts`): a direct `com.apple.instruments.dtservicehub` RSD service over
+  the shared tunnel — live process list, per-process CPU (sysmontap), launch/kill
+  (processcontrol), GPS simulation, GPU sampling, and a runner-free screenshot.
+  `interceptor ios proc / top / spawn / kill / location / gpu / shot / backup / axtree`.
+- **On-device JS brain** (`ios eval`): pushes a JS program into the runner's
+  `JSContext` with an `Interceptor` global (`tree / tap / type / sleep / log /
+  foreground`), so an observe→decide→act loop runs on the device in one round-trip.
+- **Classic-Lockdown device services** (`daemon/ios/service-*.ts`): diagnostics,
+  syslog, AFC files, crash reports, profiles, Darwin notifications, SpringBoard —
+  `interceptor ios logs / diag / fs / crash / profiles / notify / springboard`.
+- **WebKit inspection** (`daemon/ios/webinspector-*.ts`, `web-manager.ts`): the
+  WebInspector protocol over RemoteXPC to read/drive Safari & WKWebView content —
+  `interceptor ios web *`.
+
+### Native Agent — CDP-depth inside native apps
+
+The fourth surface. Where the macOS bridge sees the *outside* of a native app
+(AX tree, OS input, window pixels), the Native Agent runs an Interceptor dylib
+*inside* the target and drives it against the host's own ObjC/Swift runtime —
+read the live view/object graph, run selectors, **rewrite rendered text**,
+intercept/redirect — with no Frida and no SIP-off.
+
+The agent (`interceptor-agent/`, a `.dynamic` SwiftPM lib) gets in via the
+lightest viable vector the **shipped core** supports directly — an own-build link
+(rung-1) or `DYLD_INSERT_LIBRARIES` for weak-entitlement apps (rung-3). The
+**hardened-target managed-copy re-sign** path (rung-4) was relocated out of the
+shipped product into an operator-supplied extension (see the *Extension
+Fabric* section below); `NativeDomain.enable` now performs rung-1/rung-3 only and otherwise
+returns a neutral delegation/guidance response ("hardened-target managed-copy audit
+handler not installed", or "system platform target requires a research build").
+On load a C constructor calls `bootstrap()`, which connects to the
+daemon WebSocket and registers as `native:<app>` — so it reuses the extension
+verb-routing, `contexts`, and disambiguation paths. TCC-gated work is delegated
+back to the bridge (which already holds the grants) via `{type:"delegate"}`
+frames, so a re-signed copy's reset TCC doesn't bite the control plane. The
+tiered **hook fabric** (ObjC swizzle / `dyld` interpose) + runtime-style
+domain/event protocol rides on the same agent. Driven with `interceptor macos
+runtime <verb> --context runtime:<app>`. Bridge handler: `NativeDomain.swift`
+(`macos_native_*`). Full reference: `docs/native/agent.md`.
+
+### Extension Fabric — capability-blind, operator-supplied extensions
+
+The shipped product is a **capability-blind host**: it carries the extension
+*loader* and *neutral interfaces* only — it knows how to *discover* an extension
+and surface its domains/verbs/agent/skill, but nothing about what any extension
+*does*. Operators drop a self-contained bundle into a standard path; on next start
+the bridge registers its domains, the CLI surfaces its verbs, the agent loader
+finds its dylib, and `interceptor extensions sync` links its skill. Absent any
+extension the product is exactly the owned-app audit tool above.
+
+Discovery root: `~/.interceptor/extensions/<name>/` (override
+`INTERCEPTOR_EXTENSIONS_DIR`); **filesystem-only, no network fetch**. A neutral
+`manifest.json` declares *what surface* the extension adds, never *how*:
+
+```
+<name>/ manifest.json  bridge/<handler>.dylib  agent/InterceptorAgent-<slice>.dylib  cli/  skill/SKILL.md
+```
+
+Four load points, each generalizing an existing primitive:
+
+| Surface | Mechanism |
+|---|---|
+| **Bridge domains** | At startup (after every built-in `router.register`), `ExtensionFabric.loadAll` scans manifests, verifies each `bridge/*.dylib` in software (`SecStaticCodeCheckValidity` + `kSecCSCheckAllArchitectures` + an optional operator Team-ID allowlist — because the bridge has `disable-library-validation`, so the OS check is re-imposed in software), `dlopen`s it, and adapts a **serialized C ABI** (`uint32_t itc_ext_abi_version`, `char* itc_ext_handle(commandJSON, actionJSON)`) to a Swift `DomainHandler` via `ExtensionDomainAdapter`, then `router.register(prefix, adapter)`. `Router.isRegistered` reserves built-in prefixes (no clobber); prefixes are a single `^[a-z][a-z0-9]*$` token. Failures are isolated + logged, never fatal. |
+| **CLI verbs** | `parseMacosCommand` (`cli/commands/macos.ts`) is fed the manifest-declared prefix set by a synchronous discovery scan, so `macos <prefix> <cmd>` falls through to a generic builder emitting `{type:"macos_<prefix>_<cmd>"}` (hyphens→underscores, mirroring `vm`) instead of the hard `default`. The daemon already forwards any `macos_*` to the bridge. |
+| **Agent dylib** | `resolveAgentDylib` (`NativeDomain.swift`) searches per-extension `~/.interceptor/extensions/*/agent/` ahead of the legacy paths. |
+| **Skill** | `interceptor extensions sync` symlinks `<name>/skill/` into the host agent skill dirs (`~/.claude/skills`, `~/.agents/skills`, `~/.openclaw/skills`, `~/.config/opencode/skills`) as `interceptor-ext-<name>/`. Shipped skills carry only a neutral one-line pointer. |
+
+Files: shared `shared/extensions.ts` (types + discovery), bridge
+`interceptor-bridge/Sources/ExtensionFabric.swift` (loader + C-ABI adapter +
+signature gate) called from `main.swift`, CLI `cli/commands/extensions.ts`
+(`list` / `sync`). Author guide: `docs/extensions/{authoring,bridge-abi}.md`.
+
+**Capability-blind boundary (enforced).** The most sensitive flow — the
+hardened-target managed-copy audit (BYO re-sign + entitlement-continuity replay +
+launch-exception handling) — is the **first reference extension**,
+`native-managed-copy`: operator-possessed, out-of-repo, never in the `.pkg` and
+never in the commit tree. `scripts/audit-capability-blind.sh` (wired into
+`.github/workflows/ci.yml` and `test/extension-fabric.test.ts`) asserts the
+tracked tree carries zero relocated managed-copy specifics, that shipped skills
+carry only a neutral extension pointer, and that the core never network-fetches an
+extension. `release.sh` (Step 6.5) asserts the `.pkg` ships no extension bundle.
+
 ---
+
+## MCP Control Plane
+
+`interceptor mcp serve` exposes the entire CLI surface over the Model Context Protocol (stdio) as a thin adapter over the same binary — it re-implements no verb. Every tool call shells back out to `interceptor <verb>` via `Bun.spawn` (`cli/mcp/adapter.ts`), inheriting arg parsing, compound fan-out, per-session `--group` isolation, daemon auto-spawn, and result formatting. The server ships inside the `interceptor` binary (no separate sidecar); `interceptor mcp` is dispatched from `cli/index.ts`.
+
+- **Tools (`cli/mcp/server.ts`):** six routers — `interceptor_browser/macos/ios/read/local/raw` — whose verb menus are generated from the binary's own manifest (`COMMAND_SPECS`) plus maintained macOS/iOS lists. Sub-verbs and flags ride in a raw `args` array; the long tail is discoverable through `interceptor://manifest`, `interceptor://help/{macos,ios,verb}`, and `interceptor://extensions` resources.
+- **Safety (`cli/mcp/tiers.ts`):** a (surface, verb, sub-verb) → tier classifier (read / mutate / destructive / arbitrary-exec) with fail-safe family floors — an unknown `vm`/`runtime`/`app` sub-verb defaults to its highest tier. The `INTERCEPTOR_MCP_ALLOW` operator allowlist is the only boundary: read+mutate run by default, destructive+exec fail closed until the operator opts in, and a model-set `confirm` is only a secondary speed-bump.
+- **Inbound fencing (`cli/mcp/output.ts`):** content-bearing output (page text, trees, file/network reads) is wrapped as untrusted data before it reaches the client model. Output also maps to MCP text / `structuredContent` / image / resource-link blocks.
+- **Install (`cli/mcp/install.ts`):** `interceptor mcp install` auto-detects and configures Claude Code, Codex, Gemini CLI, Cursor, and Claude Desktop with idempotent JSON / Codex-TOML merges, self-locating via `process.execPath`.
+
+See `docs/mcp.md`.
 
 ## Build Outputs
 
@@ -265,8 +495,10 @@ For screenshot saving, `interceptor-bridge/Sources/Domains/CaptureDomain.swift` 
 | `extension/dist/inject-net.js` | `extension/src/inject-net.ts` (Bun bundle, target=browser) | MAIN-world net interceptor |
 | `extension/dist/inject-canvas.js` | `extension/src/inject-canvas.ts` (Bun bundle, target=browser) | MAIN-world canvas observer |
 | `extension/dist/offscreen.js` | `extension/src/offscreen.ts` (Bun bundle, target=browser) | Extension offscreen worker for OCR/image helpers |
+| `extension/dist-safari/background-safari.js` | `extension/src/background-safari.ts` (Bun bundle, target=browser) | Safari MV3 native-relay service worker |
+| `safari/build/Build/Products/Release/InterceptorSafari.app` | `scripts/build-safari.sh` + Xcode project | Safari containing app + embedded appex |
 
-`bash scripts/build.sh` builds the extension, CLI, daemon, and macOS bridge when Swift is available. Windows builds skip the macOS bridge.
+`bash scripts/build.sh` builds the Chromium, Electron, and Safari web bundles plus the CLI, daemon, and macOS bridge when Swift is available. `scripts/build-safari.sh` rebuilds those source bundles by default, runs a `WKWebExtension` background-bootstrap verifier, notarizes and staples the containing app, copies it to a guarded system-volume staging directory, requires Gatekeeper to accept that copy, and feeds those exact bytes to `pkgbuild` before notarizing/stapling the package. The Safari package postinstall moves only identifier-verified legacy `.InterceptorSafari-*.noindex` backup apps out of `/Applications` to recoverable Application Support storage, unregisters them, and registers the installed app; this prevents duplicate appexes with the same identifier. `INTERCEPTOR_SKIP_BASE_BUILD=1` is an advanced/CI escape hatch for an already-verified fresh bundle. Skip-notary builds are named `*-UNNOTARIZED.pkg` so they cannot be confused with installable release artifacts. On macOS older than 15.4 the engine-level verifier is skipped because the hosting API is unavailable. Windows builds skip native macOS artifacts.
 
 ---
 
@@ -289,6 +521,8 @@ The default path renders the page's DOM directly to a canvas inside the target t
 
 `--pixel --full` scrolls the page and captures one viewport-sized strip per scroll position. Strip cadence is set above 1 second to clear Chrome's `MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND` quota (default 2/sec). Strips are stitched together inside the SW using `OffscreenCanvas` + `createImageBitmap` + `convertToBlob` — explicitly **not** routed through the offscreen-document `stitch` handler, because the IPC return path for multi-MB stitched results is unreliable.
 
+**DOM-render → pixel auto-fallback.** On some heavy real pages the DOM renderer fails outright (the serialized foreignObject SVG won't decode). Rather than dead-end, the dispatcher retries a default whole-page capture via the pixel path. The gating and request shaping are pure logic (`planPixelFallback` in `capabilities/screenshot.ts`): only a genuine render failure is eligible (tagged `fallbackEligible` — not tab-not-found/restricted/timeout), only whole-page captures fall back (element/ref/region would crop against the wrong origin), the DOM path's PNG@92 defaults are preserved so nothing silently downgrades to the pixel path's JPEG@50, and the result carries a `fallback` note naming dropped options and the side effects (the pixel path borrows tab focus and scrolls; both restored). `no_fallback` (CLI `--no-fallback`) disables the retry. The CLI gives every screenshot a 175s transport ceiling — under the daemon's 180s request timeout — because the combined DOM-then-pixel path can legitimately outlive the old flat 45s.
+
 ### Transport routing
 
 Screenshot responses can carry tens to hundreds of KB of base64 dataUrl. Empirical testing on Brave/Chromium showed the native-messaging port silently drops messages above ~50 KB despite the documented 1 MB cap, so the CLI auto-enables WebSocket transport for any `screenshot` invocation (`cli/index.ts`). `--no-ws` overrides if the user wants the native path.
@@ -299,6 +533,9 @@ Screenshot responses can carry tens to hundreds of KB of base64 dataUrl. Empiric
 
 Recent major additions reflected in this document:
 
+- capability-blind **extension fabric**: operator-supplied extensions add bridge domains / CLI verbs / agent dylibs / skills via a manifest + serialized C-ABI loader, with software-imposed library validation and a static capability-blind audit gate in CI; the hardened-target managed-copy audit flow relocated out of the shipped tree into the first reference extension
+- **native runtime agent** + tiered **hook fabric**: in-process ObjC/Swift runtime control as a fourth surface (`runtime:<app>`)
+- **CDP app control**: drive Electron/Chromium desktop app web contents (`cdp:`/`app:`) with no Swift bridge
 - DOM-render screenshot pipeline as the default capture path; `--pixel` retains the legacy `captureVisibleTab` route as an opt-in
 - per-tab CORS-clearance session DNR rule scoped to subresource fetches during a capture
 - in-SW `OffscreenCanvas` stitching for `--pixel --full` so multi-MB responses no longer round-trip through the offscreen document

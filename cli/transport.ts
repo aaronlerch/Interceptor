@@ -2,7 +2,9 @@
  * cli/transport.ts — sendCommand (Unix socket / TCP) and sendCommandWs (WebSocket)
  */
 
-import { IPC_PORT, IS_WIN, SOCKET_PATH, WS_PORT } from "../shared/platform"
+import { IPC_PORT, IS_WIN, SOCKET_PATH, WS_PORT, MAX_UPLOAD_FRAME_BYTES } from "../shared/platform"
+import { IOS_SVC_ACTION_TYPES } from "../shared/ios-service"
+import { IOS_DEV_ACTION_TYPES } from "../shared/ios-dev"
 
 export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT || "15000")
 
@@ -18,16 +20,78 @@ export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT |
 const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   macos_listen: 60_000,
   macos_vad: 60_000,
-  screenshot: 45_000,
+  // monitor start/stop can do non-trivial setup/teardown (AX
+  // attach across many apps under --all-apps, frame/video/speech engines,
+  // source snapshot). Even though the bridge now acks early, give the
+  // RPC an elevated deadline as a safety margin so a momentarily busy main
+  // run loop never trips the old 15s timeout that left a split-brain envelope.
+  macos_monitor: 60_000,
+  // iOS XCUITest AX ops (element-tree snapshot, app activate/launch, typing) are
+  // slow — the first snapshot initializes the on-device accessibility bridge and
+  // waits for app quiescence. Give them an elevated deadline.
+  ios_tree: 60_000,
+  ios_find: 60_000,
+  ios_app: 60_000,
+  ios_type: 60_000,
+  ios_screenshot: 60_000,
+  ios_setup: 600_000,
+  ios_refresh: 600_000,
+  ios_enable: 120_000,
+  ios_install: 240_000,
+  // iOS web lane: cold target discovery can take up to ~15s and attach
+  // ~10s per spec; give raw calls/eval room for slow expressions.
+  ios_web_targets: 20_000,
+  ios_web_attach: 20_000,
+  ios_web_read: 20_000,
+  ios_web_eval: 30_000,
+  ios_web_call: 30_000,
+  ios_web_screenshot: 60_000,
+  // iOS device-service lane: diagnostics/filesystem/backup pulls can be
+  // large; give them headroom over the 15s default.
+  ios_diag: 30_000,
+  ios_fs: 60_000,
+  ios_crash: 60_000,
+  ios_profiles: 20_000,
+  ios_springboard: 30_000,
+  // iOS Instruments/DTX + telemetry lanes: the first call opens the
+  // RemoteXPC tunnel (~1-3s) + a DTX channel; screenshot/backup can be large.
+  ios_proc: 30_000,
+  ios_apps: 30_000,
+  ios_spawn: 30_000,
+  ios_kill: 30_000,
+  ios_location: 30_000,
+  ios_shot: 30_000,
+  ios_backup: 30_000,
+  ios_axtree: 30_000,
+  binary_sink_save: 600_000,
   screenshot_background: 45_000,
   canvas_read: 45_000,
-  canvas_ocr: 45_000,
+  canvas_ocr: 60_000,
   canvas_diff: 45_000,
   capture_frame: 45_000,
+  // OCR: native capture + Tesseract. First call also lazy-loads the WASM core +
+  // language data, so allow generous headroom.
+  ocr: 60_000,
 }
 
-function pickTimeoutForAction(actionType: string): number {
-  return ACTION_TIMEOUT_OVERRIDES_MS[actionType] ?? INTERCEPTOR_TIMEOUT_MS
+// Every screenshot gets a ceiling aligned with the daemon's REQUEST_TIMEOUT_MS
+// (180s), not the flat 45s. The service worker bounds its own stages (the
+// DOM-render path has a 30s budget; the pixel path has per-strip guards), so
+// the CLI only needs to out-wait the SW's worst case without racing it:
+//  - `--pixel`/`--pixel --full` scrolls + captures + stitches strip-by-strip
+//    (~1.1s/strip, Chrome-rate-limited) with no single 30s cap.
+//  - the DEFAULT (DOM-render) path can auto-fall-back to the pixel path when
+//    the native renderer fails on a heavy page, so a plain `screenshot` can
+//    also run DOM-render (≤30s) THEN a full pixel capture. A 45s ceiling would
+//    race that combined path and surface the generic transport timeout it was
+//    meant to prevent, so all screenshots share the long ceiling.
+const SCREENSHOT_TIMEOUT_MS = 175_000
+
+export function pickTimeoutForAction(action: Action): number {
+  if (action.type === "screenshot") {
+    return SCREENSHOT_TIMEOUT_MS
+  }
+  return ACTION_TIMEOUT_OVERRIDES_MS[action.type] ?? INTERCEPTOR_TIMEOUT_MS
 }
 
 // Branch the timeout hint on `macos_*` so bridge commands don't get a
@@ -36,6 +100,18 @@ function timeoutMessage(actionType: string, ms: number): string {
   const seconds = Math.round(ms / 1000)
   if (actionType.startsWith("macos_")) {
     return `timeout: no response for '${actionType}' after ${seconds}s. The macOS bridge may be waiting on a TCC permission prompt (Microphone / Speech Recognition for listen/vad, Screen Recording for screenshot/capture/vision). Check System Settings → Privacy & Security.`
+  }
+  if (IOS_SVC_ACTION_TYPES.has(actionType)) {
+    return `timeout: no response for '${actionType}' after ${seconds}s. The classic-Lockdown service didn't reply in time — a large fs/crash pull can exceed this; confirm the device is unlocked and 'interceptor ios status' shows it connected.`
+  }
+  if (IOS_DEV_ACTION_TYPES.has(actionType)) {
+    return `timeout: no response for '${actionType}' after ${seconds}s. The Instruments/telemetry lane opens a RemoteXPC tunnel + DTX channel — confirm the device is unlocked and paired; a busy developer service can be retried.`
+  }
+  if (actionType.startsWith("ios_")) {
+    return `timeout: no response for '${actionType}' after ${seconds}s. The InterceptorRunner may be busy with a slow XCUITest snapshot or a non-quiescing app; confirm the device is unlocked and 'interceptor ios status' shows it connected.`
+  }
+  if (actionType === "file_upload" || actionType === "file_upload_chunk") {
+    return `timeout: no response for '${actionType}' after ${seconds}s. The daemon may have rejected an oversized upload frame (check 'interceptor status' and the daemon log for "oversized socket frame"), or the tab/content script isn't reachable — large files are chunked automatically, so this usually means the target tab changed. Retry after 'interceptor state'.`
   }
   return `timeout: no response for '${actionType}' after ${seconds}s. Ensure Chrome/Brave is open with the Interceptor extension loaded.`
 }
@@ -47,7 +123,28 @@ export type DaemonResponse = {
   result: DaemonResult
 }
 
-export function sendCommand(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+// the per-invocation group scope (--group / $INTERCEPTOR_GROUP), set once
+// by cli/index.ts and injected into every outgoing action here — the single choke
+// point every command path (simple, compound, override, tail loops) funnels
+// through. The group rides INSIDE the action payload because the daemon relays
+// `{id, action, tabId}` verbatim to the extension.
+let globalGroup: string | undefined
+let globalGroupColor: string | undefined
+
+export function setGlobalGroup(group?: string, groupColor?: string): void {
+  globalGroup = group
+  globalGroupColor = groupColor
+}
+
+function withGroup(action: Action): Action {
+  if (!globalGroup || action.group !== undefined) return action
+  const scoped: Action = { ...action, group: globalGroup }
+  if (globalGroupColor && scoped.groupColor === undefined) scoped.groupColor = globalGroupColor
+  return scoped
+}
+
+export function sendCommand(rawAction: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+  const action = withGroup(rawAction)
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
@@ -56,7 +153,24 @@ export function sendCommand(action: Action, tabId?: number, contextId?: string):
     let resolved = false
     let socketRef: Bun.Socket<undefined> | null = null
 
-    const timeoutMs = pickTimeoutForAction(action.type)
+    // Outbound frame + backpressure handling. Bun's socket.write() does a
+    // PARTIAL write when the payload exceeds the socket's send buffer and
+    // returns the number of bytes actually written — the remainder is NOT
+    // auto-queued. A single naive write() therefore truncates any large frame
+    // (e.g. a 512 KiB upload chunk), and the daemon then blocks forever waiting
+    // for bytes that never arrive. Queue the remainder and flush it on `drain`,
+    // mirroring the daemon's own socketWriteFramed.
+    let pendingWrite: Buffer | null = null
+    const flushWrite = (socket: Bun.Socket<undefined>) => {
+      if (!pendingWrite) return
+      let wrote = 0
+      try { wrote = socket.write(pendingWrite) } catch { return }
+      if (wrote >= pendingWrite.byteLength) pendingWrite = null
+      else if (wrote > 0) pendingWrite = pendingWrite.subarray(wrote)
+      // wrote <= 0: socket buffer full — keep pendingWrite, retry on drain.
+    }
+
+    const timeoutMs = pickTimeoutForAction(action)
     const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true
@@ -72,13 +186,17 @@ export function sendCommand(action: Action, tabId?: number, contextId?: string):
         const encoded = Buffer.from(payload, "utf-8")
         const header = Buffer.alloc(4)
         header.writeUInt32LE(encoded.byteLength, 0)
-        socket.write(Buffer.concat([header, encoded]))
+        pendingWrite = Buffer.concat([header, encoded])
+        flushWrite(socket)
+      },
+      drain(socket: Bun.Socket<undefined>) {
+        flushWrite(socket)
       },
       data(socket: Bun.Socket<undefined>, raw: Buffer<ArrayBufferLike>) {
         buffer = Buffer.concat([buffer, Buffer.from(raw)])
         if (buffer.length >= 4) {
           const msgLen = buffer.readUInt32LE(0)
-          if (msgLen > 0 && msgLen <= 1024 * 1024 && buffer.length >= 4 + msgLen) {
+          if (msgLen > 0 && msgLen <= MAX_UPLOAD_FRAME_BYTES && buffer.length >= 4 + msgLen) {
             const json = buffer.subarray(4, 4 + msgLen).toString("utf-8")
             clearTimeout(timer)
             try {
@@ -116,13 +234,14 @@ export function sendCommand(action: Action, tabId?: number, contextId?: string):
   })
 }
 
-export function sendCommandWs(action: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+export function sendCommandWs(rawAction: Action, tabId?: number, contextId?: string): Promise<DaemonResponse> {
+  const action = withGroup(rawAction)
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID()
     const shortId = id.slice(0, 8)
     process.stderr.write(`[${shortId}] →ws ${action.type}\n`)
 
-    const timeoutMs = pickTimeoutForAction(action.type)
+    const timeoutMs = pickTimeoutForAction(action)
     const timer = setTimeout(() => {
       reject(new Error(`timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
     }, timeoutMs)

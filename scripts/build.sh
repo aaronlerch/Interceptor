@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 TARGET="host"
 BUILD_ALL=0
 ORIG_MANIFEST_VERSION=""
+ORIG_NATIVE_BUILD_CONFIG=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -16,10 +17,13 @@ for arg in "$@"; do
 done
 
 stamp_version() {
-  local sha date pkg_version
+  local sha date pkg_version platform_targets agent_dylibs_bundled
   sha=$(git rev-parse --short HEAD 2>/dev/null || echo "dev")
   date=$(date -u +%Y-%m-%d)
   pkg_version=$(grep '"version"' package.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+  if [[ -f shared/native-build-config.ts && -z "$ORIG_NATIVE_BUILD_CONFIG" ]]; then
+    ORIG_NATIVE_BUILD_CONFIG="$(cat shared/native-build-config.ts)"
+  fi
   cat > cli/version.ts <<EOF
 // Sentinel values used when running from source (\`bun run cli\`).
 // scripts/build.sh stamps real build values into this file just before
@@ -27,6 +31,26 @@ stamp_version() {
 export const VERSION = "$pkg_version"
 export const BUILD_SHA = "$sha"
 export const BUILD_DATE = "$date"
+EOF
+  platform_targets="false"
+  if [[ "${INTERCEPTOR_ENABLE_PLATFORM_TARGETS:-0}" == "1" ]]; then
+    platform_targets="true"
+  fi
+  agent_dylibs_bundled="false"
+  if [[ "${INTERCEPTOR_INCLUDE_AGENT_DYLIBS:-0}" == "1" ]]; then
+    agent_dylibs_bundled="true"
+  fi
+  cat > shared/native-build-config.ts <<EOF
+/**
+ * Build-time defaults for the Runtime Agent surface.
+ *
+ * scripts/build.sh stamps this file for compiled release artifacts and restores
+ * it afterward. Source/dev defaults are the public profile: platform target
+ * support and bundled agent dylibs are off unless an explicit research build
+ * enables them.
+ */
+export const NATIVE_PLATFORM_TARGETS_ENABLED = $platform_targets
+export const NATIVE_AGENT_DYLIBS_BUNDLED = $agent_dylibs_bundled
 EOF
   # Keep extension/manifest.json#version in lockstep with package.json so the
   # extension reports the same version as the CLI / pkg / Sparkle artifacts.
@@ -44,6 +68,11 @@ EOF
 
 restore_version() {
   git checkout cli/version.ts 2>/dev/null || true
+  if [[ -n "$ORIG_NATIVE_BUILD_CONFIG" ]]; then
+    printf '%s\n' "$ORIG_NATIVE_BUILD_CONFIG" > shared/native-build-config.ts
+  else
+    git checkout shared/native-build-config.ts 2>/dev/null || true
+  fi
   # Restore only the version field (not the whole file) so other local changes
   # to the manifest (e.g. new keys) are preserved across builds.
   if [[ -f extension/manifest.json ]]; then
@@ -70,7 +99,6 @@ build_extension() {
   bun build extension/src/content.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-net.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser
-  bun build extension/src/screenshot-runner.ts --outdir=extension/dist --target=browser
   bun build extension/src/offscreen.ts --outfile=extension/dist/offscreen.js --target=browser
   bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser
   cp extension/manifest.json extension/dist/
@@ -78,8 +106,127 @@ build_extension() {
   cp extension/popup.html extension/dist/
   rm -rf extension/dist/icons
   cp -R extension/icons extension/dist/icons
+  # Tesseract.js OCR assets — bundled for offline, cross-platform pixel OCR
+  # (browser-only / non-macOS). Loaded from extension-local URLs by the
+  # offscreen document; lazy-initialized on first `ocr` request.
+  mkdir -p extension/dist/tesseract
+  cp node_modules/tesseract.js/dist/worker.min.js extension/dist/tesseract/
+  # OEM 1 (LSTM) cores: Tesseract.js picks relaxed-SIMD on Chrome/Brave 116+
+  # (the manifest min), with plain SIMD-LSTM as the one-tier fallback.
+  cp node_modules/tesseract.js-core/tesseract-core-relaxedsimd-lstm.wasm.js extension/dist/tesseract/
+  cp node_modules/tesseract.js-core/tesseract-core-relaxedsimd-lstm.wasm extension/dist/tesseract/
+  cp node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm.js extension/dist/tesseract/
+  cp node_modules/tesseract.js-core/tesseract-core-simd-lstm.wasm extension/dist/tesseract/
+  cp extension/tesseract-assets/eng.traineddata.gz extension/dist/tesseract/
   chmod 644 extension/dist/* 2>/dev/null || true
-  chmod -R u+rwX,go+rX extension/dist/icons 2>/dev/null || true
+  chmod -R u+rwX,go+rX extension/dist/icons extension/dist/tesseract 2>/dev/null || true
+}
+
+build_extension_mv2() {
+  echo "Building Electron app extension (MV2)..."
+  rm -rf extension/dist-mv2
+  mkdir -p extension/dist-mv2
+  bun build extension/src/background-electron.ts --outfile=extension/dist-mv2/background-electron.js --target=browser
+  cp extension/dist/content.js extension/dist-mv2/content.js
+  cp extension/dist/net-buffer-content.js extension/dist-mv2/net-buffer-content.js
+  cp extension/dist/inject-canvas.js extension/dist-mv2/inject-canvas.js
+  cp extension/dist/offscreen.html extension/dist-mv2/offscreen.html
+  cp extension/dist/popup.html extension/dist-mv2/popup.html
+  printf '%s\n' 'globalThis.INTERCEPTOR_APP_CONTEXT_ID = "app:electron";' > extension/dist-mv2/electron-config.js
+  rm -rf extension/dist-mv2/icons
+  cp -R extension/icons extension/dist-mv2/icons
+  bun -e '
+const fs = require("fs");
+const base = JSON.parse(fs.readFileSync("extension/manifest.json", "utf8"));
+const manifest = {
+  manifest_version: 2,
+  name: "Interceptor Electron App Bridge",
+  version: base.version,
+  description: "Electron app bridge",
+  key: base.key,
+  icons: base.icons,
+  permissions: ["tabs", "storage", "scripting", "webRequest", "webRequestBlocking", "<all_urls>"],
+  background: { scripts: ["electron-config.js", "background-electron.js"], persistent: true },
+  browser_action: {
+    default_title: "Interceptor",
+    default_popup: "popup.html",
+    default_icon: base.action && base.action.default_icon ? base.action.default_icon : base.icons
+  },
+  content_scripts: [
+    { matches: ["<all_urls>"], js: ["net-buffer-content.js"], run_at: "document_start", all_frames: true },
+    { matches: ["<all_urls>"], js: ["content.js"], run_at: "document_idle", all_frames: true }
+  ]
+};
+fs.writeFileSync("extension/dist-mv2/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+'
+  chmod 644 extension/dist-mv2/* 2>/dev/null || true
+  chmod -R u+rwX,go+rX extension/dist-mv2/icons 2>/dev/null || true
+}
+
+build_extension_safari() {
+  # Safari Web Extension (MV3). Retarget of the same src tree:
+  # native-relay background (background-safari), portable content/inject scripts
+  # reused verbatim from dist, and a permission-stripped manifest (Safari has no
+  # debugger/tabGroups/offscreen/tabCapture/power/idle/sessions/pageCapture, so
+  # OCR/pixel-capture route to the native `interceptor macos` lane, not tesseract).
+  echo "Building Safari Web Extension (MV3)..."
+  rm -rf extension/dist-safari
+  mkdir -p extension/dist-safari
+  bun build extension/src/background-safari.ts --outfile=extension/dist-safari/background-safari.js --target=browser
+  cp extension/dist/content.js extension/dist-safari/content.js
+  cp extension/dist/net-buffer-content.js extension/dist-safari/net-buffer-content.js
+  cp extension/dist/inject-net.js extension/dist-safari/inject-net.js
+  cp extension/dist/inject-canvas.js extension/dist-safari/inject-canvas.js
+  cp extension/dist/popup.js extension/dist-safari/popup.js
+  cp extension/popup.html extension/dist-safari/popup.html
+  rm -rf extension/dist-safari/icons
+  cp -R extension/icons extension/dist-safari/icons
+  bun -e '
+const fs = require("fs");
+const base = JSON.parse(fs.readFileSync("extension/manifest.json", "utf8"));
+const manifest = {
+  manifest_version: 3,
+  name: "Interceptor",
+  version: base.version,
+  description: base.description,
+  icons: base.icons,
+  // Safari-supported permission subset (verified against WKWebExtension.Permission).
+  // notifications has no permission constant and the packager rejects it, so it is
+  // omitted; notifications route to the native macos lane.
+  // declarativeNetRequestWithHostAccess is required by Safari for modifyHeaders and
+  // redirect actions; declarativeNetRequest alone only authorizes block and allow.
+  permissions: [
+    "activeTab", "scripting", "tabs", "storage", "nativeMessaging", "cookies",
+    "webNavigation", "declarativeNetRequest", "declarativeNetRequestWithHostAccess",
+    "contextMenus", "alarms", "clipboardWrite"
+  ],
+  host_permissions: ["<all_urls>"],
+  commands: base.commands,
+  // The bundle is self-contained (bun inlines every import), so no type:module —
+  // Safari does not honor a module service worker and warns on the key.
+  background: { service_worker: "background-safari.js" },
+  // Safari applies the extension-page CSP to its background worker. Keep the
+  // loopback endpoints explicit for diagnostic/fallback probes. The selected
+  // production path is the containing appex native relay.
+  content_security_policy: {
+    extension_pages: "script-src '"'"'self'"'"'; object-src '"'"'self'"'"'; connect-src ws://localhost:19222 ws://127.0.0.1:19222"
+  },
+  action: {
+    default_title: "Interceptor",
+    default_popup: "popup.html",
+    default_icon: base.action && base.action.default_icon ? base.action.default_icon : base.icons
+  },
+  content_scripts: [
+    { matches: ["<all_urls>"], js: ["net-buffer-content.js"], run_at: "document_start", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["inject-net.js"], run_at: "document_start", world: "MAIN", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["inject-canvas.js"], run_at: "document_start", world: "MAIN", all_frames: true, match_origin_as_fallback: true },
+    { matches: ["<all_urls>"], js: ["content.js"], run_at: "document_idle", all_frames: true, match_origin_as_fallback: true }
+  ]
+};
+fs.writeFileSync("extension/dist-safari/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+'
+  chmod 644 extension/dist-safari/* 2>/dev/null || true
+  chmod -R u+rwX,go+rX extension/dist-safari/icons 2>/dev/null || true
 }
 
 build_host() {
@@ -126,6 +273,8 @@ build_bridge() {
 }
 
 build_extension
+build_extension_mv2
+build_extension_safari
 
 if [[ "$BUILD_ALL" == "1" ]]; then
   build_host
@@ -145,8 +294,33 @@ else
   exit 1
 fi
 
+# Ad-hoc sign macOS binaries. Apple Silicon SIGKILLs unsigned Mach-O executables
+# (symptom: `interceptor` exits 137 / "Killed: 9" with empty output, daemon never
+# stays up). `bun build --compile` output can land unsigned or with a malformed
+# signature slot, so remove any existing signature then re-sign ad-hoc.
+# No --entitlements here: entitlement enforcement only applies under the
+# hardened runtime, which ad-hoc signing doesn't enable. Release builds are
+# re-signed (--force) with the real identity + entitlements by release.sh.
+if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+  for b in dist/interceptor daemon/interceptor-daemon dist/interceptor-bridge; do
+    if [[ -f "$b" ]]; then
+      codesign --remove-signature "$b" 2>/dev/null || true
+      codesign --force --sign - "$b" && echo "  signed (adhoc): $b"
+      codesign --verify --strict "$b"
+    fi
+  done
+  # Smoke check: the exact failure this signing step fixes is a silent
+  # Killed:9 at first run, so prove the CLI actually executes.
+  if [[ "$TARGET" != "windows" && -x dist/interceptor ]]; then
+    ./dist/interceptor --version >/dev/null
+    echo "  smoke check: dist/interceptor --version OK"
+  fi
+fi
+
 echo "Build complete."
 echo "  Extension: extension/dist/"
+echo "  Electron extension: extension/dist-mv2/"
+echo "  Safari extension: extension/dist-safari/"
 if [[ "$BUILD_ALL" == "1" ]]; then
   echo "  Host CLI:   dist/interceptor"
   echo "  Host Daemon: daemon/interceptor-daemon"
