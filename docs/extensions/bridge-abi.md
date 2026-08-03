@@ -70,12 +70,14 @@ The shipped bridge is hardened-signed but carries
 foreign-team dylib without an entitlement change. Because that OS guarantee is
 off, the loader re-imposes it **in software** before `dlopen`:
 
+0. **Policy** — an operator trust policy must exist. With none configured, every
+   extension dylib is refused. *(Fork hardening — see below.)*
 1. **Integrity** — `SecStaticCodeCreateWithPath` + `SecStaticCodeCheckValidity`
    with `kSecCSCheckAllArchitectures` (Apple's docs warn that without it only one
    slice of a universal binary is validated, and a slice could be ad-hoc/unsigned).
-2. **Provenance** — if an operator allowlist of Team Identifiers is configured, the
-   dylib's `kSecCodeInfoTeamIdentifier` (via `SecCodeCopySigningInformation`) must
-   be in it.
+2. **Provenance** — the dylib's `kSecCodeInfoTeamIdentifier` (via
+   `SecCodeCopySigningInformation`) must be in the operator's Team-ID allowlist.
+   This check is **mandatory**, not conditional.
 3. An **unsigned** dylib reports `errSecCSUnsigned`; it is loaded only under the
    explicit opt-in.
 
@@ -90,13 +92,21 @@ off, the loader re-imposes it **in software** before `dlopen`:
 Environment overrides:
 
 - `INTERCEPTOR_EXT_TEAM_IDS="ABCDE12345,FGHIJ67890"` — comma-separated allowlist.
-- `INTERCEPTOR_EXT_ALLOW_UNSIGNED=1` — the `--allow-unsigned-extensions` opt-in
-  (loads unsigned / ad-hoc dylibs; use only for local development).
+- `INTERCEPTOR_EXT_ALLOW_UNSIGNED=1` — the accept-anything opt-in. Skips both the
+  unsigned rejection *and* the Team-ID requirement. Local development only.
 
-With no allowlist configured, a **validly signed** dylib of any team loads; an
-unsigned one is rejected unless the opt-in is set. Sign your extension dylib with
-your own identity (`codesign -s "<identity>" handler.dylib`) and pin your Team ID
-in the trust config for production use.
+**This fork fails closed.** Upstream ran the provenance check only when an
+allowlist happened to be configured — and it is empty until an operator writes
+one, so by default *any validly signed dylib loaded*. A valid signature says
+nothing about who produced it: `codesign -s -` is a valid **ad-hoc** signature
+that carries no Team Identifier at all, so ad-hoc signing any dylib dropped into
+the user-writable `~/.interceptor/extensions/*/` was sufficient to get it
+`dlopen`'d into the TCC-privileged bridge.
+
+Now: no policy ⇒ nothing loads. To use an extension, sign it with your own
+identity (`codesign -s "<identity>" handler.dylib`) and pin that Team ID in the
+trust config. An ad-hoc signature can never satisfy an allowlist — it has no team
+to match — so development fixtures need `INTERCEPTOR_EXT_ALLOW_UNSIGNED=1`.
 
 ## Prefix rules (recap)
 

@@ -121,12 +121,30 @@ enum ExtensionFabric {
         return (NSHomeDirectory() as NSString).appendingPathComponent(".interceptor/extensions")
     }
 
-    private struct TrustConfig { let teamIds: [String]; let allowUnsigned: Bool }
+    private struct TrustConfig {
+        let teamIds: [String]
+        let allowUnsigned: Bool
+        /// No operator policy at all: no Team-ID allowlist and no explicit
+        /// accept-anything opt-in. The bridge runs with library validation
+        /// disabled, so this state must DENY — see `validateSignature`.
+        var isUnconfigured: Bool { teamIds.isEmpty && !allowUnsigned }
+    }
+
+    /// Environment read via getenv() rather than the cached ProcessInfo snapshot,
+    /// so an in-process override (tests) is honored — same reason as `extensionsRoot`.
+    private static func envVar(_ name: String) -> String? {
+        guard let c = getenv(name) else { return nil }
+        let s = String(cString: c)
+        return s.isEmpty ? nil : s
+    }
 
     /// Operator-pinned trust policy for extension dylibs. Read from
     /// `~/.interceptor/extension-trust.json` ({ "teamIds": [...], "allowUnsigned": false })
     /// with env overrides `INTERCEPTOR_EXT_TEAM_IDS` (comma-separated) and
     /// `INTERCEPTOR_EXT_ALLOW_UNSIGNED=1` (the `--allow-unsigned-extensions` opt-in).
+    ///
+    /// There is deliberately NO built-in default allowlist: this fork ships no
+    /// first-party extension dylibs, so an unconfigured install must load none.
     private static func loadTrustConfig() -> TrustConfig {
         var teamIds: [String] = []
         var allowUnsigned = false
@@ -136,22 +154,35 @@ enum ExtensionFabric {
             if let ids = obj["teamIds"] as? [String] { teamIds = ids }
             if let au = obj["allowUnsigned"] as? Bool { allowUnsigned = au }
         }
-        let env = ProcessInfo.processInfo.environment
-        if let ids = env["INTERCEPTOR_EXT_TEAM_IDS"], !ids.isEmpty {
+        if let ids = envVar("INTERCEPTOR_EXT_TEAM_IDS") {
             teamIds = ids.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         }
-        if env["INTERCEPTOR_EXT_ALLOW_UNSIGNED"] == "1" { allowUnsigned = true }
+        if envVar("INTERCEPTOR_EXT_ALLOW_UNSIGNED") == "1" { allowUnsigned = true }
         return TrustConfig(teamIds: teamIds, allowUnsigned: allowUnsigned)
     }
 
     /// Software re-imposition of library validation. Because the
     /// hardened runtime's own library validation is disabled on the bridge, verify
     /// each foreign dylib BEFORE dlopen:
+    ///   0. policy — an operator trust policy must exist at all (fail-closed);
     ///   1. integrity — SecStaticCodeCheckValidity with kSecCSCheckAllArchitectures
     ///      (a fat dylib could otherwise pass on an ad-hoc/unsigned slice — Apple doc);
-    ///   2. provenance — Team Identifier must be in the operator allowlist (if any).
+    ///   2. provenance — Team Identifier must be in the operator allowlist.
     /// Unsigned dylibs return errSecCSUnsigned; loaded only under the opt-in.
+    ///
+    /// Step 0 and the *mandatory* step 2 are this fork's hardening. Upstream ran
+    /// the team check only `if !trust.teamIds.isEmpty`, and the allowlist is empty
+    /// unless an operator writes one — so by default provenance was never checked,
+    /// and `codesign -s -` (ad-hoc, no Team Identifier) on any dylib dropped into
+    /// the user-writable `~/.interceptor/extensions/*/` was enough to get it
+    /// dlopen'd into the TCC-privileged bridge. Absent policy now denies.
     private static func validateSignature(path: String, trust: TrustConfig) -> (ok: Bool, reason: String) {
+        if trust.isUnconfigured {
+            return (false, "no extension trust policy configured — set teamIds in "
+                + "~/.interceptor/extension-trust.json (or INTERCEPTOR_EXT_TEAM_IDS) to name the "
+                + "signing team(s) you trust, or set allowUnsigned / INTERCEPTOR_EXT_ALLOW_UNSIGNED=1 "
+                + "to deliberately load any dylib present")
+        }
         let url = URL(fileURLWithPath: path) as CFURL
         var staticCode: SecStaticCode?
         let createStatus = SecStaticCodeCreateWithPath(url, SecCSFlags(rawValue: 0), &staticCode)
@@ -168,7 +199,14 @@ enum ExtensionFabric {
         if checkStatus != errSecSuccess {
             return (false, "code signature invalid (OSStatus \(checkStatus))")
         }
-        if !trust.teamIds.isEmpty {
+        // Provenance. A valid signature alone proves nothing about WHO signed:
+        // `codesign -s -` is valid and ad-hoc, and carries no Team Identifier.
+        // The allowlist is therefore mandatory unless the operator has explicitly
+        // opted into accepting anything.
+        if trust.allowUnsigned && trust.teamIds.isEmpty {
+            return (true, "signed; provenance unchecked (allowUnsigned opt-in, no team allowlist)")
+        }
+        do {
             var infoCF: CFDictionary?
             let infoStatus = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &infoCF)
             guard infoStatus == errSecSuccess, let info = infoCF as? [String: Any] else {
@@ -176,7 +214,7 @@ enum ExtensionFabric {
             }
             let team = info[kSecCodeInfoTeamIdentifier as String] as? String
             guard let team = team, trust.teamIds.contains(team) else {
-                return (false, "signing team \(team ?? "<none>") not in operator allowlist")
+                return (false, "signing team \(team ?? "<none — ad-hoc signature>") not in operator allowlist")
             }
         }
         return (true, "valid")

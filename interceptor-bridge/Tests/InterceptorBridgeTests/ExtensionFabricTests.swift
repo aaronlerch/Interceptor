@@ -2,6 +2,12 @@
 // bridge dylib, ad-hoc signs it, points the discovery root at a temp dir, and
 // verifies ExtensionFabric.loadAll registers the prefix and routes a verb through
 // the serialized C-ABI adapter — plus the prefix-collision guard.
+//
+// NOTE: an ad-hoc signature (`codesign -s -`) is VALID but carries no Team
+// Identifier, so it cannot satisfy a Team-ID allowlist. This fork denies dylib
+// loading unless the operator configured a trust policy, so the routing tests
+// below must opt in explicitly via INTERCEPTOR_EXT_ALLOW_UNSIGNED — that is the
+// point of testDefaultTrustPolicyDeniesAdHocSignedDylib.
 
 import XCTest
 import Foundation
@@ -15,11 +21,21 @@ final class ExtensionFabricTests: XCTestCase {
         root = NSTemporaryDirectory() + "itc-ext-fabric-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
         setenv("INTERCEPTOR_EXTENSIONS_DIR", root, 1)
+        unsetenv("INTERCEPTOR_EXT_ALLOW_UNSIGNED")
+        unsetenv("INTERCEPTOR_EXT_TEAM_IDS")
     }
 
     override func tearDownWithError() throws {
         unsetenv("INTERCEPTOR_EXTENSIONS_DIR")
+        unsetenv("INTERCEPTOR_EXT_ALLOW_UNSIGNED")
+        unsetenv("INTERCEPTOR_EXT_TEAM_IDS")
         try? FileManager.default.removeItem(atPath: root)
+    }
+
+    /// Opt in to loading the ad-hoc-signed fixtures. Without this the fabric
+    /// fails closed (no operator trust policy configured).
+    private func allowFixtureLoading() {
+        setenv("INTERCEPTOR_EXT_ALLOW_UNSIGNED", "1", 1)
     }
 
     /// Compile + ad-hoc sign a fixture bridge dylib under <root>/<name>/bridge/h.dylib
@@ -76,6 +92,7 @@ final class ExtensionFabricTests: XCTestCase {
         guard try makeFixture(name: "fixture", prefix: "fixturex") else {
             throw XCTSkip("clang/codesign unavailable")
         }
+        allowFixtureLoading()
         let router = Router()
         ExtensionFabric.loadAll(into: router)
         XCTAssertTrue(router.isRegistered("fixturex"), "extension bridge domain should be registered")
@@ -101,6 +118,7 @@ final class ExtensionFabricTests: XCTestCase {
         guard try makeFixture(name: "evil", prefix: "fixturex") else {
             throw XCTSkip("clang/codesign unavailable")
         }
+        allowFixtureLoading()
         let router = Router()
         let sentinel = SentinelDomain()
         router.register("fixturex", handler: sentinel)
@@ -114,6 +132,37 @@ final class ExtensionFabricTests: XCTestCase {
         }
         wait(for: [exp], timeout: 5)
         XCTAssertTrue((box.value["sentinel"] as? Bool) == true, "the built-in sentinel must not be clobbered by a colliding extension prefix")
+    }
+
+    /// The hardening this fork adds. The bridge runs with library validation
+    /// disabled, so it re-imposes the check in software — but upstream ran the
+    /// Team-ID check only `if !trust.teamIds.isEmpty`, and that list is empty
+    /// until an operator writes one. An ad-hoc `codesign -s -` on any dylib
+    /// dropped into the user-writable extensions dir therefore loaded straight
+    /// into the TCC-privileged bridge. With no trust policy configured, it must
+    /// now be refused.
+    func testDefaultTrustPolicyDeniesAdHocSignedDylib() throws {
+        guard try makeFixture(name: "adhoc", prefix: "adhocx") else {
+            throw XCTSkip("clang/codesign unavailable")
+        }
+        // deliberately NOT calling allowFixtureLoading()
+        let router = Router()
+        ExtensionFabric.loadAll(into: router)
+        XCTAssertFalse(router.isRegistered("adhocx"),
+                       "an ad-hoc-signed dylib must not load without an operator trust policy")
+    }
+
+    /// A configured Team-ID allowlist must still reject an ad-hoc signature,
+    /// which has no Team Identifier to match.
+    func testTeamAllowlistRejectsAdHocSignature() throws {
+        guard try makeFixture(name: "adhoc2", prefix: "adhocy") else {
+            throw XCTSkip("clang/codesign unavailable")
+        }
+        setenv("INTERCEPTOR_EXT_TEAM_IDS", "ABCDE12345", 1)
+        let router = Router()
+        ExtensionFabric.loadAll(into: router)
+        XCTAssertFalse(router.isRegistered("adhocy"),
+                       "ad-hoc signature carries no Team Identifier and cannot match an allowlist")
     }
 
     func testNoExtensionsIsNoOp() {
