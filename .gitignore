@@ -18,9 +18,6 @@ interceptor-screenshot-*.webp
 interceptor-macos-screenshot-*.jpg
 interceptor-macos-screenshot-*.png
 interceptor-macos-screenshot-*.webp
-interceptor-ios-screenshot-*.jpg
-interceptor-ios-screenshot-*.png
-interceptor-ios-screenshot-*.webp
 interceptor-audio-input-*.caf
 prd/
 scripts/auto-improve/
@@ -38,8 +35,6 @@ keys/
 bench-head-to-head/results/
 bench-head-to-head/results-archive-*/
 
-# iOS runner dial-in identity (private key) generated at runtime — never commit.
-selfIdentity.plist
 # Release / notarization artifacts (never commit credentials or built installers)
 notarization.env
 .notarization.env
@@ -73,7 +68,7 @@ native-managed-copy/
 reports/
 use-cases/deep-research-demo/
 # Local browser-privacy research artifacts (ad-hoc page-injection snippets +
-# their verification doc) — not part of the shipped product or the iOS surface.
+# their verification doc) — not part of the shipped product.
 /tools/
 /docs/privacy-block-set-verification.md
 # Apple container runtime data dir (symlinked from ~/Library/Application Support/com.apple.container/)

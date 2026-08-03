@@ -122,7 +122,7 @@ describe("helpForCommand (#51)", () => {
   test("CLI: bare `--help` prints the tier-0 capability map", () => {
     const r = runCli(["--help"])
     expect(r.status).toBe(0)
-    expect(r.stdout).toContain("drive a real browser, macOS, and iPhone")
+    expect(r.stdout).toContain("drive a real browser and macOS")
     expect(r.stdout).toContain("interceptor help --all")
     // A capability MAP: every surface's verbs are named so a skill-less agent
     // knows the full out-of-box surface — but flag-level detail stays deferred.

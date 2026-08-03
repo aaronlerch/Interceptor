@@ -34,7 +34,6 @@ import { parseSseCommand } from "./commands/sse"
 import { runCompoundCommand } from "./commands/compound"
 import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
-import { runIosCommand } from "./commands/ios"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
 import { runResearchCommand } from "./commands/research"
@@ -66,7 +65,6 @@ const SSE_CMDS = new Set(["sse"])
 const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
-const IOS_CMDS = new Set(["ios"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const INIT_CMDS = new Set(["init"])
 const RESEARCH_CMDS = new Set(["research"])
@@ -88,7 +86,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
-  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS, ...IOS_CMDS,
+  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
   ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...MCP_CMDS,
   ...POWER_CMDS, ...DELEGATE_CMDS,
@@ -174,7 +172,7 @@ async function main() {
 
   // rewrite argv to [cmd, ...positionals, ...flags] so flag
   // position never changes meaning (e.g. `open --text-only <url>` used to
-  // create a tab whose URL was literally "--text-only"). macos/ios pass
+  // create a tab whose URL was literally "--text-only"). macos passes
   // through untouched — see cli/normalize.ts.
   filtered = normalizeArgs(filtered)
 
@@ -189,10 +187,6 @@ async function main() {
     }
     if (cmd === "macos" && (filtered[1] === "cdp" || filtered[1] === "runtime")) {
       await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
-      return
-    }
-    if (cmd === "ios") {
-      await runIosCommand(filtered, { jsonMode, contextId: globalContextId })
       return
     }
     if (cmd === "extensions") {
@@ -215,10 +209,9 @@ async function main() {
 
   // fail fast (before any daemon spawn) when a surface is not
   // part of this install. Override with --all-surfaces / INTERCEPTOR_ALL_SURFACES.
-  if (MACOS_CMDS.has(cmd) || IOS_CMDS.has(cmd)) {
+  if (MACOS_CMDS.has(cmd)) {
     const surfaces = detectSurfaces(args)
-    const available = MACOS_CMDS.has(cmd) ? surfaces.macos : surfaces.ios
-    if (!available) {
+    if (!surfaces.macos) {
       console.error(`error: ${SURFACE_UPGRADE_HINT}`)
       process.exit(1)
     }
@@ -245,11 +238,6 @@ async function main() {
 
   if (MACOS_CMDS.has(cmd)) {
     await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
-    return
-  }
-
-  if (IOS_CMDS.has(cmd)) {
-    await runIosCommand(filtered, { jsonMode, contextId: globalContextId })
     return
   }
 

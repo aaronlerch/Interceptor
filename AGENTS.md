@@ -63,7 +63,6 @@ Full contract + verb inventory + worked examples + pitfalls: [`.agents/skills/in
 | Native apps, OS dialogs, browser chrome (URL bar, menus), occluded/minimized windows, cross-app routing | `interceptor-macos` |
 | **Electron / Chromium desktop apps** (Slack, VS Code, Descript, …): read DOM, run JS, capture network, screenshot *inside the app's web content* | `interceptor macos cdp` / `interceptor macos cdp app` |
 | **Native app runtime internals** (AppKit/SwiftUI): read the live view/object graph, run selectors, **rewrite rendered text**, intercept/redirect — via an injected in-process agent (no Frida, no SIP-off) | `interceptor macos runtime` |
-| Owned, unlocked, Developer-Mode **iPhone**: drive apps (AX tree, taps, text), screenshots, process/telemetry, GPS sim, on-device JS brain (`ios eval`), WebKit inspection (`ios web`) | `interceptor-ios` (run `interceptor ios`) |
 | Deep web research: investigate a topic across many sources (planner loop, source ledger, verification) | `interceptor-research` (run `interceptor research`) |
 | User said "open in Brave / Mail / X" (any specific named app) | `interceptor-macos` (Apple Events) |
 | Visual overlays / HUDs above all apps | `interceptor-macos` (overlay via NSPanel above compositor) |
@@ -78,7 +77,7 @@ Full contract + verb inventory + worked examples + pitfalls: [`.agents/skills/in
 
 Interceptor is also an MCP server: `interceptor mcp serve` exposes every surface
 to MCP clients (Claude Code, Codex, Gemini CLI, Cursor, Claude Desktop) as six
-typed tools — `interceptor_browser/macos/ios/read/local/raw` — plus
+typed tools — `interceptor_browser/macos/read/local/raw` — plus
 `interceptor://…` discovery resources. The server shells back out to this same
 CLI, so it is always at parity with the verbs above.
 
@@ -135,9 +134,6 @@ Deep mechanic notes (the `userActivation` override + `__interceptor_trust` marke
 - `tab close <id>` / `tab switch <id>` returns "tab `<id>` is not in the interceptor group" → the error names your **target**: that tab is unmanaged. Work on a managed tab, or get explicit user authorization for `--any-tab`.
 - Native control failed → `interceptor macos trust` to check permissions.
 - `interceptor macos *` hangs or returns stale results → confirm exactly one bridge owns `/tmp/interceptor-bridge.sock`; a leftover duplicate install can shadow the current one. Otherwise see install routes in repository scripts.
-- `interceptor ios` verb → "not visible to usbmuxd": the iPhone dropped off the Mac's device bus (common right after a device **reboot** — the Wi‑Fi route is cleared even though `xcrun devicectl list devices` still lists it). A brief USB cable touch reseeds it; then unplug and keep driving over Wi‑Fi.
-- iOS runner verbs (`tree`/`click`/`eval`) time out on `XCTestManager_IDEInterface` while Instruments verbs (`proc`/`shot`) still work → the **first XCUITest launch after a reboot** pops an on-device *"Enter iPhone Passcode for XCTest — Enable UI Automation"* dialog. Approve it on the phone, then retry (a daemon restart clears the stale session).
-- `ios runner disconnected` mid-flow → the runner dials in per session and iOS suspends its socket when it backgrounds to drive another app. Keep the phone unlocked with Auto‑Lock = Never and run multi-step flows as a tight burst.
 
 ## Repository Maintenance
 

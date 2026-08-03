@@ -166,9 +166,10 @@ fi
   printf 'skills=%s\n' "$(ls "$INSTALL_ROOT/skills" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
 } >"$INSTALL_ROOT/.skills-refresh" 2>/dev/null || true
 
-# ── remove obsolete iOS tunnel LaunchDaemon from older installs ──────
-# The no-Xcode iOS path now uses the daemon's unprivileged CoreDeviceProxy
-# userspace tunnel. New packages do not stage com.interceptor.ios-tunnel; upgrades
+# ── remove the obsolete iOS tunnel LaunchDaemon from older installs ──────
+# This fork ships no iOS surface at all, and the com.interceptor.ios-tunnel root
+# helper it used to install exposed a world-writable (0666) control socket that
+# passed arbitrary argv to a root-executed binary. Always tear it down; upgrades
 # should also stop and remove the old privileged helper if a prior build installed it.
 IOS_TUNNEL_PLIST_DST="/Library/LaunchDaemons/com.interceptor.ios-tunnel.plist"
 IOS_TUNNEL_SERVICE="system/com.interceptor.ios-tunnel"

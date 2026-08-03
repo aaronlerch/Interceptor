@@ -78,10 +78,10 @@ export function helpForCommand(cmd: string): string | null {
 // Tier 1: `interceptor help <cmd>` / `interceptor <cmd> --help` (helpForCommand).
 // Tier 2 (`help --all`): the exhaustive per-flag dump, filtered to installed surfaces.
 
-const MAP_HEADER = `interceptor — drive a real browser, macOS, and iPhone from one CLI (built for AI agents)
+const MAP_HEADER = `interceptor — drive a real browser and macOS from one CLI (built for AI agents)
 
 You operate a signed-in browser session — and, on the full install, native macOS
-apps and a physical iPhone — by reading accessibility trees + text and acting on
+apps — by reading accessibility trees + text and acting on
 element refs (not blind pixel taps). Everything below works now; no skill pack
 needed. Go deeper on any verb:
   interceptor help <command>     One command's full contract: flags, inputs, what it returns
@@ -115,20 +115,8 @@ const MAP_MACOS = `MACOS — native apps via the accessibility tree, background-
   Runtime    macos runtime enable|tree|read|eval|mutate     in-process control of a running native app
   Trust      macos trust     permission status + Accessibility/Screen/Microphone prompts`
 
-const MAP_IOS = `iOS — automate a physical iPhone over WiFi (on-device XCUITest runner, no cable once paired):
-  Drive      ios tree · find · inspect       on-screen elements + refs (auto-connects on first verb)
-  Input      ios click · type · keys · scroll · drag · press       trusted XCUITest input
-  Apps       ios screenshot · apps · app launch|activate|terminate · devices · name
-  Setup      ios install | login | setup     one-time: put the InterceptorRunner on the phone
-  Connection model (read this before you panic about 'connected: false'):
-    • Phone must be owned, unlocked, in Developer Mode, and WiFi-paired to this Mac.
-    • 'ios devices' showing "connected: false" is NORMAL when idle — it means "installed,
-      auto-connects on the next verb", NOT "broken". Just run a verb (e.g. 'ios tree --on <name>').
-    • Keep the phone unlocked and awake while driving — auto-lock drops the runner.
-    • 'interceptor help ios' / 'ios help' has the full setup + troubleshooting flow.`
-
-const MAP_UPGRADE = `macOS + iPhone control are NOT enabled on this browser-only install:
-  interceptor upgrade --full     Add native macOS + iPhone control (macOS host only)`
+const MAP_UPGRADE = `macOS control is NOT enabled on this browser-only install:
+  interceptor upgrade --full     Add native macOS control (macOS host only)`
 
 const MAP_FOOTER = `LOCAL (no browser needed):
   status · init · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
@@ -140,17 +128,16 @@ GLOBAL FLAGS (any command, any position — flag order never changes meaning):
 Docs & issues: https://github.com/Hacker-Valley-Media/Interceptor`
 
 /** Tier-0 capability map, gated to the surfaces this install actually has. */
-export function shortHelp(surfaces: { macos: boolean; ios: boolean }): string {
+export function shortHelp(surfaces: { macos: boolean }): string {
   const parts = [MAP_HEADER, MAP_BROWSER]
   if (surfaces.macos) parts.push(MAP_MACOS)
-  if (surfaces.ios) parts.push(MAP_IOS)
-  if (!surfaces.macos && !surfaces.ios) parts.push(MAP_UPGRADE)
+  if (!surfaces.macos) parts.push(MAP_UPGRADE)
   parts.push(MAP_FOOTER)
   return parts.join("\n\n")
 }
 
 // Static all-surfaces fallback for callers/tests that don't detect surfaces.
-export const SHORT_HELP = shortHelp({ macos: true, ios: true })
+export const SHORT_HELP = shortHelp({ macos: true })
 
 const HELP_BROWSER = `interceptor — browser control CLI
 
@@ -627,26 +614,16 @@ macOS Bridge (full install only):
   interceptor macos notifications post --title "..." --body "..." [--sound default] [--badge N] [--category <id>]
   interceptor macos notifications categories list|register|clear`
 
-const HELP_IOS = `  iOS — automate your iPhone (pre-built agent, no signing/env):
-  interceptor ios install [<device>]         Push the agent to a phone (plugged in + unlocked)
-  interceptor ios devices                     Phones with the agent (+ names)
-  interceptor ios name <device> <alias>       Rename a phone (then use --on <alias>)
-  interceptor ios tree|find|inspect [--on <name>]                   On-screen elements (auto-connects)
-  interceptor ios click|type|keys|scroll|drag|press [--on <name>]   Trusted XCUITest input
-  interceptor ios screenshot | apps | app launch|activate|terminate <id> [--on <name>]
-  Run 'interceptor ios help' for the full iOS surface.`
-
 // Back-compat: the complete dump (all surfaces), used by helpForCommand's
 // line-grep and by `help --all` on full installs.
-export const HELP = [HELP_BROWSER, HELP_MACOS, HELP_IOS].join("\n\n")
+export const HELP = [HELP_BROWSER, HELP_MACOS].join("\n\n")
 
 /** Tier-2 help filtered to the surfaces present on this install. */
-export function fullHelp(surfaces: { macos: boolean; ios: boolean }): string {
+export function fullHelp(surfaces: { macos: boolean }): string {
   const parts = [HELP_BROWSER]
   if (surfaces.macos) parts.push(HELP_MACOS)
-  if (surfaces.ios) parts.push(HELP_IOS)
-  if (!surfaces.macos || !surfaces.ios) {
-    parts.push("macos/ios: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only).")
+  if (!surfaces.macos) {
+    parts.push("macos: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only).")
   }
   return parts.join("\n\n")
 }

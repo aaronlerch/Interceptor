@@ -15,7 +15,7 @@
 
 import { existsSync } from "node:fs"
 
-export type Surfaces = { browser: true; macos: boolean; ios: boolean }
+export type Surfaces = { browser: true; macos: boolean }
 
 const LAUNCH_AGENT_SYSTEM = "/Library/LaunchAgents/com.interceptor.bridge.plist"
 
@@ -25,13 +25,13 @@ function launchAgentUser(): string {
 
 export function detectSurfaces(argv: string[] = [], env: Record<string, string | undefined> = process.env): Surfaces {
   if (argv.includes("--all-surfaces") || env.INTERCEPTOR_ALL_SURFACES) {
-    return { browser: true, macos: true, ios: true }
+    return { browser: true, macos: true }
   }
   const full = process.platform === "darwin" &&
     (existsSync(LAUNCH_AGENT_SYSTEM) || existsSync(launchAgentUser()) ||
      existsSync("/tmp/interceptor-bridge.sock"))
-  return { browser: true, macos: full, ios: full }
+  return { browser: true, macos: full }
 }
 
 export const SURFACE_UPGRADE_HINT =
-  "macos/ios: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only)."
+  "macos: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only)."

@@ -374,46 +374,6 @@ run chmod 755 "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/uninstall.sh"
 run ditto "$REPO_ROOT/README.md" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/README.md"
 run chmod 644 "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/README.md"
 
-# Stage the iOS runner source project so `interceptor ios setup` can use the
-# end user's locally configured Xcode account/team for automatic provisioning.
-run mkdir -p "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner"
-run ditto "$REPO_ROOT/ios/InterceptorRunner/Sources" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/Sources"
-run ditto "$REPO_ROOT/ios/InterceptorRunner/Generated" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/Generated"
-run ditto "$REPO_ROOT/ios/InterceptorRunner/InterceptorRunner.xcodeproj" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/InterceptorRunner.xcodeproj"
-run ditto "$REPO_ROOT/ios/InterceptorRunner/project.yml" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/project.yml"
-run ditto "$REPO_ROOT/ios/InterceptorRunner/README.md" "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios/InterceptorRunner/README.md"
-
-# ── iOS agent: pre-built, UNSIGNED XCUITest runner ─────────
-# Build the iPhone agent ONCE per release and bundle it as an opaque tar. Ship it UNSIGNED — each user re-signs it with THEIR OWN Apple ID at
-# `interceptor ios setup` (daemon/ios/signer.ts), so the pkg carries no operator
-# development identity. The tar keeps the iOS binaries away from the macOS notary.
-# Skip with INTERCEPTOR_SKIP_RUNNER=1; bundle a prebuilt Products dir with
-# INTERCEPTOR_RUNNER_PREBUILT=<dir>. (Operator machines with Xcode can still push
-# the prebuilt via devicectl; the re-sign only kicks in on the self-service path.)
-if [[ "${INTERCEPTOR_SKIP_RUNNER:-0}" != "1" ]]; then
-  RUNNER_PRODUCTS="${INTERCEPTOR_RUNNER_PREBUILT:-}"
-  if [[ -z "$RUNNER_PRODUCTS" && "${INTERCEPTOR_DRY_RUN:-0}" != "1" ]]; then
-    echo "==> Building the iOS agent UNSIGNED (InterceptorRunner; user re-signs at setup)..."
-    ( cd "$REPO_ROOT/ios/InterceptorRunner" && xcodegen generate >/dev/null )
-    RUNNER_DD="$(mktemp -d)/dd"
-    # Unsigned build-for-testing: no team, no identity, no provisioning. The
-    # re-sign at `ios setup` supplies get-task-allow + the user's cert/profile.
-    xcrun xcodebuild build-for-testing \
-      -project "$REPO_ROOT/ios/InterceptorRunner/InterceptorRunner.xcodeproj" \
-      -scheme InterceptorRunner -destination 'generic/platform=iOS' \
-      CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" ENTITLEMENTS_REQUIRED=NO \
-      -derivedDataPath "$RUNNER_DD" >/dev/null
-    RUNNER_PRODUCTS="$RUNNER_DD/Build/Products"
-  fi
-  if [[ -n "$RUNNER_PRODUCTS" && -d "$RUNNER_PRODUCTS" ]]; then
-    # exclude dSYMs to keep the bundle lean
-    run tar --exclude='*.dSYM' -cf "$STAGING_DIR/daemon/$DEST_SUPPORT_DIR/ios-runner.tar" -C "$RUNNER_PRODUCTS" .
-    echo "==> iOS agent bundled UNSIGNED (ios-runner.tar)"
-  else
-    echo "==> NOTE: iOS agent not bundled (no Products dir) — 'interceptor ios install'/'setup' will report it missing"
-  fi
-fi
-
 # Browser extension: extension/dist → staging/extension/<support>/extension
 run ditto "$REPO_ROOT/extension/dist" "$STAGING_DIR/extension/$DEST_EXTENSION_DIR"
 
@@ -450,8 +410,6 @@ if [[ "$BUILD_FULL" == "1" ]]; then
   run chmod 644 "$STAGING_DIR/daemon-full/Library/LaunchAgents/com.interceptor.bridge.plist"
   run ditto "$REPO_ROOT/.agents/skills/interceptor-macos" \
     "$STAGING_DIR/daemon-full/$DEST_SUPPORT_DIR/skills/interceptor-macos"
-  run ditto "$REPO_ROOT/.agents/skills/interceptor-ios" \
-    "$STAGING_DIR/daemon-full/$DEST_SUPPORT_DIR/skills/interceptor-ios"
 
   if [[ "$INCLUDE_AGENT_DYLIBS" == "1" ]]; then
     # Runtime Agent surface (research profile): ship the agent dylib(s) at

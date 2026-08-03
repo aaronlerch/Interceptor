@@ -12,10 +12,10 @@
  * sub-verb is gated, never silently run. Benign verbs default to MUTATE.
  *
  * Tier tables are grounded in the CLI surface (enumerated against cli/commands/*.ts,
- * native.ts, cdp.ts, ios*.ts). Keep in lockstep when verbs are added.
+ * native.ts, cdp.ts). Keep in lockstep when verbs are added.
  */
 
-export type Surface = "browser" | "macos" | "ios" | "local"
+export type Surface = "browser" | "macos" | "local"
 export type Tier = "read" | "mutate" | "destructive" | "exec"
 
 const TIER_RANK: Record<Tier, number> = { read: 0, mutate: 1, destructive: 2, exec: 3 }
@@ -38,11 +38,6 @@ const READ_VERBS: Record<Surface, Set<string>> = {
     "frontmost", "screenshot", "vision", "nlp", "sensitive", "health", "files",
     "log", "sounds", "detect", "translate", "thumbnail", "read", "capture",
   ]),
-  ios: new Set([
-    "tree", "find", "inspect", "screenshot", "apps", "status", "devices",
-    "discover", "diag", "crash", "profiles", "springboard", "proc", "ps", "top",
-    "gpu", "shot", "axtree", "screen", "backup", "logs", "notify",
-  ]),
   local: new Set([
     "status", "manifest", "diagnose", "extensions", "contexts", "capabilities",
   ]),
@@ -55,8 +50,6 @@ const EXEC: TierMap = {
   "macos:overlay:eval": "exec",
   "macos:vm:exec": "exec",
   "macos:cdp:raw": "exec",
-  "ios:eval": "exec", "ios:spawn": "exec",
-  "ios:web:eval": "exec", "ios:web:call": "exec",
 }
 
 // ── DESTRUCTIVE (irreversible / high-impact / exfil) by exact key ─────────────
@@ -77,11 +70,8 @@ const DESTRUCTIVE_SUB: TierMap = {
   // macOS update install
   "macos:update:install": "destructive",
   // iOS lifecycle / device-mutating
-  "ios:app:terminate": "destructive",
   // iOS fs push (write into app container)
-  "ios:fs:push": "destructive",
   // iOS web mutating raw call
-  "ios:web:call:--mutating": "destructive",
 }
 
 // Personal-data CRUD sub-verbs that are destructive (create/update/delete/…).
@@ -115,9 +105,6 @@ const FAMILY_FLOOR: Record<string, Tier> = {
   "macos:reminders": "destructive",
   "macos:contacts": "destructive",
   "macos:photos": "destructive",
-  "ios:app": "destructive",
-  "ios:web": "mutate",
-  "ios:fs": "destructive",
 }
 
 /** First non-flag token after the verb (the sub-verb), else "". */
@@ -132,7 +119,7 @@ function subVerbOf(args: string[]): string {
 export type Classification = { tier: Tier; surface: Surface; verb: string; sub: string }
 
 /**
- * Classify a call. `verb` is the top-level verb (for macos/ios this is args[0]
+ * Classify a call. `verb` is the top-level verb (for macos this is args[0]
  * of the surface command, e.g. "vm"); `args` are the remaining tokens.
  */
 export function classify(surface: Surface, verb: string, args: string[]): Classification {
@@ -143,17 +130,12 @@ export function classify(surface: Surface, verb: string, args: string[]): Classi
   // 1. exec (highest) — exact sub, then whole verb.
   if (EXEC[key3]) return mk("exec")
   if (EXEC[key2]) return mk("exec")
-  // `ios web call --mutating` special: exec already covers `ios:web:call`.
 
   // 2. destructive — exact sub overrides.
   if (DESTRUCTIVE_SUB[key3]) return mk("destructive")
   if (surface === "macos" && verb === "share" && SHARE_SEND.has(sub)) return mk("destructive")
   if (surface === "macos" && verb === "pdf" && PDF_WRITE.has(sub)) return mk("destructive")
   if (surface === "macos" && PD_VERBS.has(verb) && PD_WRITE_SUBS.has(sub)) return mk("destructive")
-  if (surface === "ios" && (verb === "setup" || verb === "refresh" || verb === "install" ||
-      verb === "login" || verb === "logout" || verb === "kill")) return mk("destructive")
-  if (surface === "ios" && verb === "location" && sub === "set") return mk("destructive")
-  if (surface === "ios" && verb === "profiles" && (sub === "install" || sub === "remove")) return mk("destructive")
 
   // 3. read — whole verb reads, unless a mixed family says otherwise.
   if (READ_VERBS[surface]?.has(verb)) {
@@ -192,16 +174,10 @@ const FAMILY_READ_SUBS: Record<string, Set<string>> = {
   "macos:reminders": new Set(["status", "lists", "default", "all", "incomplete", "completed"]),
   "macos:contacts": new Set(["status", "containers", "default-container", "groups", "group", "list", "contact", "me", "find", "vcard", "current-token", "changes"]),
   "macos:photos": new Set(["status", "albums", "album", "assets", "asset", "thumbnail", "export", "export-video", "export-live", "current-token", "changes"]),
-  "ios:app": new Set([]),
-  "ios:web": new Set(["targets", "status", "explain", "read", "text", "find", "inspect", "console", "network", "screenshot"]),
-  "ios:fs": new Set(["ls"]),
 }
 const FAMILY_MUTATE_SUBS: Record<string, Set<string>> = {
   "macos:app": new Set(["activate", "launch", "focus", "hide", "unhide"]),
   "macos:tcc": new Set([]),
-  "ios:app": new Set(["launch", "activate"]),
-  "ios:web": new Set(["attach", "detach", "click", "type", "keys", "scroll", "calibrate"]),
-  "ios:fs": new Set(["pull"]),
 }
 function isFamilyRead(surface: Surface, verb: string, sub: string): boolean {
   return FAMILY_READ_SUBS[`${surface}:${verb}`]?.has(sub) ?? false

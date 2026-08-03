@@ -39,7 +39,6 @@ Interceptor gives agents human-style control of the tools you already use — **
 
 - **Interceptor Browser** — runs as a WebExtension inside your actual Chrome, Brave, or Safari session. Your cookies, sessions, logins, and tabs stay intact. Read pages, click, type, navigate, observe network traffic, automate rich editors, record-and-replay user flows.
 - **Interceptor macOS** — runs as a Swift bridge daemon. Drives native macOS apps the same way: structured accessibility trees, OS-level trusted input, on-device vision/speech/NLP, system-wide event monitoring.
-- **Interceptor iOS** — drives any installed app on an owned, unlocked, Developer-Mode iPhone via an on-device XCUITest runner that dials into the daemon over WiFi: ref-tagged element trees, deterministic coordinate taps, reliable text entry, screenshots, and app lifecycle. Plus runner-free **Instruments/telemetry** (`ios proc / top / spawn / kill / location / gpu / shot`), an **on-device JS brain** (`ios eval` — a whole observe→decide→act loop runs on the phone in one round-trip), **WebKit inspection** (`ios web`), and classic-Lockdown **device services** (`ios logs / diag / fs / crash / profiles`). Addressed as `--on <phone>` / `ios:<udid>`. See `interceptor ios help`.
 
 The agent calls `interceptor` CLI commands, reads the output, and decides what to do next. No MCP required. No API keys required.
 
@@ -149,7 +148,7 @@ interceptor mcp install        # auto-configures every detected AI client
 interceptor mcp status         # show where it's registered
 ```
 
-Restart the client and you're live. Under the hood the client runs `interceptor mcp serve` (stdio), exposing `interceptor_browser`, `interceptor_macos`, `interceptor_ios`, `interceptor_read`, `interceptor_local`, and `interceptor_raw`, plus `interceptor://…` discovery resources for the full verb reference.
+Restart the client and you're live. Under the hood the client runs `interceptor mcp serve` (stdio), exposing `interceptor_browser`, `interceptor_macos`, `interceptor_read`, `interceptor_local`, and `interceptor_raw`, plus `interceptor://…` discovery resources for the full verb reference.
 
 **Safety is operator-controlled.** Read and UI-mutation verbs run by default; irreversible or code-executing verbs (delete, quit, `eval`, `script`, `runtime`, `share`) are refused unless you opt in at launch:
 
@@ -196,12 +195,10 @@ Interceptor ships one CLI binary with two product surfaces. Pick by what you're 
 | Real-time speech, sound classification, OCR, on-device NLP/LLM | macOS | `interceptor macos listen / sounds / vision / nlp / ai` |
 | Record & replay a human's native-app flow | macOS | `interceptor macos monitor *` |
 | Drive Apple Events to background apps without raising them | macOS | `interceptor macos intent dispatch` |
-| Drive any app on an owned, unlocked iPhone (tree/tap/type/screenshot/app lifecycle) | iOS | `interceptor ios tree / find / click / type / screenshot / app *` |
-| Runner-free iPhone process/telemetry, launch/kill, GPS simulation; on-device JS brain; WebKit inspection | iOS | `interceptor ios proc / top / spawn / kill / location / eval`, `ios web *` |
 
-If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS. If the task is an app on your **iPhone**, use iOS.
+If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS.
 
-The deep dives live in the per-surface sections below. Skill packages mirror this split: agent operators load `.agents/skills/interceptor-browser/` for web work, `.agents/skills/interceptor-macos/` for native work, and `.agents/skills/interceptor-ios/` for iPhone work.
+The deep dives live in the per-surface sections below. Skill packages mirror this split: agent operators load `.agents/skills/interceptor-browser/` for web work and `.agents/skills/interceptor-macos/` for native work.
 
 ---
 

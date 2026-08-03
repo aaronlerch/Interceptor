@@ -130,22 +130,10 @@ describe("binary mismatch detection", () => {
 })
 
 describe("context-kind-aware probes", () => {
-  // ios:/cdp: contexts must never be probed with browser verbs — presence in
+  // cdp: contexts must never be probed with browser verbs — presence in
   // the contexts list is the liveness signal. The early return means these
   // calls complete without any daemon connection (which is also what lets
   // this test run daemon-less).
-  test("ios: context reports kind ios, connected, no extension probe", async () => {
-    const { probeContext } = await import("../cli/commands/diagnose")
-    const probe = await probeContext("ios:00008150")
-    expect(probe).toEqual({
-      contextId: "ios:00008150",
-      kind: "ios",
-      extension: { reachable: true },
-      tab: null,
-      elements: null,
-    })
-  })
-
   test("cdp: context reports kind cdp", async () => {
     const { probeContext } = await import("../cli/commands/diagnose")
     const probe = await probeContext("cdp:some-app")

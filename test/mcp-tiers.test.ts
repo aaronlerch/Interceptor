@@ -48,19 +48,6 @@ describe("classify — tier by (surface, verb, sub-verb)", () => {
     expect(classify("macos", "clipboard", ["read"]).tier).toBe("read")
   })
 
-  test("iOS tiers", () => {
-    expect(classify("ios", "tree", []).tier).toBe("read")
-    expect(classify("ios", "click", ["r1"]).tier).toBe("mutate")
-    expect(classify("ios", "kill", ["123"]).tier).toBe("destructive")
-    expect(classify("ios", "setup", []).tier).toBe("destructive")
-    expect(classify("ios", "eval", ["Interceptor.tree()"]).tier).toBe("exec")
-    expect(classify("ios", "app", ["terminate", "com.x"]).tier).toBe("destructive")
-    expect(classify("ios", "app", ["launch", "com.x"]).tier).toBe("mutate")
-    expect(classify("ios", "fs", ["push", "a", "b"]).tier).toBe("destructive")
-    expect(classify("ios", "fs", ["ls", "/"]).tier).toBe("read")
-    expect(classify("ios", "web", ["eval", "1"]).tier).toBe("exec")
-    expect(classify("ios", "web", ["text"]).tier).toBe("read")
-  })
 })
 
 describe("parseAllow", () => {

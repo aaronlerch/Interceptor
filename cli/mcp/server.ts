@@ -1,7 +1,7 @@
 /**
  * cli/mcp/server.ts — build the Interceptor MCP server.
  *
- * Six router tools (browser / macos / ios / read / local / raw) whose verb menus
+ * Five router tools (browser / macos / read / local / raw) whose verb menus
  * are generated from the binary's own manifest, plus discovery resources for the
  * long tail. All execution flows through the subprocess adapter (§4); every call
  * is classified and gated by the operator allowlist (§7); content-bearing output
@@ -16,7 +16,7 @@ import { runInterceptor, warmDaemon, withGlobalFlags } from "./adapter"
 import { toResult, type McpResult } from "./output"
 import { classify, gate, parseAllow, READ_VERBS, type Surface } from "./tiers"
 
-const CALL_TIMEOUT_MS = 660_000 // backstop above the CLI's own 600s ios_setup ceiling
+const CALL_TIMEOUT_MS = 660_000 // backstop above the CLI's own longest verb ceiling
 
 // ── Verb menus ────────────────────────────────────────────────────────────────
 // browser + local come from the authoritative manifest (auto-tracks the binary).
@@ -35,7 +35,7 @@ const LOCAL_VERBS: { v: string; s: string }[] = [
 ]
 
 // macOS / iOS top-level verb menus (maintained against the CLI surface; full flag/
-// sub-verb detail lives in the interceptor://help/{macos,ios} resources).
+// sub-verb detail lives in the interceptor://help/macos resource).
 const MACOS_VERBS: { v: string; s: string }[] = [
   { v: "tree", s: "AX tree" }, { v: "find", s: "search AX tree" }, { v: "inspect", s: "element details" },
   { v: "value", s: "get/set AX value (mutate)" }, { v: "action", s: "invoke AX action" }, { v: "focused", s: "focused element" },
@@ -61,22 +61,6 @@ const MACOS_VERBS: { v: string; s: string }[] = [
   { v: "update", s: "Sparkle updates" }, { v: "trust", s: "TCC prompts" }, { v: "tcc", s: "TCC status/profile" },
   { v: "runtime", s: "in-process app runtime (exec)" }, { v: "cdp", s: "Electron/Chromium CDP" },
 ]
-const IOS_VERBS: { v: string; s: string }[] = [
-  { v: "setup", s: "build/sign/install runner (destructive)" }, { v: "refresh", s: "re-sign (destructive)" },
-  { v: "login", s: "Apple-services sign-in" }, { v: "logout", s: "drop token" }, { v: "install", s: "push runner (destructive)" },
-  { v: "devices", s: "list devices" }, { v: "name", s: "rename device" }, { v: "discover", s: "discover devices" },
-  { v: "enable", s: "connect device" }, { v: "disable", s: "disconnect device" }, { v: "status", s: "connection status" },
-  { v: "fgdebug", s: "foreground debug" }, { v: "tree", s: "element tree" }, { v: "find", s: "find elements" },
-  { v: "inspect", s: "element details" }, { v: "click", s: "tap" }, { v: "type", s: "type" }, { v: "keys", s: "type into focused" },
-  { v: "scroll", s: "scroll" }, { v: "drag", s: "drag" }, { v: "press", s: "hardware button" }, { v: "screenshot", s: "screenshot" },
-  { v: "apps", s: "installed apps" }, { v: "app", s: "launch/activate/terminate" }, { v: "eval", s: "on-device JS brain (exec)" },
-  { v: "proc", s: "process list" }, { v: "ps", s: "process list" }, { v: "top", s: "CPU/mem samples" }, { v: "spawn", s: "launch w/ env (exec)" },
-  { v: "kill", s: "kill pid (destructive)" }, { v: "location", s: "simulate GPS (set is destructive)" }, { v: "gpu", s: "GPU samples" },
-  { v: "shot", s: "screenshot (runner-free)" }, { v: "backup", s: "mobilebackup2" }, { v: "screen", s: "live frames" }, { v: "axtree", s: "AX audit" },
-  { v: "diag", s: "diagnostics" }, { v: "logs", s: "syslog" }, { v: "fs", s: "AFC filesystem (push is destructive)" }, { v: "crash", s: "crash reports" },
-  { v: "profiles", s: "config profiles" }, { v: "notify", s: "Darwin notifications" }, { v: "springboard", s: "SpringBoard state" },
-  { v: "web", s: "WebKit inspection (eval/call are exec)" },
-]
 
 function foldMenu(items: { v: string; s: string }[]): string {
   return items.map(i => `${i.v} — ${i.s}`).join("; ")
@@ -87,7 +71,7 @@ function verbEnum(items: { v: string; s: string }[]): [string, ...string[]] {
 }
 
 // Read-only verb menu for interceptor_read (from the tier tables — one source of truth).
-const READ_MENU: { surface: Surface; v: string }[] = (["browser", "macos", "ios"] as Surface[])
+const READ_MENU: { surface: Surface; v: string }[] = (["browser", "macos"] as Surface[])
   .flatMap(s => [...READ_VERBS[s]].map(v => ({ surface: s, v })))
 const READ_VERB_NAMES = [...new Set(READ_MENU.map(r => r.v))] as [string, ...string[]]
 
@@ -97,7 +81,7 @@ type Session = { group: string; allowEnv: string | undefined; fence: boolean }
 async function runVerb(
   surface: Surface, verb: string, args: string[],
   session: Session,
-  flags: { group?: string; context?: string; tab?: number; device?: string; session?: string; confirm?: boolean },
+  flags: { group?: string; context?: string; tab?: number; confirm?: boolean },
   cliArgs: string[],
 ): Promise<McpResult> {
   const c = classify(surface, verb, args)
@@ -109,8 +93,6 @@ async function runVerb(
     group: surface === "browser" ? flags.group : undefined,
     context: surface === "browser" ? flags.context : undefined,
     tab: surface === "browser" ? flags.tab : undefined,
-    device: surface === "ios" ? flags.device : undefined,
-    session: surface === "ios" ? flags.session : undefined,
   })
   const run = await runInterceptor(injected, { timeoutMs: CALL_TIMEOUT_MS })
   return toResult({ surface, verb, run, fenceEnabled: session.fence })
@@ -163,25 +145,6 @@ export function buildServer(): McpServer {
     return runVerb("macos", a.verb, args, session, { confirm: a.confirm }, ["macos", a.verb, ...args])
   })
 
-  // ── interceptor_ios ─────────────────────────────────────────────────────────
-  server.registerTool("interceptor_ios", {
-    title: "Interceptor — iOS",
-    description:
-      "Drive an owned, unlocked, Developer-Mode iPhone via Interceptor (UI automation, Instruments telemetry, device services, WebKit). " +
-      "verb menu: " + foldMenu(IOS_VERBS) +
-      ". Put the sub-verb + flags in `args` (see interceptor://help/ios). setup/refresh/install/kill/eval/spawn require operator opt-in + confirm.",
-    inputSchema: {
-      verb: z.enum(verbEnum(IOS_VERBS)).describe("iOS verb"),
-      args: z.array(z.string()).optional().describe("sub-verb + arguments + flags, verbatim"),
-      device: z.string().optional().describe("target device alias or udid (--on)"),
-      session: z.string().optional().describe("web session id (--session) for web verbs"),
-      confirm: z.boolean().optional().describe("required for destructive/exec verbs when operator-allowed"),
-    },
-  }, async (a: { verb: string; args?: string[]; device?: string; session?: string; confirm?: boolean }) => {
-    const args = a.args || []
-    return runVerb("ios", a.verb, args, session, { device: a.device, session: a.session, confirm: a.confirm }, ["ios", a.verb, ...args])
-  })
-
   // ── interceptor_read (read-only, auto-approvable) ───────────────────────────
   server.registerTool("interceptor_read", {
     title: "Interceptor — read (observational)",
@@ -189,22 +152,21 @@ export function buildServer(): McpServer {
       "Read-only observation across surfaces (no state change): trees, text, network, screenshots, listings. Safe to auto-approve. " +
       "verbs: " + READ_VERB_NAMES.join(", ") + ".",
     inputSchema: {
-      surface: z.enum(["browser", "macos", "ios"]).describe("which surface to read"),
+      surface: z.enum(["browser", "macos"]).describe("which surface to read"),
       verb: z.enum(READ_VERB_NAMES).describe("read-only verb"),
       args: z.array(z.string()).optional().describe("arguments + flags, verbatim"),
       context: z.string().optional(),
       tab: z.number().optional(),
-      device: z.string().optional(),
     },
     annotations: { readOnlyHint: true },
-  }, async (a: { surface: Surface; verb: string; args?: string[]; context?: string; tab?: number; device?: string }) => {
+  }, async (a: { surface: Surface; verb: string; args?: string[]; context?: string; tab?: number }) => {
     const args = a.args || []
     if (!READ_VERBS[a.surface]?.has(a.verb)) {
       return { content: [{ type: "text", text: `'${a.verb}' is not a read-only verb on ${a.surface}. Use interceptor_${a.surface}.` }], isError: true }
     }
     const cliArgs = a.surface === "browser" ? [a.verb, ...args] : [a.surface, a.verb, ...args]
     return runVerb(a.surface, a.verb, args, session,
-      { group: gid(), context: a.context, tab: a.tab, device: a.device }, cliArgs)
+      { group: gid(), context: a.context, tab: a.tab }, cliArgs)
   })
 
   // ── interceptor_local (meta, read-only) ─────────────────────────────────────
@@ -242,8 +204,10 @@ export function buildServer(): McpServer {
     // Derive surface/verb for classification.
     const args = a.args
     let surface: Surface = "browser", verb = args[0] || "", rest = args.slice(1)
+    if (args[0] === "ios") {
+      return { content: [{ type: "text", text: "the iOS surface is removed from this build." }], isError: true }
+    }
     if (args[0] === "macos") { surface = "macos"; verb = args[1] || ""; rest = args.slice(2) }
-    else if (args[0] === "ios") { surface = "ios"; verb = args[1] || ""; rest = args.slice(2) }
     return runVerb(surface, verb, rest, session, { group: gid(), confirm: a.confirm }, args)
   })
 
@@ -253,14 +217,11 @@ export function buildServer(): McpServer {
     return { contents: [{ uri: uri.href, mimeType, text: run.stdout || run.stderr }] }
   }
   server.registerResource("manifest", "interceptor://manifest",
-    { mimeType: "application/json", description: "Machine-readable capability manifest (browser+local fully; macos/ios stubs)" },
+    { mimeType: "application/json", description: "Machine-readable capability manifest (browser+local fully; macos stubs)" },
     textResource(["manifest"], "application/json"))
   server.registerResource("help-macos", "interceptor://help/macos",
     { mimeType: "text/plain", description: "Full macOS verb + sub-verb reference" },
     textResource(["help", "macos"], "text/plain"))
-  server.registerResource("help-ios", "interceptor://help/ios",
-    { mimeType: "text/plain", description: "Full iOS verb + sub-verb reference" },
-    textResource(["help", "ios"], "text/plain"))
   server.registerResource("extensions", "interceptor://extensions",
     { mimeType: "application/json", description: "Installed extension verbs (not in the manifest)" },
     textResource(["extensions", "list", "--json"], "application/json"))

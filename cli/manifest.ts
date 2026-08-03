@@ -20,7 +20,7 @@ import { skillsStatusSummary } from "./commands/skills"
 export type FlagSpec = { name: string; value?: string; description: string }
 export type CommandSpec = {
   name: string
-  surface: "browser" | "macos" | "ios" | "local"
+  surface: "browser" | "macos" | "local"
   usage: string
   summary: string
   returns: string
@@ -186,14 +186,13 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "upgrade", surface: "local", usage: "interceptor upgrade --full", summary: "Promote browser-only install to full computer-use mode (macOS)", returns: "Installer output." },
   // ── other surfaces (verbs enumerated via their own --help) ──────────────────
   { name: "macos", surface: "macos", usage: "interceptor macos <verb> … (see: interceptor help macos)", summary: "Native macOS control: AX trees, background input, windows, screenshots, Apple Events, Electron CDP, app runtime", returns: "Per-verb; background-first — only 'app activate'/'open --activate' move focus." },
-  { name: "ios", surface: "ios", usage: "interceptor ios <verb> … (see: interceptor help ios)", summary: "iPhone automation via on-device XCUITest runner over WiFi", returns: "Per-verb: element trees, taps, typing, screenshots, app lifecycle. NOTE: 'ios devices' → connected:false is the normal idle state; the runner auto-connects on the next verb. Keep the phone unlocked & awake." },
 ]
 
 export function runManifestCommand(argv: string[]): null {
   const surfaces = detectSurfaces(argv)
   const commands = COMMAND_SPECS.filter(c =>
     c.surface === "browser" || c.surface === "local" ||
-    (c.surface === "macos" && surfaces.macos) || (c.surface === "ios" && surfaces.ios))
+    (c.surface === "macos" && surfaces.macos))
   let skills: ReturnType<typeof skillsStatusSummary> | { packDir: null } = { packDir: null }
   try { skills = skillsStatusSummary() } catch {}
   console.log(JSON.stringify({
