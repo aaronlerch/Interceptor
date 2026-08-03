@@ -1,6 +1,21 @@
 // extension/src/inject-canvas.ts
 if (!window.__interceptor_canvas_installed) {
-  let safeString2 = function(value, max = 200) {
+  let ensureCanvasPatched2 = function() {
+    if (canvasPatched)
+      return;
+    canvasPatched = true;
+    patch2DPrototype2(window.CanvasRenderingContext2D?.prototype);
+    patchGetContext2(window.HTMLCanvasElement, "HTMLCanvasElement");
+    patchGetContext2(window.OffscreenCanvas, "OffscreenCanvas");
+    window.__interceptorCanvasObserver = observer;
+  }, setCanvasCapture2 = function(active) {
+    if (active) {
+      ensureCanvasPatched2();
+      canvasCaptureActive = true;
+    } else {
+      canvasCaptureActive = false;
+    }
+  }, safeString2 = function(value, max = 200) {
     if (value === null || value === undefined)
       return null;
     try {
@@ -138,9 +153,11 @@ if (!window.__interceptor_canvas_installed) {
         return;
       proto[name] = function(...args) {
         const out = orig.apply(this, args);
-        try {
-          handler(this, args, out);
-        } catch {}
+        if (canvasCaptureActive) {
+          try {
+            handler(this, args, out);
+          } catch {}
+        }
         return out;
       };
     };
@@ -309,6 +326,8 @@ if (!window.__interceptor_canvas_installed) {
     Ctor.prototype.__interceptor_canvas_get_context_wrapped = true;
     Ctor.prototype.getContext = function(type, ...rest) {
       const ctx = orig.call(this, type, ...rest);
+      if (!canvasCaptureActive)
+        return ctx;
       const canvasId = registerCanvas2(this);
       const entry = {
         t: Date.now(),
@@ -331,8 +350,18 @@ if (!window.__interceptor_canvas_installed) {
       return ctx;
     };
   };
-  safeString = safeString2, getCanvasId = getCanvasId2, canvasMeta = canvasMeta2, rectLike = rectLike2, bboxFromPoints = bboxFromPoints2, drawImageRect = drawImageRect2, transformLike = transformLike2, pushBounded = pushBounded2, summarizeKinds = summarizeKinds2, notePartial = notePartial2, registerCanvas = registerCanvas2, emit = emit2, makeDerived = makeDerived2, patch2DPrototype = patch2DPrototype2, patchGetContext = patchGetContext2;
+  ensureCanvasPatched = ensureCanvasPatched2, setCanvasCapture = setCanvasCapture2, safeString = safeString2, getCanvasId = getCanvasId2, canvasMeta = canvasMeta2, rectLike = rectLike2, bboxFromPoints = bboxFromPoints2, drawImageRect = drawImageRect2, transformLike = transformLike2, pushBounded = pushBounded2, summarizeKinds = summarizeKinds2, notePartial = notePartial2, registerCanvas = registerCanvas2, emit = emit2, makeDerived = makeDerived2, patch2DPrototype = patch2DPrototype2, patchGetContext = patchGetContext2;
   window.__interceptor_canvas_installed = true;
+  let canvasCaptureActive = false;
+  let canvasPatched = false;
+  document.addEventListener("__interceptor_canvas_set", (e) => {
+    if (e.detail && e.detail.active)
+      setCanvasCapture2(true);
+  });
+  document.addEventListener("__interceptor_set_active", (e) => {
+    if (!(e.detail && e.detail.active))
+      setCanvasCapture2(false);
+  });
   const LOG_CAP = 2000;
   const OBJECT_CAP = 1000;
   const PATH_POINT_CAP = 24;
@@ -364,11 +393,9 @@ if (!window.__interceptor_canvas_installed) {
       };
     }
   };
-  patch2DPrototype2(window.CanvasRenderingContext2D?.prototype);
-  patchGetContext2(window.HTMLCanvasElement, "HTMLCanvasElement");
-  patchGetContext2(window.OffscreenCanvas, "OffscreenCanvas");
-  window.__interceptorCanvasObserver = observer;
 }
+var ensureCanvasPatched;
+var setCanvasCapture;
 var safeString;
 var getCanvasId;
 var canvasMeta;

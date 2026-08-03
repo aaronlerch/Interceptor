@@ -1143,14 +1143,67 @@ function getDomDirty() {
 function setDomDirty(v) {
   domDirty = v;
 }
-var domObserver = new MutationObserver(() => {
-  domDirty = true;
-});
-if (document.body) {
-  domObserver.observe(document.body, { childList: true, subtree: true });
+var domObserver = null;
+var observing = false;
+function ensureObserver() {
+  if (!domObserver) {
+    domObserver = new MutationObserver(() => {
+      domDirty = true;
+    });
+  }
+  return domObserver;
+}
+function setDomObserverActive(active) {
+  if (active) {
+    if (observing)
+      return;
+    const observer = ensureObserver();
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+      observing = true;
+    }
+  } else {
+    if (domObserver && observing) {
+      try {
+        domObserver.disconnect();
+      } catch {}
+      observing = false;
+      domDirty = true;
+    }
+  }
 }
 window.addEventListener("beforeunload", () => {
-  domObserver.disconnect();
+  if (domObserver) {
+    try {
+      domObserver.disconnect();
+    } catch {}
+    observing = false;
+  }
+});
+
+// extension/src/content/active-state.ts
+var active = false;
+function relayToMainWorld(isActive, enableCanvas) {
+  try {
+    document.dispatchEvent(new CustomEvent("__interceptor_set_active", { detail: { active: isActive } }));
+  } catch {}
+  if (enableCanvas) {
+    try {
+      document.dispatchEvent(new CustomEvent("__interceptor_canvas_set", { detail: { active: true } }));
+    } catch {}
+  }
+}
+function applyActiveState(isActive, enableCanvas) {
+  active = isActive;
+  setDomObserverActive(isActive);
+  relayToMainWorld(isActive, enableCanvas);
+}
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || typeof msg !== "object" || msg.type !== "interceptor_set_active")
+    return;
+  try {
+    applyActiveState(msg.active === true, msg.enableCanvas === true);
+  } catch {}
 });
 
 // extension/src/content/monitor.ts
@@ -1631,6 +1684,9 @@ function arm(newSessionId, _startedAt, opts) {
   if (armed)
     return;
   armed = true;
+  try {
+    document.dispatchEvent(new CustomEvent("__interceptor_monitor_capture", { detail: { active: true } }));
+  } catch {}
   sessionId = newSessionId;
   seq = 0;
   recentUserActions.length = 0;
@@ -1674,6 +1730,9 @@ function arm(newSessionId, _startedAt, opts) {
 function disarm() {
   if (!armed)
     return { evt: 0, mut: 0, net: 0 };
+  try {
+    document.dispatchEvent(new CustomEvent("__interceptor_monitor_capture", { detail: { active: false } }));
+  } catch {}
   flushMutationBatch();
   flushScroll();
   for (const l of attachedListeners) {
@@ -1761,13 +1820,13 @@ function getPageState(full = false) {
   const scrollY = window.scrollY;
   const scrollHeight = document.documentElement.scrollHeight;
   const viewportHeight = window.innerHeight;
-  const active = document.activeElement;
+  const active2 = document.activeElement;
   let focusedStr = "none";
-  if (active && active !== document.body && active !== document.documentElement) {
-    const fRef = getOrAssignRef(active);
-    const fRole = getEffectiveRole(active);
-    const fName = getAccessibleName(active);
-    focusedStr = `${fRef} ${fRole || active.tagName.toLowerCase()} "${fName}"`;
+  if (active2 && active2 !== document.body && active2 !== document.documentElement) {
+    const fRef = getOrAssignRef(active2);
+    const fRole = getEffectiveRole(active2);
+    const fName = getAccessibleName(active2);
+    focusedStr = `${fRef} ${fRole || active2.tagName.toLowerCase()} "${fName}"`;
   }
   const state = {
     url: location.href,
@@ -2322,23 +2381,23 @@ async function handleBlur(_action) {
   return { success: true };
 }
 async function handleGetFocus(_action) {
-  const active = document.activeElement;
-  if (!active || active === document.body || active === document.documentElement) {
+  const active2 = document.activeElement;
+  if (!active2 || active2 === document.body || active2 === document.documentElement) {
     return { success: true, data: { focused: null } };
   }
-  const focusRef = getOrAssignRef(active);
-  const focusRole = getEffectiveRole(active);
-  const focusName = getAccessibleName(active);
-  const isEditable = active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable || active.getAttribute("role") === "textbox";
+  const focusRef = getOrAssignRef(active2);
+  const focusRole = getEffectiveRole(active2);
+  const focusName = getAccessibleName(active2);
+  const isEditable = active2.tagName === "INPUT" || active2.tagName === "TEXTAREA" || active2.isContentEditable || active2.getAttribute("role") === "textbox";
   return {
     success: true,
     data: {
       focused: {
         ref: focusRef,
-        tag: active.tagName.toLowerCase(),
+        tag: active2.tagName.toLowerCase(),
         role: focusRole,
         name: focusName,
-        type: active.type || undefined,
+        type: active2.type || undefined,
         editable: isEditable
       }
     }
@@ -3046,8 +3105,8 @@ var nextSceneId = 1;
 var cachedDiscovery = null;
 function discoveryCacheKey() {
   const structuralCount = document.querySelectorAll('[data-page-id], [role="application"], [role="document"], [role="main"], [contenteditable="true"], canvas, svg').length;
-  const active = document.activeElement;
-  const activeSig = active ? [active.tagName, active.getAttribute("role") || "", active.getAttribute("aria-label") || "", active.getAttribute("data-hidden-input") || ""].join("|") : "none";
+  const active2 = document.activeElement;
+  const activeSig = active2 ? [active2.tagName, active2.getAttribute("role") || "", active2.getAttribute("aria-label") || "", active2.getAttribute("data-hidden-input") || ""].join("|") : "none";
   return [location.href, structuralCount, activeSig].join("::");
 }
 function isHtmlElement(el) {
@@ -3323,38 +3382,38 @@ function hitTestAdaptiveScene(x, y) {
   };
 }
 function deepestActiveElement(root = document) {
-  let active = root.activeElement;
-  while (active) {
-    const shadow = getShadowRoot(active);
+  let active2 = root.activeElement;
+  while (active2) {
+    const shadow = getShadowRoot(active2);
     const nested = shadow?.activeElement;
-    if (!nested || nested === active)
+    if (!nested || nested === active2)
       break;
-    active = nested;
+    active2 = nested;
   }
-  return active;
+  return active2;
 }
 function findFocusedWritableSurface() {
-  const active = deepestActiveElement();
-  if (!active)
+  const active2 = deepestActiveElement();
+  if (!active2)
     return null;
-  const tag = active.tagName;
-  const role = active.getAttribute("role");
+  const tag = active2.tagName;
+  const role = active2.getAttribute("role");
   if (tag === "TEXTAREA") {
-    return { element: active, kind: "textarea", text: active.value || "" };
+    return { element: active2, kind: "textarea", text: active2.value || "" };
   }
   if (tag === "INPUT") {
-    const hiddenProxy = isHiddenProxyInput(active);
+    const hiddenProxy = isHiddenProxyInput(active2);
     return {
-      element: active,
+      element: active2,
       kind: hiddenProxy ? role === "application" ? "application-proxy" : "hidden-input" : "input",
-      text: active.value || ""
+      text: active2.value || ""
     };
   }
-  if (active.isContentEditable || active.getAttribute("contenteditable") === "true") {
-    return { element: active, kind: "contenteditable", text: active.textContent || "" };
+  if (active2.isContentEditable || active2.getAttribute("contenteditable") === "true") {
+    return { element: active2, kind: "contenteditable", text: active2.textContent || "" };
   }
   if (role === "textbox" || role === "combobox" || role === "searchbox") {
-    return { element: active, kind: "textbox", text: active.textContent || "" };
+    return { element: active2, kind: "textbox", text: active2.textContent || "" };
   }
   return null;
 }
@@ -3448,16 +3507,16 @@ function selectedAdaptiveScene() {
       }
     };
   }
-  const active = deepestActiveElement();
-  if (active) {
-    const id = getOrAssignSceneId(active, "group", "focused-element");
+  const active2 = deepestActiveElement();
+  if (active2) {
+    const id = getOrAssignSceneId(active2, "group", "focused-element");
     return {
       has: true,
       id,
-      label: getAccessibleName(active) || active.getAttribute("aria-label") || active.tagName.toLowerCase(),
-      text: readElementText(active).slice(0, 200),
+      label: getAccessibleName(active2) || active2.getAttribute("aria-label") || active2.tagName.toLowerCase(),
+      text: readElementText(active2).slice(0, 200),
       extras: {
-        role: getEffectiveRole(active),
+        role: getEffectiveRole(active2),
         focused: true
       }
     };
