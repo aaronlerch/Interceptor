@@ -34,7 +34,7 @@ export type SecretMeta = {
 
 export type SecretsFile = { version: 1; secrets: Record<string, SecretMeta> }
 
-export type SecretTargetKind = "sudo" | "macos" | "browser" | "ios" | "any" | "reveal"
+export type SecretTargetKind = "macos" | "browser" | "any" | "reveal"
 export type SecretTarget = { kind: SecretTargetKind; id?: string }
 
 export interface Vault {
@@ -90,7 +90,7 @@ export function parseGate(raw: unknown): SecretGate {
   throw new SecretError("invalid_gate", `unknown gate '${String(raw)}' (none | touchid | biometry)`)
 }
 
-/** Accepts `sudo`, `ios`, `any`, `macos:<bundleId>`, `browser:<host>`; comma lists are split. */
+/** Accepts `any`, `macos:<bundleId>`, `browser:<host>`; comma lists are split. */
 export function parseTargets(raw: unknown): string[] {
   const items: string[] = []
   const push = (s: string) => { for (const part of s.split(",")) { const t = part.trim(); if (t) items.push(t) } }
@@ -100,10 +100,10 @@ export function parseTargets(raw: unknown): string[] {
   const out: string[] = []
   for (const t of items) {
     const lower = t.toLowerCase()
-    if (lower === "sudo" || lower === "ios" || lower === "any") { out.push(lower); continue }
+    if (lower === "any") { out.push(lower); continue }
     if (lower.startsWith("macos:") && t.length > 6) { out.push("macos:" + t.slice(6)); continue }
     if (lower.startsWith("browser:") && t.length > 8) { out.push("browser:" + t.slice(8).toLowerCase()); continue }
-    throw new SecretError("invalid_target", `unknown target '${t}' (sudo | macos:<bundleId> | browser:<host> | ios | any)`)
+    throw new SecretError("invalid_target", `unknown target '${t}' (macos:<bundleId> | browser:<host> | any)`)
   }
   return [...new Set(out)]
 }
@@ -132,8 +132,6 @@ export function targetAllowed(targets: string[], target: SecretTarget): boolean 
   if (target.kind === "reveal") return true
   if (targets.includes("any")) return true
   switch (target.kind) {
-    case "sudo": return targets.includes("sudo")
-    case "ios": return targets.includes("ios")
     case "macos": {
       const id = (target.id || "").toLowerCase()
       return targets.some((t) => t.startsWith("macos:") && (t.slice(6) === "*" || t.slice(6).toLowerCase() === id))
@@ -148,10 +146,8 @@ export function targetAllowed(targets: string[], target: SecretTarget): boolean 
 
 export function describeTarget(target: SecretTarget): string {
   switch (target.kind) {
-    case "sudo": return "sudo"
     case "macos": return `macOS app ${target.id || "(unknown)"}`
     case "browser": return `browser page on ${target.id || "(unknown host)"}`
-    case "ios": return "iPhone"
     case "reveal": return "the terminal (reveal)"
     default: return "any target"
   }
@@ -302,90 +298,4 @@ export async function resolveSecret(vault: Vault, name: string, target: SecretTa
   meta.releases = (meta.releases ?? 0) + 1
   saveMeta(file, opts.metaPath)
   return { value, meta, gated }
-}
-
-// ── sudo delivery leg ────────────────────────────────────────────────────────
-
-export type SudoResult = { success: boolean; error?: string; data?: { exitCode: number | null; stdout: string; stderr: string; keep: boolean } }
-
-const SUDO_OUTPUT_CAP = 50_000
-
-/**
- * Read a stream, keeping the first `cap` bytes and discarding the rest while
- * still draining it (closing the pipe early would SIGPIPE a chatty command).
- * `cancel()` from the outside unblocks a pending read so a timeout can return
- * even while a descendant of sudo keeps the pipe open.
- */
-function readCapped(stream: ReadableStream<Uint8Array> | null | undefined, cap: number): { text: Promise<string>; cancel: () => void } {
-  if (!stream) return { text: Promise.resolve(""), cancel: () => {} }
-  const reader = stream.getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
-  let truncated = false
-  const text = (async () => {
-    try {
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        if (!value) continue
-        if (size >= cap) { truncated = true; continue }
-        if (size + value.byteLength > cap) {
-          chunks.push(value.subarray(0, cap - size))
-          size = cap
-          truncated = true
-          continue
-        }
-        chunks.push(value)
-        size += value.byteLength
-      }
-    } catch {}
-    const out = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf-8")
-    return truncated ? out + "\n... (truncated)" : out
-  })()
-  return { text, cancel: () => { reader.cancel().catch(() => {}) } }
-}
-
-/**
- * `sudo -S` reads the password from stdin; `-k` ignores and does not refresh the
- * timestamp cache so every call authenticates with the vault value; `--keep`
- * drops `-k` so a burst of commands can ride sudo's own 5-minute cache. Output
- * is read through capped readers (memory stays bounded however chatty the
- * command is); on timeout the process is killed and both readers are cancelled
- * so the call returns even if a descendant still holds the pipes.
- */
-export async function runSudo(value: string, cmd: string[], opts: { keep?: boolean; timeoutMs?: number; sudoPath?: string } = {}): Promise<SudoResult> {
-  if (!Array.isArray(cmd) || cmd.length === 0 || cmd.some((c) => typeof c !== "string")) {
-    return { success: false, error: "macos sudo requires a command after --" }
-  }
-  const argv = [opts.sudoPath || "/usr/bin/sudo", "-S", ...(opts.keep ? [] : ["-k"]), "-p", "", "--", ...cmd]
-  let proc: ReturnType<typeof Bun.spawn>
-  try {
-    proc = Bun.spawn(argv, { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, SUDO_ASKPASS: "" } })
-  } catch (err) {
-    return { success: false, error: `could not start sudo: ${(err as Error).message}` }
-  }
-  const stdin = proc.stdin as unknown as { write: (s: string) => unknown; end: () => unknown }
-  try { stdin.write(value + "\n"); stdin.end() } catch {}
-  const timeoutMs = opts.timeoutMs ?? 600_000
-  const outReader = readCapped(proc.stdout as ReadableStream<Uint8Array>, SUDO_OUTPUT_CAP)
-  const errReader = readCapped(proc.stderr as ReadableStream<Uint8Array>, SUDO_OUTPUT_CAP)
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    // sudo relays the signal to its command; cancelling the readers unblocks
-    // the reads even if a grandchild keeps the inherited pipe open.
-    try { proc.kill() } catch {}
-    outReader.cancel(); errReader.cancel()
-  }, timeoutMs)
-  const [out, err] = await Promise.all([outReader.text, errReader.text])
-  const exitCode = timedOut ? null : await proc.exited
-  clearTimeout(timer)
-  const stderr = err
-  const data = { exitCode, stdout: out, stderr: err, keep: !!opts.keep }
-  if (timedOut) return { success: false, error: `sudo command timed out after ${Math.round(timeoutMs / 1000)}s`, data }
-  if (/incorrect password attempt|Sorry, try again/i.test(stderr)) {
-    return { success: false, error: "sudo rejected the stored password (re-register the secret)", data }
-  }
-  if (exitCode !== 0) return { success: false, error: `command exited ${exitCode}`, data }
-  return { success: true, data }
 }

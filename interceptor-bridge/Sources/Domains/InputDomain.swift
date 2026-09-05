@@ -79,9 +79,9 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     }
 
     /// Posts `text` as unicode keystrokes, one key-down/up pair per character,
-    /// through `target`. Shared with AuthDialogDomain (issue #244) so the admin
-    /// prompt gets exactly the delivery `type` uses. False when no event
-    /// source could be created.
+    /// through `target`. Returns false when no event source could be created.
+    /// (Upstream also shared this with AuthDialogDomain, which FORK-DELTA §6
+    /// removes.)
     static func postUnicodeKeystrokes(_ text: String, to target: InputTarget) -> Bool {
         guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
         for char in text {

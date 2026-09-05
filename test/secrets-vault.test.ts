@@ -47,8 +47,11 @@ describe("names, gates, targets, durations", () => {
 
   test("targets parse, dedupe, and default to any", () => {
     expect(parseTargets(undefined)).toEqual(["any"])
-    expect(parseTargets("sudo,macos:com.apple.SecurityAgent, browser:Example.COM")).toEqual(["sudo", "macos:com.apple.SecurityAgent", "browser:example.com"])
-    expect(parseTargets(["ios", "ios", "SUDO"])).toEqual(["ios", "sudo"])
+    expect(parseTargets("any,macos:com.apple.SecurityAgent, browser:Example.COM")).toEqual(["any", "macos:com.apple.SecurityAgent", "browser:example.com"])
+    expect(parseTargets(["ANY", "any"])).toEqual(["any"])
+    // FORK-DELTA §5: sudo and ios are no longer delivery targets.
+    expect(() => parseTargets("sudo")).toThrow(SecretError)
+    expect(() => parseTargets("ios")).toThrow(SecretError)
     expect(() => parseTargets("windows:x")).toThrow(SecretError)
     expect(() => parseTargets("macos:")).toThrow(SecretError)
   })
@@ -63,9 +66,7 @@ describe("names, gates, targets, durations", () => {
   })
 
   test("target matching table", () => {
-    const t = ["sudo", "macos:com.apple.SecurityAgent", "browser:example.com"]
-    expect(targetAllowed(t, { kind: "sudo" })).toBe(true)
-    expect(targetAllowed(t, { kind: "ios" })).toBe(false)
+    const t = ["macos:com.apple.SecurityAgent", "browser:example.com"]
     expect(targetAllowed(t, { kind: "macos", id: "com.apple.securityagent" })).toBe(true)
     expect(targetAllowed(t, { kind: "macos", id: "com.apple.finder" })).toBe(false)
     expect(targetAllowed(t, { kind: "browser", id: "example.com" })).toBe(true)
@@ -76,7 +77,7 @@ describe("names, gates, targets, durations", () => {
     expect(targetAllowed(["macos:*"], { kind: "macos", id: "com.x.y" })).toBe(true)
     expect(targetAllowed(["browser:*"], { kind: "browser", id: "x.y" })).toBe(true)
     // reveal is never target-checked (it is always OS-gated instead)
-    expect(targetAllowed(["sudo"], { kind: "reveal" })).toBe(true)
+    expect(targetAllowed(["macos:com.apple.finder"], { kind: "reveal" })).toBe(true)
     expect(describeTarget({ kind: "browser", id: "a.b" })).toContain("a.b")
   })
 })
@@ -99,28 +100,28 @@ describe("unlock windows", () => {
 
 describe("store, list, resolve, remove (real keychain, throwaway service)", () => {
   test("round trip with metadata and release accounting", async () => {
-    const meta = await storeSecret(vault, "roundtrip", "hunter2-value", { targets: "sudo,browser:example.com", metaPath })
+    const meta = await storeSecret(vault, "roundtrip", "hunter2-value", { targets: "macos:com.apple.finder,browser:example.com", metaPath })
     expect(meta.gate).toBe("none")
-    expect(meta.targets).toEqual(["sudo", "browser:example.com"])
+    expect(meta.targets).toEqual(["macos:com.apple.finder", "browser:example.com"])
     expect(meta.releases).toBe(0)
 
     const file = JSON.parse(readFileSync(metaPath, "utf-8"))
     expect(JSON.stringify(file)).not.toContain("hunter2-value")
-    expect(file.secrets.roundtrip.targets).toEqual(["sudo", "browser:example.com"])
+    expect(file.secrets.roundtrip.targets).toEqual(["macos:com.apple.finder", "browser:example.com"])
 
     const listed = listSecrets(metaPath)
     expect(listed.map((s) => s.name)).toEqual(["roundtrip"])
     expect(JSON.stringify(listed)).not.toContain("hunter2-value")
 
     let gateCalls = 0
-    const res = await resolveSecret(vault, "roundtrip", { kind: "sudo" }, { gate: async () => { gateCalls++; return { ok: true } }, metaPath })
+    const res = await resolveSecret(vault, "roundtrip", { kind: "macos", id: "com.apple.finder" }, { gate: async () => { gateCalls++; return { ok: true } }, metaPath })
     expect(res.value).toBe("hunter2-value")
     expect(res.gated).toBe(false)
     expect(gateCalls).toBe(0)
     expect(loadMeta(metaPath).secrets.roundtrip.releases).toBe(1)
 
     await expect(resolveSecret(vault, "roundtrip", { kind: "browser", id: "evil.com" }, { gate: noGate, metaPath })).rejects.toMatchObject({ code: "target_denied" })
-    await expect(resolveSecret(vault, "missing", { kind: "sudo" }, { gate: noGate, metaPath })).rejects.toMatchObject({ code: "not_found" })
+    await expect(resolveSecret(vault, "missing", { kind: "macos", id: "com.apple.finder" }, { gate: noGate, metaPath })).rejects.toMatchObject({ code: "not_found" })
 
     // update keeps createdAt and releases, changes gate/targets
     const updated = await storeSecret(vault, "roundtrip", "new-value", { gate: "touchid", targets: ["any"], metaPath })

@@ -29,7 +29,7 @@ describe("release gate", () => {
     const vault = fakeVault()
     await storeSecret(vault, "plain", "v1", { metaPath })
     let prompts = 0
-    const res = await resolveSecret(vault, "plain", { kind: "ios" }, { gate: async () => { prompts++; return { ok: true } }, metaPath })
+    const res = await resolveSecret(vault, "plain", { kind: "macos", id: "com.apple.finder" }, { gate: async () => { prompts++; return { ok: true } }, metaPath })
     expect(res.value).toBe("v1")
     expect(prompts).toBe(0)
     expect(vault.reads).toBe(1)
@@ -57,7 +57,7 @@ describe("release gate", () => {
 
   test("target check runs before the gate", async () => {
     const vault = fakeVault()
-    await storeSecret(vault, "scoped", "v3", { gate: "touchid", targets: "sudo", metaPath })
+    await storeSecret(vault, "scoped", "v3", { gate: "touchid", targets: "macos:com.apple.finder", metaPath })
     let prompts = 0
     await expect(resolveSecret(vault, "scoped", { kind: "browser", id: "example.com" }, { gate: async () => { prompts++; return { ok: true } }, metaPath }))
       .rejects.toMatchObject({ code: "target_denied" })
@@ -70,10 +70,10 @@ describe("release gate", () => {
     let prompts = 0
     const gate = async () => { prompts++; return { ok: true } }
     openUnlock("win", 60)
-    const a = await resolveSecret(vault, "win", { kind: "sudo" }, { gate, metaPath })
+    const a = await resolveSecret(vault, "win", { kind: "macos", id: "com.apple.finder" }, { gate, metaPath })
     expect(a.value).toBe("v4"); expect(a.gated).toBe(false); expect(prompts).toBe(0)
     lock("win")
-    const b = await resolveSecret(vault, "win", { kind: "sudo" }, { gate, metaPath })
+    const b = await resolveSecret(vault, "win", { kind: "macos", id: "com.apple.finder" }, { gate, metaPath })
     expect(b.gated).toBe(true); expect(prompts).toBe(1)
   })
 
@@ -81,13 +81,13 @@ describe("release gate", () => {
     const vault = fakeVault()
     await storeSecret(vault, "bio", "v5", { gate: "biometry", metaPath })
     let policy = ""
-    await resolveSecret(vault, "bio", { kind: "sudo" }, { gate: async (a) => { policy = a.policy; return { ok: true } }, metaPath })
+    await resolveSecret(vault, "bio", { kind: "macos", id: "com.apple.finder" }, { gate: async (a) => { policy = a.policy; return { ok: true } }, metaPath })
     expect(policy).toBe("biometry")
   })
 
   test("reveal is always gated, even for gate: none, and ignores targets", async () => {
     const vault = fakeVault()
-    await storeSecret(vault, "rv", "v6", { targets: "sudo", metaPath })
+    await storeSecret(vault, "rv", "v6", { targets: "macos:com.apple.finder", metaPath })
     let prompts = 0
     const res = await resolveSecret(vault, "rv", { kind: "reveal" }, { gate: async () => { prompts++; return { ok: true } }, metaPath })
     expect(res.value).toBe("v6")

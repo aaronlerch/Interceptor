@@ -434,7 +434,7 @@ function dispatchToExtension(id: string, request: CliRequest, socket: Bun.Socket
   sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
 }
 
-const SECRET_DELIVERY_TYPES = new Set(["macos_type", "macos_authdialog", "input_text", "find_and_type", "os_type", "macos_sudo"])
+const SECRET_DELIVERY_TYPES = new Set(["macos_type", "input_text", "find_and_type", "os_type"])
 
 const bunVault = new secrets.BunSecretsVault()
 
@@ -610,8 +610,6 @@ function parseAppsList(data: unknown): Array<{ pid: number; name: string; bundle
 /** Where a delivery lands, for the per-secret allowlist. */
 async function targetForAction(action: Record<string, unknown>, actionType: string, request: CliRequest): Promise<secrets.SecretTarget> {
   switch (actionType) {
-    case "macos_sudo": return { kind: "sudo" }
-    case "macos_authdialog": return { kind: "macos", id: "com.apple.SecurityAgent" }
     case "macos_type": {
       const app = typeof action.app === "string" ? action.app : undefined
       const pid = typeof action.pid === "number" ? action.pid : undefined
@@ -642,7 +640,10 @@ async function targetForAction(action: Record<string, unknown>, actionType: stri
       return { kind: "browser", id: host || url }
     }
     default:
-      return { kind: "ios" }
+      // Fail closed. SECRET_DELIVERY_TYPES gates entry, so reaching here means a
+      // delivery leg was added without a target rule — refuse rather than
+      // release a secret against an unknown destination.
+      throw new Error(`no target rule for '${actionType}'; --secret is refused for it`)
   }
 }
 
@@ -651,7 +652,7 @@ async function deliverWithSecret(id: string, action: Record<string, unknown>, re
   const reply = (result: DaemonResult) => socketWriteFramed(socket, JSON.stringify({ id, result }))
   if (!SECRET_DELIVERY_TYPES.has(actionType)) { reply({ success: false, error: `--secret is not supported for '${actionType}'` }); return }
   const name = action.secret
-  if (typeof name !== "string") { reply({ success: false, error: "macos sudo requires --secret <name>" }); return }
+  if (typeof name !== "string") { reply({ success: false, error: "--secret requires a name" }); return }
   const literal = typeof action.text === "string" ? action.text : typeof action.inputText === "string" ? action.inputText : ""
   if (literal.length > 0) { reply({ success: false, error: "--secret and literal text are mutually exclusive" }); return }
   const session = sessionLabel(action)
@@ -676,7 +677,6 @@ async function deliverWithSecret(id: string, action: Record<string, unknown>, re
   delete delivered.secret
   switch (actionType) {
     case "macos_type":
-    case "macos_authdialog":
       delivered.text = value
       routeToBridge(id, delivered, socket, actionType)
       return
@@ -692,9 +692,6 @@ async function deliverWithSecret(id: string, action: Record<string, unknown>, re
       // The extension only focuses the target; the text is posted by the
       // daemon from the pending entry, so the value never leaves this process.
       dispatchToExtension(id, { ...request, action: delivered }, socket, actionType, value)
-      return
-    case "macos_sudo":
-      reply(await secrets.runSudo(value, action.cmd as string[], { keep: action.keep === true }))
       return
   }
 }
@@ -1762,7 +1759,7 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
             handleSecretAction(action, request).then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
             continue
           }
-          if (action && (action.type === "macos_sudo" || typeof action.secret === "string")) {
+          if (action && typeof action.secret === "string") {
             deliverWithSecret(id, action, request, socket, actionType).catch((err) => {
               socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: `secret delivery failed: ${(err as Error).message}` } }))
             })

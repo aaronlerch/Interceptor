@@ -1793,36 +1793,6 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       return action
     }
 
-    // issue #244: `interceptor macos sudo --secret <name> [--keep] -- <command...>`
-    // The daemon pipes the vault value to `sudo -S` stdin.
-    case "sudo": {
-      const sep = filtered.indexOf("--")
-      const head = sep === -1 ? filtered : filtered.slice(0, sep)
-      const cmd = sep === -1 ? [] : filtered.slice(sep + 1)
-      const secretName = flagVal(head, "--secret")
-      if (!secretName || secretName.startsWith("--")) { console.error("error: interceptor macos sudo requires --secret <name> -- <command...>"); process.exit(1) }
-      if (cmd.length === 0) { console.error("error: interceptor macos sudo requires a command after --"); process.exit(1) }
-      const action: Action = { type: "macos_sudo", secret: secretName, cmd }
-      if (head.includes("--keep")) action.keep = true
-      return action
-    }
-
-    // issue #244: fill the macOS administrator prompt (SecurityAgent) from the vault.
-    case "authdialog": {
-      const verb = filtered[2]
-      if (!verb || !["fill", "status"].includes(verb)) {
-        console.error("error: authdialog requires a verb (fill --secret <name> [--submit] | status)"); process.exit(1)
-      }
-      const action: Action = { type: "macos_authdialog", sub: verb }
-      if (verb === "fill") {
-        const secretName = flagVal(filtered, "--secret")
-        if (!secretName || secretName.startsWith("--")) { console.error("error: authdialog fill requires --secret <name>"); process.exit(1) }
-        action.secret = secretName
-        if (filtered.includes("--submit")) action.submit = true
-      }
-      return action
-    }
-
     case "auth": {
       const verb = filtered[2]
       if (!verb) { console.error("error: auth requires a verb (status|confirm|invalidate|domain-state)"); process.exit(1) }

@@ -1286,9 +1286,6 @@ interceptor macos secret unlock <name> --for 30m    # one OS prompt now; release
 interceptor macos secret lock [<name>]
 interceptor macos secret reveal <name>              # human read-back: always OS-gated, TTY only, refused under --json / MCP
 
-interceptor macos sudo --secret <name> [--keep] -- installer -pkg X.pkg -target /   # root via sudo -S stdin
-interceptor macos authdialog status                 # is an administrator prompt up? shape: touchid | password
-interceptor macos authdialog fill --secret <name> [--submit]   # presses "Use Password" on a Touch ID sheet, types, submits
 interceptor macos type [<ref>] --secret <name> [--app X]       # native field (target: macos:<bundleId>)
 interceptor type <ref> --secret <name>              # browser field (target: browser:<host>); monitor records ***SECURE***
 interceptor ios type <ref> --secret <name> | ios keys --secret <name> | ios unlock --secret <name>   # passcode sheets + lock screen

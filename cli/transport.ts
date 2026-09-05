@@ -27,11 +27,8 @@ const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   // RPC an elevated deadline as a safety margin so a momentarily busy main
   // run loop never trips the old 15s timeout that left a split-brain envelope.
   macos_monitor: 60_000,
-  // issue #244: the registration box and gated releases wait on a person; sudo
-  // may run an installer; the admin-prompt fill polls the dialog.
+  // issue #244: the registration box and gated releases wait on a person.
   macos_secret: 620_000,
-  macos_sudo: 620_000,
-  macos_authdialog: 60_000,
   binary_sink_save: 600_000,
   screenshot_background: 45_000,
   canvas_read: 45_000,

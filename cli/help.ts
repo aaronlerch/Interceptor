@@ -646,9 +646,6 @@ macOS Bridge (full install only):
   interceptor macos secret unlock <name> --for 30m          One OS prompt now, releases inside the window without prompts
   interceptor macos secret lock [<name>]
   interceptor macos secret reveal <name>     Human read-back: always OS-gated, TTY only, refused under --json / MCP
-  interceptor macos sudo --secret <name> [--keep] -- <command...>   Run as root; the password goes to sudo -S stdin
-  interceptor macos authdialog status|fill --secret <name> [--submit]   Fill the macOS administrator prompt (SecurityAgent),
-                                             pressing "Use Password" first on a Touch ID sheet
   interceptor macos calendar status|request|list|default|sources|create-calendar|delete-calendar|events|event|create|update|delete|move|refresh-sources|reset|tail   (EventKit events)
   interceptor macos calendar create --title "..." --start <ISO8601> --end <ISO8601> [--calendar <id>] [--all-day] [--alarm <offset|absolute>]
   interceptor macos reminders status|request|lists|default|all|incomplete|completed|create|update|complete|uncomplete|delete   (EventKit reminders)

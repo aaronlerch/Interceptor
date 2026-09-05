@@ -115,10 +115,16 @@ describe("issue #244 vault, sudo, admin prompt, auth", () => {
     expect(classify("macos", "secret", ["export"]).tier).toBe("destructive")
   })
 
-  test("sudo is exec, authdialog fill destructive, authdialog status read", () => {
-    expect(classify("macos", "sudo", ["--secret", "admin", "--", "id"]).tier).toBe("exec")
-    expect(classify("macos", "authdialog", ["fill", "--secret", "admin"]).tier).toBe("destructive")
-    expect(classify("macos", "authdialog", ["status"]).tier).toBe("read")
+  // FORK-DELTA §5/§6: `macos sudo` and `macos authdialog` are removed, so they
+  // carry no tier. An unknown macos verb falls to the default "mutate" — the
+  // CLI refuses it before MCP tiering is ever consulted.
+  // The real guard is the CLI one (test/secrets-register.test.ts: the verbs no
+  // longer parse). This asserts the tier tables carry no dedicated entry for
+  // them either, so a reintroduction cannot inherit an exec/destructive tier
+  // and look sanctioned.
+  test("sudo and authdialog carry no tier of their own", () => {
+    expect(classify("macos", "sudo", ["--secret", "admin", "--", "id"]).tier).toBe("mutate")
+    expect(classify("macos", "authdialog", ["fill", "--secret", "admin"]).tier).toBe("mutate")
   })
 
   test("auth is explicitly mutate; status reads", () => {
@@ -126,9 +132,8 @@ describe("issue #244 vault, sudo, admin prompt, auth", () => {
     expect(classify("macos", "auth", ["status"]).tier).toBe("read")
   })
 
-  test("the gate refuses sudo and reveal without operator opt-in", () => {
+  test("the gate refuses reveal without operator opt-in", () => {
     const allow = parseAllow(undefined)
-    expect(gate(classify("macos", "sudo", ["--secret", "a", "--", "id"]), allow, true).allowed).toBe(false)
     expect(gate(classify("macos", "secret", ["reveal", "a"]), allow, true).allowed).toBe(false)
     expect(gate(classify("macos", "secret", ["list"]), allow, false).allowed).toBe(true)
   })

@@ -47,9 +47,9 @@ const READ_VERBS: Record<Surface, Set<string>> = {
 const EXEC: TierMap = {
   "browser:eval": "exec", "browser:save": "exec", "browser:raw": "exec",
   "macos:script": "exec", "macos:intent": "exec", "macos:container": "exec",
-  // issue #244: sudo runs an arbitrary command as root; reveal prints a secret
-  // to a human and is refused for model callers anyway (INTERCEPTOR_MCP).
-  "macos:sudo": "exec", "macos:secret:reveal": "exec",
+  // issue #244: reveal prints a secret to a human and is refused for model
+  // callers anyway (INTERCEPTOR_MCP). FORK-DELTA §5 removed `macos sudo`.
+  "macos:secret:reveal": "exec",
   "macos:overlay:eval": "exec",
   "macos:vm:exec": "exec",
   "macos:cdp:raw": "exec",
@@ -72,8 +72,8 @@ const DESTRUCTIVE_SUB: TierMap = {
   "macos:runtime:enable": "destructive", "macos:runtime:disable": "destructive",
   // macOS update install
   "macos:update:install": "destructive",
-  // issue #244: vault deletion and filling the admin prompt.
-  "macos:secret:rm": "destructive", "macos:authdialog:fill": "destructive",
+  // issue #244: vault deletion.
+  "macos:secret:rm": "destructive",
   // iOS lifecycle / device-mutating
   // iOS fs push (write into app container)
   // iOS web mutating raw call
@@ -110,9 +110,8 @@ const FAMILY_FLOOR: Record<string, Tier> = {
   "macos:reminders": "destructive",
   "macos:contacts": "destructive",
   "macos:photos": "destructive",
-  // issue #244: the vault, the admin-prompt filler, and the Touch ID prompt.
+  // issue #244: the vault and the Touch ID prompt.
   "macos:secret": "destructive",
-  "macos:authdialog": "destructive",
   "macos:auth": "mutate",
 }
 
@@ -184,7 +183,6 @@ const FAMILY_READ_SUBS: Record<string, Set<string>> = {
   "macos:contacts": new Set(["status", "containers", "default-container", "groups", "group", "list", "contact", "me", "find", "vcard", "current-token", "changes"]),
   "macos:photos": new Set(["status", "albums", "album", "assets", "asset", "thumbnail", "export", "export-video", "export-live", "current-token", "changes"]),
   "macos:secret": new Set(["list", "status"]),
-  "macos:authdialog": new Set(["status"]),
   "macos:auth": new Set(["status", "domain-state"]),
 }
 const FAMILY_MUTATE_SUBS: Record<string, Set<string>> = {
