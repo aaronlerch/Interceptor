@@ -1760,7 +1760,17 @@ function inferRouteCandidates(entries, filter, limit = 20) {
     score: candidate.count + candidate.reasons.size * 2 + (candidate.methods.has("POST") ? 3 : 0) + ([...candidate.contentTypes].some((ct) => ct.toLowerCase().includes("json")) ? 2 : 0)
   })).sort((a, b) => b.score - a.score || b.count - a.count || b.lastSeen - a.lastSeen).slice(0, Math.max(1, limit));
 }
+async function ensureCanvasCaptureEnabled(tabId) {
+  try {
+    await executeInMainWorld(tabId, () => {
+      try {
+        document.dispatchEvent(new CustomEvent("__interceptor_canvas_set", { detail: { active: true } }));
+      } catch {}
+    });
+  } catch {}
+}
 async function handleCanvasActions(action, tabId) {
+  await ensureCanvasCaptureEnabled(tabId);
   switch (action.type) {
     case "canvas_list": {
       const data = await executeInMainWorld(tabId, walkCanvasElements);
@@ -2807,7 +2817,8 @@ async function reloadTabForCspRetry(tabId) {
   await chrome.tabs.reload(tabId, { bypassCache: true });
   await waitForTabLoad(tabId, 15000);
 }
-async function runWithCspStripBypass(tabId, world, run) {
+var CSP_STRIP_REFUSED = "MAIN-world eval is blocked by this page's Content-Security-Policy / Trusted Types. " + "Stripping the page's CSP header would disable the site's own XSS defenses for this tab, " + "so it is off by default. Re-run with --allow-csp-strip if you intend that.";
+async function runWithCspStripBypass(tabId, world, run, opts = {}) {
   const first = await run(tabId, world);
   if (first.success || world !== "MAIN") {
     return first;
@@ -2827,6 +2838,17 @@ async function runWithCspStripBypass(tabId, world, run) {
   }
   if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
     return first;
+  }
+  if (!opts.allowCspStrip) {
+    return {
+      success: false,
+      error: CSP_STRIP_REFUSED,
+      data: {
+        originalError: first.error,
+        cspBypassApplied: false,
+        cspStripAvailable: true
+      }
+    };
   }
   try {
     await installCspBypassForTab(tabId);
@@ -2864,6 +2886,7 @@ async function handleEvaluateActions(action, tabId) {
   }
   const code = action.code;
   const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
+  const allowCspStrip = action.allowCspStrip === true;
   const initialUserScriptWorld = world === "MAIN" ? "MAIN" : "USER_SCRIPT";
   const userScriptAttempt = await executeWithUserScripts(tabId, initialUserScriptWorld, code);
   if (userScriptAttempt.available) {
@@ -2876,7 +2899,7 @@ async function handleEvaluateActions(action, tabId) {
       return userScriptAttempt.result ?? { success: false, error: "no result" };
     }
   }
-  return runWithCspStripBypass(tabId, world, (t, w) => executeEval(t, w, code));
+  return runWithCspStripBypass(tabId, world, (t, w) => executeEval(t, w, code), { allowCspStrip });
 }
 
 // extension/src/background/capabilities/binary-sink.ts
@@ -2978,8 +3001,8 @@ async function executeNormalize(tabId, world, code) {
   });
   return results[0]?.result ?? { success: false, error: "no result" };
 }
-async function prepareByteSource(tabId, code, world) {
-  const evalResult = await runWithCspStripBypass(tabId, world, (t, w) => executeNormalize(t, w, code));
+async function prepareByteSource(tabId, code, world, allowCspStrip) {
+  const evalResult = await runWithCspStripBypass(tabId, world, (t, w) => executeNormalize(t, w, code), { allowCspStrip });
   if (!evalResult.success)
     return evalResult;
   let descriptor = evalResult.data;
@@ -3207,12 +3230,13 @@ async function handleBinarySinkActions(action, tabId) {
   const code = action.code;
   const out = action.out;
   const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
+  const allowCspStrip = action.allowCspStrip === true;
   const chunkSize = typeof action.chunkSize === "number" && action.chunkSize > 0 ? Math.floor(action.chunkSize) : DEFAULT_CHUNK_SIZE;
   if (!out)
     return { success: false, error: "missing output path" };
   if (!code)
     return { success: false, error: "missing expression" };
-  const prepared = await prepareByteSource(tabId, code, world);
+  const prepared = await prepareByteSource(tabId, code, world, allowCspStrip);
   if (!prepared.success)
     return prepared;
   const source = prepared.data;
@@ -4905,6 +4929,39 @@ async function routeAction(action, tabId) {
   return contentResult;
 }
 
+// extension/src/background/tab-active.ts
+var ACTIVE_IDLE_MS = 45000;
+var idleTimers = new Map;
+var CANVAS_ACTION = /^(canvas_|scene_)/;
+function send(tabId, msg) {
+  try {
+    chrome.tabs.sendMessage(tabId, msg, () => {
+      chrome.runtime.lastError;
+    });
+  } catch {}
+}
+function markTabActive(tabId, actionType) {
+  send(tabId, {
+    type: "interceptor_set_active",
+    active: true,
+    enableCanvas: CANVAS_ACTION.test(actionType || "")
+  });
+  const prev = idleTimers.get(tabId);
+  if (prev)
+    clearTimeout(prev);
+  idleTimers.set(tabId, setTimeout(() => {
+    idleTimers.delete(tabId);
+    send(tabId, { type: "interceptor_set_active", active: false });
+  }, ACTIVE_IDLE_MS));
+}
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const t = idleTimers.get(tabId);
+  if (t) {
+    clearTimeout(t);
+    idleTimers.delete(tabId);
+  }
+});
+
 // extension/src/background/no-tab-actions.ts
 var NO_TAB_ACTIONS = new Set([
   "status",
@@ -5107,6 +5164,8 @@ async function handleDaemonMessage(msg) {
       return;
     }
   }
+  if (tabId && needsTab(action.type))
+    markTabActive(tabId, action.type);
   if (needsTab(action.type) || action.type === "tab_create")
     recordGroupActivity(groupLabel ?? "");
   try {

@@ -20,7 +20,22 @@ var K_GETCTX_WRAPPED = Symbol.for(IK_GETCTX_WRAPPED);
 
 // extension/src/inject-canvas.ts
 if (!window[K_CANVAS]) {
-  let safeString = function(value, max = 200) {
+  let ensureCanvasPatched = function() {
+    if (canvasPatched)
+      return;
+    canvasPatched = true;
+    patch2DPrototype(window.CanvasRenderingContext2D?.prototype);
+    patchGetContext(window.HTMLCanvasElement, "HTMLCanvasElement");
+    patchGetContext(window.OffscreenCanvas, "OffscreenCanvas");
+    window[K_CANVAS_OBSERVER] = observer;
+  }, setCanvasCapture = function(active) {
+    if (active) {
+      ensureCanvasPatched();
+      canvasCaptureActive = true;
+    } else {
+      canvasCaptureActive = false;
+    }
+  }, safeString = function(value, max = 200) {
     if (value === null || value === undefined)
       return null;
     try {
@@ -158,9 +173,11 @@ if (!window[K_CANVAS]) {
         return;
       proto[name] = function(...args) {
         const out = orig.apply(this, args);
-        try {
-          handler(this, args, out);
-        } catch {}
+        if (canvasCaptureActive) {
+          try {
+            handler(this, args, out);
+          } catch {}
+        }
         return out;
       };
     };
@@ -329,6 +346,8 @@ if (!window[K_CANVAS]) {
     Ctor.prototype[K_GETCTX_WRAPPED] = true;
     Ctor.prototype.getContext = function(type, ...rest) {
       const ctx = orig.call(this, type, ...rest);
+      if (!canvasCaptureActive)
+        return ctx;
       const canvasId = registerCanvas(this);
       const entry = {
         t: Date.now(),
@@ -352,6 +371,16 @@ if (!window[K_CANVAS]) {
     };
   };
   window[K_CANVAS] = true;
+  let canvasCaptureActive = false;
+  let canvasPatched = false;
+  document.addEventListener("__interceptor_canvas_set", (e) => {
+    if (e.detail && e.detail.active)
+      setCanvasCapture(true);
+  });
+  document.addEventListener("__interceptor_set_active", (e) => {
+    if (!(e.detail && e.detail.active))
+      setCanvasCapture(false);
+  });
   const LOG_CAP = 2000;
   const OBJECT_CAP = 1000;
   const PATH_POINT_CAP = 24;
@@ -383,8 +412,4 @@ if (!window[K_CANVAS]) {
       };
     }
   };
-  patch2DPrototype(window.CanvasRenderingContext2D?.prototype);
-  patchGetContext(window.HTMLCanvasElement, "HTMLCanvasElement");
-  patchGetContext(window.OffscreenCanvas, "OffscreenCanvas");
-  window[K_CANVAS_OBSERVER] = observer;
 }
