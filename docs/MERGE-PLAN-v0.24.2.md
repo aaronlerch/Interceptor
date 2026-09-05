@@ -219,8 +219,9 @@ bridge this install does not have**. The whole `daemon/secrets.ts` store layer,
 #### Verified environment facts (2026-09-05)
 
 - `op` 2.34.1 at **`/opt/homebrew/bin/op`**.
-- Two accounts signed in: `redacted-tenant.1password.com` and `my.1password.com`.
-- **The daemon's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`** (read off pid 88029)
+- Two accounts signed in (one work tenant, one personal), which is what makes
+  the account-ambiguity handling load-bearing rather than theoretical.
+- **The daemon's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`** (read off the running daemon)
   — `/opt/homebrew/bin` is not on it. `op` must be invoked by absolute path,
   resolved from a candidate list, never by bare name.
 - **`op` works from a detached, stripped-environment process.** Probed with
