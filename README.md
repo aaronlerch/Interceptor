@@ -199,7 +199,7 @@ Interceptor ships one CLI binary with two product surfaces. Pick by what you're 
 | Real-time speech, sound classification, OCR, on-device NLP/LLM | macOS | `interceptor macos listen / sounds / vision / nlp / ai` |
 | Record & replay a human's native-app flow | macOS | `interceptor macos monitor *` |
 | Drive Apple Events to background apps without raising them | macOS | `interceptor macos intent dispatch` |
-| Deliver a stored password by name into native or web fields | macOS / Browser | `interceptor macos secret *`, `--secret <name>` on `type` |
+| Deliver a 1Password credential by reference into native or web fields | macOS / Browser | `--secret op://<vault>/<item>/<field>` on `type` |
 
 If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS.
 
@@ -442,7 +442,10 @@ interceptor query "button span"              # Elements matching a CSS selector 
 interceptor type e3 "hello"                  # Type into element (synthetic; default)
 interceptor type e3 "more" --append          # Append without clearing
 interceptor type "textbox:Search" "query"    # Type using semantic selector (role:name)
-interceptor type e3 --secret <name>          # Type a stored credential by name (see "Secret vault"); the value never leaves the daemon
+interceptor macos secret status                    # 1Password readiness: op binary, signed-in accounts
+# Storage, listing, deletion, unlock windows and read-back are 1Password's:
+#   op item create | op item list | op item delete | op read op://<vault>/<item>/<field>
+interceptor type e3 --secret op://<vault>/<item>/<field>   # Type a 1Password credential by reference; the value never leaves the daemon
 interceptor select e7 "option-value"         # Select dropdown option
 interceptor hover e5                         # Hover over element
 interceptor keys "Control+A"                 # Keyboard shortcut (synthetic; default)
@@ -1271,27 +1274,30 @@ interceptor macos thumbnail <path> [--size N|WxH] [--save] [--out <path>] [--for
 
 See [`docs/native/document.md`](docs/native/document.md) for PDFKit / DataDetection / Translation / QuickLookThumbnailing.
 
-#### Secret vault (keychain-backed credentials, delivered by name)
+#### Credentials (1Password, delivered by reference)
 
-Passwords and passcodes never travel as literal text. Store them once, then reference them by name on any surface; the daemon resolves the value after logging the action (name only), checks the secret's target allowlist against the real target, and hands it to exactly one delivery leg. The value never appears on argv, in the daemon log, the events file, monitor artifacts, MCP results, or `interceptor diagnose`.
+Passwords never travel as literal text. **1Password is the vault** (`docs/FORK-DELTA.md` §7): storage, registration, the biometric gate and unlock windows are the desktop app's, so this fork ships none of them. You reference an item; the daemon resolves it.
 
 ```bash
-interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <s>]
-                                                    # native box (secure field + confirm); default gate: none (unattended)
-interceptor macos secret set <name> --stdin         # headless: value from stdin (hidden TTY prompt without --stdin)
-interceptor macos secret list                       # names, gates, targets, release counts
-interceptor macos secret status                     # backend + Touch ID availability
-interceptor macos secret rm <name>
-interceptor macos secret unlock <name> --for 30m    # one OS prompt now; releases inside the window skip the prompt
-interceptor macos secret lock [<name>]
-interceptor macos secret reveal <name>              # human read-back: always OS-gated, TTY only, refused under --json / MCP
+interceptor macos secret status                    # readiness: op binary, signed-in accounts
 
-interceptor macos type [<ref>] --secret <name> [--app X]       # native field (target: macos:<bundleId>)
-interceptor type <ref> --secret <name>              # browser field (target: browser:<host>); monitor records ***SECURE***
-interceptor ios type <ref> --secret <name> | ios keys --secret <name> | ios unlock --secret <name>   # passcode sheets + lock screen
+# Storage and read-back are 1Password's, not Interceptor's:
+op item create | op item list | op item delete | op read op://<vault>/<item>/<field>
+
+interceptor type <ref> --secret op://<vault>/<item>/<field>
+                                                   # browser field; the monitor records ***SECURE***
+interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-target [--app X]
+                                                   # native field (see --op-any-target below)
+  [--op-account <shorthand>]                       # required when >1 account is signed in
 ```
 
-Items live in the data-protection keychain owned by the signed bridge (login keychain on unsigned dev builds); `~/.interceptor/secrets.json` holds names, gates, targets, and release counts only. Releases are unattended by default; `--gate touchid` asks the OS prompt (Touch ID, Apple Watch, or the Mac password when no sensor is available). A target mismatch fails with `target_denied` and is never retargeted.
+`op://<vault>/<item>/<field>` — vault and item may each be a **name or a UUID**, which is why one flag covers both ways of addressing an item. 1Password's "Copy Secret Reference" produces exactly this string.
+
+**The allowlist is the item's own website URLs.** Before `op read` runs, the daemon derives the real target (the tab's URL host, probed with the caller's group scope) and matches it host-or-subdomain against the item's `urls`. A mismatch fails `target_denied` and is never retargeted. An item with **no** URLs fails closed — add the site to the item, or pass `--op-any-target`. Native-app delivery always needs `--op-any-target`, because an item URL cannot describe an app.
+
+**Requirements.** `op` must be at an absolute path the daemon can see: the daemon's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, which excludes Homebrew, so `/opt/homebrew/bin/op` and `/usr/local/bin/op` are probed directly and `INTERCEPTOR_OP_BIN` overrides (absolute only). Authorization comes from the 1Password desktop app on your session, so no environment plumbing is needed — and because the daemon is one long-lived process, it authorizes once rather than per command.
+
+The reference is logged; the value is not. It names a location, so logging it is what makes a release auditable. The resolved value never appears on argv, in the daemon log, the events file, monitor artifacts, MCP results, or `interceptor diagnose`. `OP_SERVICE_ACCOUNT_TOKEN` is unsupported on purpose — it bypasses biometrics and recreates the unattended-credential-store property FORK-DELTA §5 removes.
 
 #### Personal data (TCC-gated)
 
@@ -1364,7 +1370,7 @@ interceptor macos frontmost                                  # whatever was fron
 ## macOS Safety
 
 - **Panic hotkey** — `Ctrl+Opt+Cmd+Escape` closes every active overlay regardless of owning session. Bridge-side handler — no agent involvement required.
-- **Credentials by name, never by value** — Passwords and passcodes come from the keychain-backed vault (`interceptor macos secret`) and are delivered by name; each secret carries a target allowlist (`sudo`, `macos:<bundleId>`, `browser:<host>`, `ios`) that the daemon checks against the real target before the keychain read. Values never reach argv, logs, events, monitor artifacts, or MCP results.
+- **Credentials by reference, never by value** — Passwords come from **1Password** and are delivered by reference (`--secret op://<vault>/<item>/<field>`). The daemon checks the delivery target against the item's own website URLs before `op read` runs, so a wrong destination never causes a read. Values never reach argv, logs, events, monitor artifacts, or MCP results. See `docs/FORK-DELTA.md` §7.
 - **Permission tiers** — Allow (observational) / Ask (interactive: click, type, keys, drag, app quit/hide, clipboard write) / Deny (none by default — tune per environment).
 - **TCC tracking** — Bridge ships as `.app` bundle so macOS TCC tracks grants correctly across reinstalls.
 

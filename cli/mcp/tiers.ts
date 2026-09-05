@@ -74,9 +74,6 @@ const DESTRUCTIVE_SUB: TierMap = {
   "macos:update:install": "destructive",
   // issue #244: vault deletion.
   "macos:secret:rm": "destructive",
-  // iOS lifecycle / device-mutating
-  // iOS fs push (write into app container)
-  // iOS web mutating raw call
 }
 
 // Personal-data CRUD sub-verbs that are destructive (create/update/delete/…).

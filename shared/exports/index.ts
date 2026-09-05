@@ -32,7 +32,8 @@ export type WriteExportOptions = {
   /**
    * Replace credential-bearing header values with "[redacted]" before
    * encoding. OFF by default — captured headers are part of the export's
-   * value; pass `net log --redact-auth` when the capture should not carry
+   * value. This fork redacts by default (FORK-DELTA §8); `net log
+   * --no-redact-auth` is the opt-out when the capture should carry
    * live credentials (issue #160).
    */
   redactAuth?: boolean

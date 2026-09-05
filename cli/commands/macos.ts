@@ -462,16 +462,21 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
     case "type": {
       const typeApp = flagVal(filtered, "--app")
       const typePid = flagInt(filtered, "--pid")
-      // issue #244: `--secret <name>` delivers a vault value by name. The daemon
-      // resolves it after logging; the CLI never sees the value.
+      // FORK-DELTA §7: `--secret op://<vault>/<item>/<field>` delivers a
+      // 1Password value by reference. The daemon resolves it after logging; the
+      // CLI never sees the value. A native app has no URL for the item-URL check
+      // to match, so this path needs --op-any-target.
       if (filtered.includes("--secret")) {
-        const secretName = flagVal(filtered, "--secret")
-        if (!secretName || secretName.startsWith("--")) { console.error("error: --secret requires a secret name"); process.exit(1) }
-        const positionals = collectPositionals(filtered, 2, new Set(["--secret", "--app", "--pid"]))
+        const secretRef = flagVal(filtered, "--secret")
+        if (!secretRef || secretRef.startsWith("--")) { console.error("error: " + "error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
+        const positionals = collectPositionals(filtered, 2, new Set(["--secret", "--op-account", "--app", "--pid"]))
         const ref = positionals[0] && /^e\d+$/.test(positionals[0]) ? positionals[0] : undefined
         const literal = ref ? positionals.slice(1) : positionals
         if (literal.length) { console.error("error: --secret and literal text are mutually exclusive"); process.exit(1) }
-        const action: Action = { type: "macos_type", secret: secretName }
+        const action: Action = { type: "macos_type", secret: secretRef }
+        const opAccount = flagVal(filtered, "--op-account")
+        if (opAccount) action.opAccount = opAccount
+        if (filtered.includes("--op-any-target")) action.opAnyTarget = true
         if (ref) action.ref = ref
         if (typeApp) action.app = typeApp
         if (typePid !== undefined) action.pid = typePid
@@ -1754,43 +1759,20 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       return action
     }
 
-    // issue #244: the secret vault. Values never appear on argv: `register`
-    // opens the bridge's native box, `set` reads stdin or a hidden prompt.
+    // FORK-DELTA §7: 1Password is the vault. Storage, registration, the
+    // biometric gate and unlock windows are the desktop app's, so the only verb
+    // left here is a readiness probe. Deliver with
+    // `--secret op://<vault>/<item>/<field>` on `type` / `macos type`.
     case "secret": {
-      const verb = filtered[2]
-      const verbs = ["register", "set", "list", "rm", "status", "unlock", "lock", "reveal"]
-      if (!verb || !verbs.includes(verb)) {
-        console.error(`error: secret requires a verb (${verbs.join("|")})`)
-        console.error("  interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <seconds>]")
-        console.error("  interceptor macos secret set <name> --stdin [same flags]      (value from stdin; TTY prompt without --stdin)")
-        console.error("  interceptor macos secret list | status | rm <name> | unlock <name> --for 30m | lock [<name>] | reveal <name>")
+      const verb = filtered[2] ?? "status"
+      if (verb !== "status") {
+        console.error(`error: secret ${verb} is not part of this fork — 1Password owns the vault.`)
+        console.error("  store:   op item create   |   list: op item list   |   read: op read op://<vault>/<item>/<field>")
+        console.error("  deliver: interceptor type <ref> --secret op://<vault>/<item>/<field> [--op-account <shorthand>] [--op-any-target]")
+        console.error("  probe:   interceptor macos secret status")
         process.exit(1)
       }
-      const action: Action = { type: "macos_secret", sub: verb }
-      const name = filtered[3] && !filtered[3].startsWith("--") ? filtered[3] : undefined
-      if (["register", "set", "rm", "unlock", "reveal"].includes(verb) && !name) {
-        console.error(`error: secret ${verb} requires a <name>`); process.exit(1)
-      }
-      if (name) action.name = name
-      if ((verb === "register" || verb === "set") && filtered[4] && !filtered[4].startsWith("--")) {
-        console.error("error: never pass the secret value on argv (it lands in shell history and ps). Use 'secret register <name>' for the box, or 'secret set <name> --stdin'.")
-        process.exit(1)
-      }
-      if (verb === "register" || verb === "set") {
-        const gate = flagVal(filtered, "--gate")
-        if (gate) action.gate = gate
-        const targets = collectMulti(filtered, "--target").flatMap((t) => t.split(",")).map((t) => t.trim()).filter(Boolean)
-        if (targets.length) action.targets = targets
-        const reuse = flagInt(filtered, "--reuse")
-        if (reuse !== undefined) action.reuseSeconds = reuse
-        if (verb === "set" && filtered.includes("--stdin")) action.stdin = true
-      }
-      if (verb === "unlock") {
-        const dur = flagVal(filtered, "--for")
-        if (!dur) { console.error("error: secret unlock requires --for <duration> (e.g. 30m, 2h)"); process.exit(1) }
-        action.for = dur
-      }
-      return action
+      return { type: "macos_secret", sub: "status" }
     }
 
     case "auth": {

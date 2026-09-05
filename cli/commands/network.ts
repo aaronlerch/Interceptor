@@ -106,7 +106,11 @@ export function parseNetworkCommand(filtered: string[]): Action {
             out: filtered.includes("--out") ? filtered[filtered.indexOf("--out") + 1] : undefined,
             // exports keep captured auth headers by default; this opt-in
             // strips credentials from the encoded output (issue #160).
-            redactAuth: filtered.includes("--redact-auth") || undefined
+            // FORK-DELTA §8: redaction is the DEFAULT here, inverting upstream.
+            // Agents write net-log exports into repos and scratch dirs; a file
+            // that silently carries Authorization headers is the wrong default,
+            // whatever its mode bits. --no-redact-auth is the explicit opt-out.
+            redactAuth: !filtered.includes("--no-redact-auth")
           }
         }
         case "clear":

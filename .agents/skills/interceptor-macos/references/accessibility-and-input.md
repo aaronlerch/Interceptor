@@ -62,15 +62,13 @@ interceptor macos inspect                        # Tree + apps + frontmost info
 
 ## Credentials: deliver by name, never by value
 
-There is no frontmost-app denylist. Credentials come from the keychain-backed vault and are delivered by name:
+There is no frontmost-app denylist. Credentials come from 1Password and are delivered by reference:
 
 ```bash
-interceptor macos type <ref> --secret <name>        # AX value-set, then keystrokes; value resolved in the daemon
-interceptor macos sudo --secret <name> -- <cmd...>  # password piped to sudo -S stdin
-interceptor macos authdialog fill --secret <name> --submit   # the macOS administrator prompt
+interceptor macos type <ref> --secret op://<vault>/<item>/<field> --op-any-target   # AX value-set, then keystrokes; value resolved in the daemon
 ```
 
-Each secret carries a target allowlist (`sudo`, `macos:<bundleId>`, `browser:<host>`, `ios`, `any`). The daemon checks the frontmost or `--app` bundle id against it before reading the keychain; a mismatch fails with `target_denied`. Never put a password in a literal `type` call: `--secret` and literal text are mutually exclusive, and the vault is the only sanctioned path. Register secrets with `interceptor macos secret register <name>` (native box) or `secret set <name> --stdin`.
+The vault is **1Password** (FORK-DELTA §7). `--secret` takes a reference: `op://<vault>/<item>/<field>`, where vault and item may each be a name or a UUID. The daemon checks the delivery target against the ITEM's own website URLs before `op read` runs; a mismatch fails with `target_denied`. A native-app target has no URL to match, so `macos type --secret` requires `--op-any-target`. Pass `--op-account <shorthand>` (or set `INTERCEPTOR_OP_ACCOUNT`) when more than one 1Password account is signed in. Never put a password in a literal `type` call: `--secret` and literal text are mutually exclusive. Store items with `op item create`; there is no `interceptor macos secret register|set`.
 
 ## Common mistakes
 

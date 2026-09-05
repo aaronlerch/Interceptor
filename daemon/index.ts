@@ -27,7 +27,7 @@ import { DAEMON_HEALTH_SERVICE, LEGACY_HEALTH_BODY, probeDaemonHealth } from "..
 import { assertNoInstallMaintenance } from "../shared/install-maintenance"
 import { VERSION } from "../cli/version"
 import { actionLogSummary, inboundLogSummary, outboundLogSummary } from "./redact"
-import * as secrets from "./secrets"
+import * as op from "./op"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
 import {
@@ -436,163 +436,53 @@ function dispatchToExtension(id: string, request: CliRequest, socket: Bun.Socket
 
 const SECRET_DELIVERY_TYPES = new Set(["macos_type", "input_text", "find_and_type", "os_type"])
 
-const bunVault = new secrets.BunSecretsVault()
-
-/** Items in the data protection keychain owned by the signed bridge. */
-class BridgeVault implements secrets.Vault {
-  readonly backend = "data-protection-keychain"
-  async set(name: string, value: string): Promise<void> {
-    const r = await bridgeCall({ type: "macos_secrets", sub: "set", name, value }, 20_000)
-    if (!r.success) throw new Error(r.error || "bridge keychain write failed")
-  }
-  async get(name: string): Promise<string | null> {
-    const r = await bridgeCall({ type: "macos_secrets", sub: "get", name }, 20_000)
-    if (!r.success) {
-      if (/not found/i.test(r.error || "")) return null
-      throw new Error(r.error || "bridge keychain read failed")
-    }
-    const d = r.data as { value?: unknown } | undefined
-    return typeof d?.value === "string" ? d.value : null
-  }
-  async delete(name: string): Promise<boolean> {
-    const r = await bridgeCall({ type: "macos_secrets", sub: "delete", name }, 20_000)
-    return r.success
-  }
-}
-
-/** Writes go to the bridge; reads fall back to the login keychain (v1 items); deletes clear both. */
-class LayeredVault implements secrets.Vault {
-  readonly backend = "data-protection-keychain"
-  constructor(private primary: BridgeVault, private fallback: secrets.BunSecretsVault) {}
-  async set(name: string, value: string): Promise<void> {
-    await this.primary.set(name, value)
-    await this.fallback.delete(name)
-  }
-  async get(name: string): Promise<string | null> {
-    const v = await this.primary.get(name)
-    if (v !== null) return v
-    return this.fallback.get(name)
-  }
-  async delete(name: string): Promise<boolean> {
-    const a = await this.primary.delete(name)
-    const b = await this.fallback.delete(name)
-    return a || b
-  }
-}
-
-let vaultProbe: { dataProtection: boolean; checkedAt: number } | null = null
-
-async function bridgeDataProtection(force = false): Promise<boolean> {
-  if (!force && vaultProbe && Date.now() - vaultProbe.checkedAt < 60_000) return vaultProbe.dataProtection
-  const r = await bridgeCall({ type: "macos_secrets", sub: "status" }, 10_000)
-  const dp = r.success && (r.data as { dataProtection?: unknown } | undefined)?.dataProtection === true
-  vaultProbe = { dataProtection: dp, checkedAt: Date.now() }
-  return dp
-}
-
-async function activeVault(): Promise<secrets.Vault> {
-  return (await bridgeDataProtection()) ? new LayeredVault(new BridgeVault(), bunVault) : bunVault
-}
-
-const gateViaBridge: secrets.GateFn = async ({ reason, policy, reuseSeconds }) => {
-  const r = await bridgeCall({ type: "macos_auth", sub: "confirm", reason, policy: policy === "biometry" ? "biometry" : "any", reuse_seconds: reuseSeconds }, 180_000)
-  if (!r.success) return { ok: false, error: r.error || "authentication prompt failed" }
-  const d = r.data as { ok?: boolean; error?: string } | undefined
-  return d?.ok === true ? { ok: true } : { ok: false, error: d?.error || "not approved" }
-}
+/**
+ * FORK-DELTA §7: the vault is 1Password. Storage, registration, the biometric
+ * gate and unlock windows are the desktop app's, so none of them live here any
+ * more — no BunSecretsVault, no BridgeVault/LayeredVault, no gateViaBridge, no
+ * ~/.interceptor/secrets.json. The daemon only resolves a reference at delivery
+ * time, which is the one thing that has to happen inside this process.
+ */
 
 function sessionLabel(action: Record<string, unknown>): string | undefined {
   return typeof action.group === "string" && action.group.length > 0 ? action.group : undefined
 }
 
-async function handleSecretAction(action: Record<string, unknown>, request: CliRequest): Promise<DaemonResult> {
+/** `interceptor macos secret status` — a readiness probe, not a store. */
+async function handleSecretAction(action: Record<string, unknown>, _request: CliRequest): Promise<DaemonResult> {
   const sub = String(action.sub ?? "")
-  const session = sessionLabel(action)
+  if (sub !== "status") {
+    return {
+      success: false,
+      error:
+        `secret ${sub || "<verb>"} is not part of this fork — 1Password owns the vault. ` +
+        "Store items with `op item create`, list them with `op item list`, read one with `op read`. " +
+        "Deliver with --secret op://<vault>/<item>/<field>. Only `secret status` remains here.",
+    }
+  }
   try {
-    switch (sub) {
-      case "status": {
-        const bridgeStatus = await bridgeCall({ type: "macos_secrets", sub: "status" }, 10_000)
-        const auth = await bridgeCall({ type: "macos_auth", sub: "status" }, 10_000)
-        const dp = await bridgeDataProtection(true)
-        return {
-          success: true,
-          data: {
-            backend: dp ? "data-protection-keychain" : "login-keychain",
-            dataProtection: dp,
-            bridge: bridgeStatus.success ? bridgeStatus.data : { error: bridgeStatus.error },
-            auth: auth.success ? auth.data : { error: auth.error },
-            secrets: secrets.listSecrets().length,
-            unlocked: secrets.openUnlocks().map((u) => ({ name: u.name, until: new Date(u.until).toISOString() })),
-            metadata: secrets.metadataPath(),
-          },
-        }
-      }
-      case "list":
-        return { success: true, data: { backend: (await activeVault()).backend, secrets: secrets.listSecrets() } }
-      case "register": {
-        const name = secrets.assertName(action.name)
-        const gate = secrets.parseGate(action.gate)
-        const targets = secrets.parseTargets(action.targets)
-        const r = await bridgeCall({
-          type: "macos_secrets", sub: "register", name, gate, targets,
-          reuse_seconds: typeof action.reuseSeconds === "number" ? action.reuseSeconds : 0,
-          session: session ?? "",
-        }, 600_000)
-        if (!r.success) return { success: false, error: r.error }
-        const d = r.data as { cancelled?: boolean; value?: unknown; gate?: unknown; targets?: unknown } | undefined
-        if (!d || d.cancelled === true || typeof d.value !== "string") return { success: false, error: "registration cancelled" }
-        const vault = await activeVault()
-        const meta = await secrets.storeSecret(vault, name, d.value, { gate: d.gate ?? gate, targets: d.targets ?? targets, reuseSeconds: action.reuseSeconds })
-        emitEvent("secret_stored", { name, gate: meta.gate, targets: meta.targets, via: "register", backend: vault.backend })
-        return { success: true, data: { stored: true, name, gate: meta.gate, targets: meta.targets, backend: vault.backend } }
-      }
-      case "set": {
-        const name = secrets.assertName(action.name)
-        if (typeof action.value !== "string" || action.value.length === 0) return { success: false, error: "secret set needs a value on stdin (or the hidden prompt); never on argv" }
-        const vault = await activeVault()
-        const meta = await secrets.storeSecret(vault, name, action.value, { gate: action.gate, targets: action.targets, reuseSeconds: action.reuseSeconds })
-        emitEvent("secret_stored", { name, gate: meta.gate, targets: meta.targets, via: "set", backend: vault.backend })
-        return { success: true, data: { stored: true, name, gate: meta.gate, targets: meta.targets, backend: vault.backend } }
-      }
-      case "rm": {
-        const name = secrets.assertName(action.name)
-        const removed = await secrets.removeSecret(await activeVault(), name)
-        emitEvent("secret_removed", { name, removed })
-        return removed ? { success: true, data: { removed: true, name } } : { success: false, error: `no secret named '${name}'` }
-      }
-      case "unlock": {
-        const name = secrets.assertName(action.name)
-        const seconds = secrets.parseDuration(action.forSeconds ?? action.for)
-        const meta = secrets.loadMeta().secrets[name]
-        if (!meta) return { success: false, error: `no secret named '${name}'` }
-        const minutes = Math.max(1, Math.round(seconds / 60))
-        const res = await gateViaBridge({
-          reason: `Interceptor: unlock "${name}" for ${minutes} min${session ? ` (session ${session})` : ""}`,
-          policy: meta.gate === "biometry" ? "biometry" : "any",
-          reuseSeconds: 0,
-        })
-        if (!res.ok) return { success: false, error: res.error }
-        const until = secrets.openUnlock(name, seconds)
-        emitEvent("secret_unlock", { name, seconds })
-        return { success: true, data: { unlocked: true, name, until: new Date(until).toISOString(), seconds } }
-      }
-      case "lock": {
-        const names = secrets.lock(typeof action.name === "string" ? action.name : undefined)
-        emitEvent("secret_lock", { names })
-        return { success: true, data: { locked: names } }
-      }
-      case "reveal": {
-        const name = secrets.assertName(action.name)
-        const vault = await activeVault()
-        const res = await secrets.resolveSecret(vault, name, { kind: "reveal" }, { gate: gateViaBridge, session, alwaysGate: true })
-        emitEvent("secret_release", { name, target: "reveal", action: "macos_secret", outcome: "released", gated: true })
-        return { success: true, data: { name, value: res.value } }
-      }
-      default:
-        return { success: false, error: `unknown secret verb '${sub}' (register|set|list|rm|status|unlock|lock|reveal)` }
+    const bin = op.resolveOpBinary()
+    const accounts = await op.signedInAccounts(bin)
+    let account: string | undefined
+    let ambiguous: string | undefined
+    try {
+      account = op.resolveAccount(undefined, accounts)
+    } catch (err) {
+      ambiguous = (err as op.OpError).message
+    }
+    return {
+      success: true,
+      data: {
+        backend: "1password-cli",
+        op: bin,
+        accounts,
+        account: account ?? null,
+        accountAmbiguous: ambiguous ?? null,
+        reference: "op://<vault>/<item>/<field>",
+      },
     }
   } catch (err) {
-    const e = err as secrets.SecretError
+    const e = err as op.OpError
     return { success: false, error: e.message, code: e.code }
   }
 }
@@ -607,8 +497,8 @@ function parseAppsList(data: unknown): Array<{ pid: number; name: string; bundle
   return out
 }
 
-/** Where a delivery lands, for the per-secret allowlist. */
-async function targetForAction(action: Record<string, unknown>, actionType: string, request: CliRequest): Promise<secrets.SecretTarget> {
+/** Where a delivery lands, checked against the 1Password item's own URLs. */
+async function targetForAction(action: Record<string, unknown>, actionType: string, request: CliRequest): Promise<op.OpTarget> {
   switch (actionType) {
     case "macos_type": {
       const app = typeof action.app === "string" ? action.app : undefined
@@ -617,12 +507,12 @@ async function targetForAction(action: Record<string, unknown>, actionType: stri
         const r = await bridgeCall({ type: "macos_apps" }, 10_000)
         const match = parseAppsList(r.data).find((a) => (pid !== undefined && a.pid === pid) || (app !== undefined && (a.name.toLowerCase() === app.toLowerCase() || a.bundleId.toLowerCase() === app.toLowerCase())))
         if (!match || !match.bundleId) throw new Error(`could not resolve the bundle id of ${app ?? `pid ${pid}`} for the target check`)
-        return { kind: "macos", id: match.bundleId }
+        return { kind: "macos", bundleId: match.bundleId }
       }
       const fm = await bridgeCall({ type: "macos_frontmost" }, 10_000)
       const bid = (fm.data as { bundleId?: unknown } | undefined)?.bundleId
       if (!fm.success || typeof bid !== "string" || !bid) throw new Error(`could not read the frontmost app for the target check: ${fm.error ?? "no bundle id"}`)
-      return { kind: "macos", id: bid }
+      return { kind: "macos", bundleId: bid }
     }
     case "input_text":
     case "find_and_type":
@@ -637,7 +527,7 @@ async function targetForAction(action: Record<string, unknown>, actionType: stri
       if (!info.success || typeof url !== "string") throw new Error(`could not read the page URL for the target check: ${info.error ?? "no url"}`)
       let host = ""
       try { host = new URL(url).hostname } catch {}
-      return { kind: "browser", id: host || url }
+      return { kind: "browser", host: host || url }
     }
     default:
       // Fail closed. SECRET_DELIVERY_TYPES gates entry, so reaching here means a
@@ -651,30 +541,37 @@ async function targetForAction(action: Record<string, unknown>, actionType: stri
 async function deliverWithSecret(id: string, action: Record<string, unknown>, request: CliRequest, socket: Bun.Socket<undefined>, actionType: string): Promise<void> {
   const reply = (result: DaemonResult) => socketWriteFramed(socket, JSON.stringify({ id, result }))
   if (!SECRET_DELIVERY_TYPES.has(actionType)) { reply({ success: false, error: `--secret is not supported for '${actionType}'` }); return }
-  const name = action.secret
-  if (typeof name !== "string") { reply({ success: false, error: "--secret requires a name" }); return }
+  const ref = action.secret
+  if (typeof ref !== "string") { reply({ success: false, error: "--secret requires a 1Password reference: op://<vault>/<item>/<field>" }); return }
   const literal = typeof action.text === "string" ? action.text : typeof action.inputText === "string" ? action.inputText : ""
   if (literal.length > 0) { reply({ success: false, error: "--secret and literal text are mutually exclusive" }); return }
   const session = sessionLabel(action)
 
-  let target: secrets.SecretTarget
+  let target: op.OpTarget
   try { target = await targetForAction(action, actionType, request) }
   catch (err) { reply({ success: false, error: (err as Error).message }); return }
 
+  const describe = target.kind === "browser" ? `browser page on ${target.host}` : `macOS app ${target.bundleId}`
   let value: string
   try {
-    const res = await secrets.resolveSecret(await activeVault(), name, target, { gate: gateViaBridge, session })
+    // The reference is safe to log and event — it names a location, not a value.
+    const res = await op.resolveOpSecret(ref, target, {
+      account: typeof action.opAccount === "string" ? action.opAccount : undefined,
+      anyTarget: action.opAnyTarget === true,
+    })
     value = res.value
-    emitEvent("secret_release", { requestId: id, name, target: secrets.describeTarget(target), action: actionType, outcome: "released", gated: res.gated })
+    emitEvent("secret_release", { requestId: id, ref: res.ref.raw, target: describe, action: actionType, outcome: "released", session })
   } catch (err) {
-    const e = err as secrets.SecretError
-    emitEvent("secret_release", { requestId: id, name, target: secrets.describeTarget(target), action: actionType, outcome: "denied", code: e.code })
+    const e = err as op.OpError
+    emitEvent("secret_release", { requestId: id, ref, target: describe, action: actionType, outcome: "denied", code: e.code, session })
     reply({ success: false, error: e.message, code: e.code })
     return
   }
 
   const delivered: Record<string, unknown> = { ...action, sensitive: true }
   delete delivered.secret
+  delete delivered.opAccount
+  delete delivered.opAnyTarget
   switch (actionType) {
     case "macos_type":
       delivered.text = value

@@ -63,8 +63,10 @@ const STATE = ["--depth", "--filter", "--limit", "--max-chars", "--role"]
 // --selector/--nth take VALUES. Without them declared here the normalizer
 // treats them as booleans and strips their operands, so
 // `click --selector button --nth 4` arrives with selector === "--nth".
-// --secret names a vault entry for `type` (issue #244); the value never rides argv.
-const ACTIONS = ["--at", "--duration", "--from", "--nth", "--secret", "--selector", "--steps", "--to"]
+// --secret carries a 1Password reference (op://<vault>/<item>/<field>) for
+// `type` — a location, never a value, so it is safe on argv. --op-account
+// disambiguates when several 1Password accounts are signed in (FORK-DELTA §7).
+const ACTIONS = ["--at", "--duration", "--from", "--nth", "--op-account", "--secret", "--selector", "--steps", "--to"]
 const NAV = ["--amount", "--ms", "--timeout"]
 const NET = ["--filter", "--format", "--limit", "--out", "--since", "--pattern", "--patterns", "--type"]
 const SCREENSHOT = ["--clip", "--element", "--filter", "--format", "--kind", "--limit", "--quality", "--ref", "--region", "--scale", "--selector", "--target-max-long-edge", "--threshold"]
@@ -132,10 +134,13 @@ const VALUE_FLAGS_BY_CMD: Record<string, string[]> = {
 // consumption pattern, so keep it in sync when adding a family here.
 const COMPOUND_BOOL = ["--activate", "--append", "--full", "--include-frames", "--include-style", "--markdown", "--net-only", "--no-read", "--no-reuse", "--no-wait", "--os", "--reuse", "--text-only", "--tree-only", "--trusted"]
 const STATE_BOOL = ["--elements-only", "--full", "--include-frames", "--markdown", "--native", "--text-only"]
-const ACTIONS_BOOL = ["--append", "--dropzone", "--picker", "--trusted", "--os"]
+// --op-any-target overrides the 1Password item-URL target check (FORK-DELTA §7).
+const ACTIONS_BOOL = ["--append", "--dropzone", "--op-any-target", "--picker", "--trusted", "--os"]
 const TABS_BOOL = ["--incognito"]
 const TAB_BOOL = ["--activate", "--no-reuse", "--reuse"]
-const NET_BOOL = ["--from-start", "--persist", "--reload", "--redact-auth"]
+// --redact-auth stays declared so existing scripts keep working; it is now the
+// default, and --no-redact-auth is the opt-out (FORK-DELTA §8).
+const NET_BOOL = ["--from-start", "--persist", "--reload", "--redact-auth", "--no-redact-auth"]
 const SCREENSHOT_BOOL = ["--background", "--full", "--image", "--no-fallback", "--pixel", "--save", "--webgl"]
 const DATA_BOOL = ["--session"]
 const META_BOOL = ["--author", "--explain", "--tail", "--top-only", "--verbose"]

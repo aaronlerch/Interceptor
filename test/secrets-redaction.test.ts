@@ -25,14 +25,12 @@ describe("actionLogSummary", () => {
   test("every --secret delivery logs the name only", () => {
     for (const a of [
       { type: "input_text", ref: "e3", secret: "site-pw" },
-      { type: "find_and_type", name: "Password", secret: "site-pw" },
-      { type: "os_type", secret: "site-pw" },
-      { type: "macos_type", secret: "admin" },
-      { type: "ios_type", ref: "e2", secret: "ios-passcode" },
-      { type: "ios_keys", secret: "ios-passcode" },
-      { type: "ios_unlock", secret: "ios-passcode" },
-      { type: "macos_sudo", secret: "admin", cmd: ["/usr/bin/id"] },
-      { type: "macos_authdialog", sub: "fill", secret: "admin", submit: true },
+      // The fork's four delivery legs (FORK-DELTA §5/§6 removed sudo and
+      // authdialog; §1 removed the iOS ones). Each carries an op:// reference.
+      { type: "find_and_type", name: "Password", secret: "op://Private/Site/password" },
+      { type: "os_type", secret: "op://Private/Site/password" },
+      { type: "macos_type", secret: "op://Private/Admin/password" },
+      { type: "input_text", ref: "e1", secret: "op://Private/Site/password" },
     ]) {
       const line = actionLogSummary(a)
       expect(line).toContain(`"secret":"${a.secret}"`)
@@ -47,10 +45,18 @@ describe("actionLogSummary", () => {
     expect(actionLogSummary({ type: "os_type", text: VALUE, sensitive: true })).toContain("<redacted>")
   })
 
-  test("ios_login never logs the password", () => {
-    const line = actionLogSummary({ type: "ios_login", appleId: "a@b.c", password: VALUE })
+  // FORK-DELTA §7: a --secret value is now an op:// REFERENCE, which is a
+  // location rather than a credential. It stays readable on purpose — that line
+  // is what makes a release auditable. The value it resolves to still must not
+  // appear anywhere.
+  test("an op:// reference stays readable while the resolved value never appears", () => {
+    const REF = "op://Private/Gmail/password"
+    const line = actionLogSummary({ type: "input_text", ref: "e3", secret: REF })
+    expect(line).toContain(REF)
     expect(line).not.toContain(VALUE)
-    expect(line).toContain("a@b.c")
+    const delivered = actionLogSummary({ type: "input_text", ref: "e3", text: VALUE, sensitive: true })
+    expect(delivered).not.toContain(VALUE)
+    expect(delivered).toContain("<redacted>")
   })
 
   test("daemon_shutdown still redacts its token", () => {

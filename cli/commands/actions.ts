@@ -80,18 +80,25 @@ export function parseActionsCommand(filtered: string[], positionalCount?: number
       // callers (tests) that don't pass the boundary working.
       const textArgs = positionalCount !== undefined
         ? filtered.slice(2, positionalCount + 1)
-        : filtered.slice(2).filter(a => a !== "--append" && !TRUSTED_FLAG_VALUES.includes(a) && a !== "--secret" && filtered[filtered.indexOf(a) - 1] !== "--secret")
-      // issue #244: `--secret <name>` types a vault value by name. The daemon
-      // resolves it after logging and checks the page host against the
-      // secret's allowlist; the CLI process never holds the value.
+        : filtered.slice(2).filter(a => a !== "--append" && !TRUSTED_FLAG_VALUES.includes(a) && a !== "--secret" && a !== "--op-any-target" && a !== "--op-account" && filtered[filtered.indexOf(a) - 1] !== "--secret" && filtered[filtered.indexOf(a) - 1] !== "--op-account")
+      // FORK-DELTA §7: `--secret op://<vault>/<item>/<field>` types a 1Password
+      // value by reference. The daemon resolves it after logging, and checks the
+      // page host against the ITEM's own URLs; the CLI process never holds the
+      // value. A reference is a location, not a secret, so it is safe on argv.
       const secretIdx = filtered.indexOf("--secret")
       if (secretIdx !== -1) {
-        const secretName = filtered[secretIdx + 1]
-        if (!secretName || secretName.startsWith("--")) { console.error("error: --secret requires a secret name"); process.exit(1) }
+        const secretRef = filtered[secretIdx + 1]
+        if (!secretRef || secretRef.startsWith("--")) { console.error("error: " + "error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
         if (textArgs.join("").length) { console.error("error: --secret and literal text are mutually exclusive"); process.exit(1) }
-        if (useOs) return { type: "os_type", ...target, secret: secretName }
-        if (target.semantic) return { type: "find_and_type", name: target.semantic.name, role: target.semantic.role, secret: secretName, clear: !append }
-        return { type: "input_text", ...target, secret: secretName, clear: !append }
+        const acctIdx = filtered.indexOf("--op-account")
+        const opAccount = acctIdx === -1 ? undefined : filtered[acctIdx + 1]
+        if (acctIdx !== -1 && (!opAccount || opAccount.startsWith("--"))) { console.error("error: --op-account requires an account shorthand"); process.exit(1) }
+        const extras: Record<string, unknown> = { secret: secretRef }
+        if (opAccount) extras.opAccount = opAccount
+        if (filtered.includes("--op-any-target")) extras.opAnyTarget = true
+        if (useOs) return { type: "os_type", ...target, ...extras }
+        if (target.semantic) return { type: "find_and_type", name: target.semantic.name, role: target.semantic.role, ...extras, clear: !append }
+        return { type: "input_text", ...target, ...extras, clear: !append }
       }
       if (useOs) {
         return { type: "os_type", ...target, text: textArgs.join(" ") }

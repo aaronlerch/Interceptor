@@ -12,7 +12,7 @@ const VALUE_FIELDS = ["value", "text", "inputText", "password", "pw", "passcode"
 export function isSecretBearing(action: unknown): boolean {
   if (!action || typeof action !== "object" || Array.isArray(action)) return false
   const a = action as Record<string, unknown>
-  if (a.type === "macos_secret" || a.type === "ios_login") return true
+  if (a.type === "macos_secret") return true
   if (typeof a.secret === "string") return true
   if (a.sensitive === true) return true
   return false

@@ -328,7 +328,7 @@ Passive Network (always-on, no CDP):
   interceptor net log --since <timestamp>    Entries after timestamp
   interceptor net log --limit <n>            Max entries (default 100)
   interceptor net log --format json|har|pcapng --out <path>   Export the buffer (file is created mode 600)
-  interceptor net log --format har --out <path> --redact-auth Same, credential headers replaced with [redacted]
+  interceptor net log --format har --out <path> --no-redact-auth Same, but KEEPS credential headers (they are redacted by default)
   interceptor net clear                      Flush passive capture buffer
   interceptor net monitor on [--reload]      Arm WebSocket/Beacon/BroadcastChannel capture
   interceptor net monitor off                Disable dynamic page-communication capture
@@ -637,15 +637,14 @@ macOS Bridge (full install only):
   interceptor macos auth status|confirm|invalidate|domain-state                   (LocalAuthentication)
   interceptor macos auth confirm "<reason>" [--policy biometry|any|biometry-or-watch] [--reuse <seconds>]
 
-  Secret vault (keychain-backed; values never on argv, in logs, or in results):
-  interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <s>]
-                                             Opens the native box (secure field + confirm). Default gate: none (unattended).
-  interceptor macos secret set <name> --stdin [same flags]   Headless: value from stdin (hidden TTY prompt without --stdin)
-  interceptor macos secret list | status     Names, gates, targets, release counts; backend + Touch ID availability
-  interceptor macos secret rm <name>
-  interceptor macos secret unlock <name> --for 30m          One OS prompt now, releases inside the window without prompts
-  interceptor macos secret lock [<name>]
-  interceptor macos secret reveal <name>     Human read-back: always OS-gated, TTY only, refused under --json / MCP
+  Credentials (1Password; values never on argv, in logs, or in results):
+  interceptor macos secret status            Readiness: op binary, signed-in 1Password accounts
+                                             Storage is 1Password's: op item create | op item list | op read op://<vault>/<item>/<field>
+  interceptor type <ref> --secret op://<vault>/<item>/<field>
+                                             Browser field. Checked against the ITEM's website URLs before the read.
+  interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-target [--app X]
+                                             Native field. --op-any-target is required: an item URL cannot describe an app.
+    [--op-account <shorthand>]               Required when more than one 1Password account is signed in.
   interceptor macos calendar status|request|list|default|sources|create-calendar|delete-calendar|events|event|create|update|delete|move|refresh-sources|reset|tail   (EventKit events)
   interceptor macos calendar create --title "..." --start <ISO8601> --end <ISO8601> [--calendar <id>] [--all-day] [--alarm <offset|absolute>]
   interceptor macos reminders status|request|lists|default|all|incomplete|completed|create|update|complete|uncomplete|delete   (EventKit reminders)
