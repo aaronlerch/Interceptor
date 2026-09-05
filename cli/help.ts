@@ -6,6 +6,27 @@
 import { COMMAND_SPECS } from "./manifest"
 
 const COMMAND_HELP: Record<string, string> = {
+  update: [
+    "interceptor update — update Interceptor itself",
+    "",
+    "  interceptor update             macOS: check now — reports Sparkle's selected version or no-update reason",
+    "  interceptor update status      macOS: check result, selected version, lifecycle phase, feed, and schedule",
+    "",
+    "Notes:",
+    "  - macOS: requires the full install (the updater lives in the bridge app); browser-only",
+    "    installs get 'interceptor upgrade --full' guidance instead. A found update keeps",
+    "    Sparkle's visible prompt; a slow check returns 'checking' and status records its result.",
+    "  - Windows: updates ship as a signed installer — this command prints the Releases link",
+    "    (run the newer architecture-matched Setup; downgrades are refused).",
+  ].join("\n"),
+  daemon: [
+    "interceptor daemon — local daemon lifecycle control",
+    "",
+    "  interceptor daemon stop [--reason installer|manual] [--timeout 10000]",
+    "",
+    "The stop command never auto-starts a daemon. It authenticates with the current-user lock token,",
+    "waits for the locked PID to exit and both loopback ports to close, and never prints the token.",
+  ].join("\n"),
   save: [
     "interceptor save — write page-produced bytes to disk (no downloads shelf, Save dialog, clipboard, or CDP)",
     "",
@@ -93,7 +114,8 @@ needed. Go deeper on any verb:
 const MAP_BROWSER = `BROWSER — a signed-in Chrome/Brave profile, background tabs by default:
   Compound   open <url> · read [ref] · act <ref> ["text"] · inspect     one-call open / read / act / debug
   Read text  text (visible innerText) · text --markdown (keeps headings/tables) · html <ref> (raw markup)
-  Structure  tree (a11y refs to act on) · find "<name>" (elements by name) · search "<q>" (full-text) · state · diff
+  Structure  tree (a11y refs) · find "<q>" (current-page text + elements) · state · diff
+  Web        websearch "<q>" (configured default provider → managed background tab + page read)
   Extract    table · links · images · forms · query <css> · exists · count · attr · style      structured JSON
   Act        act <ref> · click · type · select · focus · hover · drag · dblclick · rightclick · check · keys · scroll
   Navigate   navigate <url> · back · forward · scroll · wait <ms> · wait-stable
@@ -120,11 +142,13 @@ const MAP_UPGRADE = `macOS control is NOT enabled on this browser-only install:
   interceptor upgrade --full     Add native macOS control (macOS host only)`
 
 const MAP_FOOTER = `LOCAL (no browser needed):
-  status · init · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
+  status · init · daemon stop · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
+  update — update Interceptor itself (fires the Sparkle update check; 'update status' shows the schedule)
 
 GLOBAL FLAGS (any command, any position — flag order never changes meaning):
   --json  --context <id>  --tab <id>  --group <label>  --frame <id>  --all-surfaces
   e.g. 'open --text-only <url>' ≡ 'open <url> --text-only'
+  unknown flags are rejected (exit 1) on browser commands; INTERCEPTOR_LAX_FLAGS=1 downgrades to a warning
 
 Docs & issues: https://github.com/Hacker-Valley-Media/Interceptor`
 
@@ -146,7 +170,12 @@ Flags:
   -V, --version                       Print version, build SHA, and build date
   --json                              Output as JSON
   --context <id>                      Target a specific browser context (see: interceptor contexts)
-  --group <label>                     Scope this command to a named tab group (per-agent isolation; env: INTERCEPTOR_GROUP)
+  --group <label>                     Hard-scope this command to a named tab group (env: INTERCEPTOR_GROUP).
+                                      Agent shells default to a soft per-session group, labeled s-<hash16>,
+                                      using INTERCEPTOR_SESSION_ID or a verified Maestro, Claude Code, or Codex id.
+                                      Concurrent lanes need unique --group labels or INTERCEPTOR_SESSION_ID values.
+  --shared-group                      Suppress automatic session scope and use Interceptor's shared default group;
+                                      INTERCEPTOR_GROUP= (empty) is the per-environment equivalent.
   --group-color <color>               Color for the group when it is first created (default: auto from label)
 
 Compound (agent-optimized):
@@ -157,8 +186,10 @@ Compound (agent-optimized):
   interceptor open <url> --full              Full text (200K cap) instead of the 8000-char summary
   interceptor open <url> --timeout <ms>      Override wait-stable timeout (default 5000)
   interceptor open <url> --no-wait           Return immediately after tab creation
-  interceptor open <url> --reuse             Navigate the most recent Interceptor-group tab instead of opening a new one (cleans up long automation runs)
+  interceptor open <url> --reuse             Navigate the most recent managed tab instead of opening a new one (cleans up long automation runs)
+  interceptor open <url> --no-reuse          Force a new tab (overrides the named-group reuse default)
   interceptor open <url> --reuse --activate  Navigate the reused tab and bring it to the foreground
+                                             With --group <label>, open reuses that group's most-recent tab BY DEFAULT (policy: extension popup)
   interceptor read                           Tree + text for active tab
   interceptor read <ref>                     Tree + text for element subtree
   interceptor read --tree-only               Skip text
@@ -173,7 +204,8 @@ Compound (agent-optimized):
   interceptor style remove <handle>          Remove a previously injected stylesheet
   interceptor act <ref>                      Click + wait + return updated tree + diff
   interceptor act <ref> "value"              Type into field + wait + return updated tree
-  interceptor act <ref> --trusted            Use HID-sourced trusted input (page sees isTrusted: true)
+  interceptor act <ref> --trusted            HID-sourced trusted input (isTrusted: true); requires the target tab
+                                             active in the OS-focused window — refuses otherwise, never moves focus
   interceptor act <ref> --keys "Enter"       Send keyboard shortcut instead
   interceptor act <ref> --no-read            Skip post-action tree read
   interceptor inspect                        Tree + text + network log + headers
@@ -195,8 +227,13 @@ State:
   interceptor tree --filter all              Include landmarks + headings
   interceptor tree --depth N --max-chars N   Limit depth and output size
   interceptor diff                           Changes since last state/tree read
-  interceptor find "query"                   Find elements by name
-  interceptor find "query" --role button     Filter by role
+  interceptor find "query"                   Find current-page text + accessible elements
+  interceptor find "query" --text-only       Return bounded rendered-text snippets only
+  interceptor find "query" --elements-only   Return actionable element refs only
+  interceptor find "query" --role button     Element-only, filtered by role
+  interceptor find "query" --include-frames  Aggregate reachable frames
+  interceptor websearch "query"              Search default provider in a managed background tab
+  interceptor search "query"                 Deprecated alias for websearch (one release)
   interceptor text                           All visible text
   interceptor text <index|ref>               Text from specific element
   interceptor text --markdown                All visible text rendered as markdown
@@ -205,12 +242,14 @@ State:
 
 Actions:
   interceptor click <index|ref>              Click element (e.g. interceptor click e5)
+  interceptor click --selector "<css>" [--nth N]  Click by CSS selector (0-based --nth matches query output; quote selectors with spaces)
   interceptor click <index> --at X,Y        Click at coordinates on element
   interceptor dblclick <index> --at X,Y     Double-click at coordinates
   interceptor rightclick <index> --at X,Y   Right-click at coordinates
   interceptor type <index|ref> <text>        Type into element (clears first)
   interceptor type <index|ref> <text> --append  Type without clearing
   interceptor type "role:name" <text>        Type using semantic selector (e.g. "button:Submit")
+  interceptor type <index|ref> --secret <name>   Type a vault secret by name (value resolved in the daemon, never shown)
   interceptor click "text:<query>"            Click first element whose textContent matches (e.g. "text:Save")
   interceptor select <index|ref> <value>     Select dropdown option
   interceptor focus <index|ref>              Focus element
@@ -230,8 +269,9 @@ Navigation:
 
 Tabs:
   interceptor tabs                           List all tabs
-  interceptor tab new [url]                  Open new tab in background (default)
+  interceptor tab new [url]                  Open new tab in background (creates by default; --reuse opts in)
   interceptor tab new [url] --activate       Open new tab and foreground it (explicit opt-in)
+  interceptor tab new [url] --reuse          Navigate the group's most-recent tab instead of creating
   interceptor tab close [id]                 Close tab
   interceptor tab switch <id>                Switch to tab (explicit focus move)
   interceptor window new [url]               Open a new browser window
@@ -287,6 +327,8 @@ Passive Network (always-on, no CDP):
   interceptor net log --filter <pattern>     Filter by URL substring
   interceptor net log --since <timestamp>    Entries after timestamp
   interceptor net log --limit <n>            Max entries (default 100)
+  interceptor net log --format json|har|pcapng --out <path>   Export the buffer (file is created mode 600)
+  interceptor net log --format har --out <path> --redact-auth Same, credential headers replaced with [redacted]
   interceptor net clear                      Flush passive capture buffer
   interceptor net monitor on [--reload]      Arm WebSocket/Beacon/BroadcastChannel capture
   interceptor net monitor off                Disable dynamic page-communication capture
@@ -343,7 +385,7 @@ Scene Graph (Rich Editors):
   interceptor scene profile --verbose          Include active capabilities and strategy details
   interceptor scene list                       List scene objects on the current editor surface
   interceptor scene list --type shape          Filter by type (image|shape|text|page|embed|slide)
-  interceptor scene click <id>                 Click a scene object by its scene id
+  interceptor scene click <id> [--trusted]     Click a scene object by its scene id (--trusted posts OS-level input)
   interceptor scene dblclick <id>              Double-click a scene object
   interceptor scene select <id>                Click + verify selection change
   interceptor scene hit <x> <y>                Identify the scene object at viewport coordinates
@@ -372,8 +414,8 @@ Recording (Session Monitor):
   interceptor monitor status [--all]            Show status of current/all monitor sessions
   interceptor monitor status --task <taskId>    Show task envelope status
   interceptor monitor task attach <taskId> <sid> Attach an existing source session
-  interceptor monitor task snapshot <taskId>    Snapshot source artifacts under the task root
-  interceptor monitor task quality <taskId>     Show task capture readiness gates
+  interceptor monitor task snapshot <taskId|name>  Snapshot source artifacts under the task root
+  interceptor monitor task quality <taskId|name>   Show task capture readiness gates (synthesizes a missing transcript first)
   interceptor monitor task compile-blueprint <taskId>  Enforce blueprint-readiness gate
   interceptor monitor list                      List all sessions in the event log
   interceptor monitor tail [--raw] [--current]  Live tail current session (pretty by default)
@@ -393,13 +435,17 @@ Meta:
   interceptor diagnose                       Post-failure snapshot: daemon binary, all contexts, tabs, elements, monitor
   interceptor diagnose --context <id>        Probe a specific browser context only
   interceptor diagnose --json                Same snapshot as JSON
+  interceptor daemon stop [--reason manual] [--timeout 10000]
+                                             Authenticated local stop; never auto-spawns the daemon
   interceptor help [<command>|--all]         Concise help / one command's contract / the full reference
   interceptor manifest                       Machine-readable capability manifest (verbs, flags, returns, skills)
   interceptor skills list                    Skill packs shipped with this install + adoption state
-  interceptor skills status                  Per-runtime link state (linked / stale-copy / foreign / missing)
+  interceptor skills status                  Per-runtime link state (linked / stale-copy / foreign / name-collision / missing)
   interceptor skills show <name>             One skill's purpose + which text verb returns what
   interceptor skills adopt [names…] [--into claude,codex,agents] [--all] [--force]
                                              Symlink skill packs into AI runtimes (junctions on Windows)
+  interceptor skills unadopt [names…] [--into claude,codex,agents] [--all] --owned-root <path>
+                                             Remove only links proven to target the owned installed skill root
 
 Branding:
   interceptor brand tab-group --title <label> [--color <color>]
@@ -464,6 +510,7 @@ macOS Bridge (full install only):
   interceptor macos click <ref> --double|--right
   interceptor macos type <ref> "<text>"      AX value-set on text-bearing role
   interceptor macos type "<text>" --app <name>   Type via postToPid keys
+  interceptor macos type [<ref>] --secret <name> Type a vault secret by name (allowlisted per app)
   interceptor macos keys "Meta+A" [--app <name>|--pid N]
   interceptor macos scroll up|down|left|right N [--app <name>] [--times N] [--interval-ms N]
   interceptor macos drag <fromRef> <toRef> [--app <name>]
@@ -538,6 +585,7 @@ macOS Bridge (full install only):
                                   [--watch-path <path>] [--watch-paths p1,p2,...]
                                   [--log-predicate "<NSPredicate format>"]
   interceptor macos monitor stop | pause | resume | status [--sid <sid>]
+  interceptor macos monitor stop --task <taskId|name>       Stop the task envelope: snapshot + transcript + quality grade
   interceptor macos monitor tail [--sid <sid>] [--limit N] [--raw]
   interceptor macos monitor list
   interceptor macos monitor export <sid> [--plan|--json] [--limit N]
@@ -588,12 +636,27 @@ macOS Bridge (full install only):
   Personal data (TCC-gated):
   interceptor macos auth status|confirm|invalidate|domain-state                   (LocalAuthentication)
   interceptor macos auth confirm "<reason>" [--policy biometry|any|biometry-or-watch] [--reuse <seconds>]
+
+  Secret vault (keychain-backed; values never on argv, in logs, or in results):
+  interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <s>]
+                                             Opens the native box (secure field + confirm). Default gate: none (unattended).
+  interceptor macos secret set <name> --stdin [same flags]   Headless: value from stdin (hidden TTY prompt without --stdin)
+  interceptor macos secret list | status     Names, gates, targets, release counts; backend + Touch ID availability
+  interceptor macos secret rm <name>
+  interceptor macos secret unlock <name> --for 30m          One OS prompt now, releases inside the window without prompts
+  interceptor macos secret lock [<name>]
+  interceptor macos secret reveal <name>     Human read-back: always OS-gated, TTY only, refused under --json / MCP
+  interceptor macos sudo --secret <name> [--keep] -- <command...>   Run as root; the password goes to sudo -S stdin
+  interceptor macos authdialog status|fill --secret <name> [--submit]   Fill the macOS administrator prompt (SecurityAgent),
+                                             pressing "Use Password" first on a Touch ID sheet
   interceptor macos calendar status|request|list|default|sources|create-calendar|delete-calendar|events|event|create|update|delete|move|refresh-sources|reset|tail   (EventKit events)
   interceptor macos calendar create --title "..." --start <ISO8601> --end <ISO8601> [--calendar <id>] [--all-day] [--alarm <offset|absolute>]
   interceptor macos reminders status|request|lists|default|all|incomplete|completed|create|update|complete|uncomplete|delete   (EventKit reminders)
   interceptor macos contacts status|request|containers|groups|list|contact|me|find|create|update|delete|vcard|import-vcard|current-token|changes
   interceptor macos contacts find "<query>" | --email <addr> | --phone <num>
   interceptor macos photos status|request|albums|album|assets|asset|export|export-video|export-live|thumbnail|favorite|hide|delete|add-to-album|remove-from-album|import|import-video|current-token|changes
+  interceptor macos photos export <id> --out <path> [--size N] [--format jpeg|png]   Originals are HEIC; --format transcodes
+  interceptor macos photos thumbnail <id> [--size N] [--out <path>]                  --out writes a file; without it, returns a base64 dataUrl
   interceptor macos location status|request|request-temporary-accuracy|current|monitor|significant|visits|heading|geocode|reverse|distance|postal-geocode
   interceptor macos location current                                              (one-shot CLLocationManager.requestLocation)
   interceptor macos location reverse <lat,lng>

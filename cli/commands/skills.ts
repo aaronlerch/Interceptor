@@ -9,7 +9,10 @@
  * in the wild: a ~/.codex/skills/interceptor copy six weeks behind the pkg).
  *
  * Per-skill selection, whole-folder links: one symlink per skill directory.
- * A real directory at the destination is NEVER replaced without --force.
+ * A real directory at the destination is NEVER replaced without --force, and a
+ * directory whose name differs from the skill's only by case is never replaced
+ * at all — on a case-insensitive filesystem that destination belongs to someone
+ * else (see classifyLink / "name-collision").
  */
 
 import {
@@ -18,13 +21,14 @@ import {
 } from "node:fs"
 import { join, dirname, resolve } from "node:path"
 import { homedir, tmpdir } from "node:os"
+import { isAbsoluteOwnedRoot } from "../../shared/install-maintenance"
 
 const PKG_SKILLS_DIR_DARWIN = "/Library/Application Support/Interceptor/skills"
 const SKILLS_REFRESH_MARKER_DARWIN = "/Library/Application Support/Interceptor/.skills-refresh"
 const HINT_FLAG_FILE = join(tmpdir(), "interceptor-skills-hint.flag")
 const HINT_WINDOW_MS = 24 * 60 * 60 * 1000
 
-export type LinkState = "linked" | "stale-copy" | "foreign" | "missing"
+export type LinkState = "linked" | "stale-copy" | "foreign" | "name-collision" | "missing"
 
 export type SkillTarget = {
   id: string
@@ -109,10 +113,33 @@ export function detectedTargets(home = homedir(), env: Record<string, string | u
 
 // ── classification ────────────────────────────────────────────────────────────
 
+/**
+ * The name the destination directory actually holds on disk, or null when
+ * nothing there matches. Windows and default-configured APFS are
+ * case-INSENSITIVE, so `lstat(".../skills/interceptor")` happily resolves an
+ * on-disk `Interceptor/` belonging to someone else. `readdir` reports the true
+ * casing, which is the only way to tell the two apart.
+ */
+function onDiskEntryName(targetDir: string, skillName: string): string | null {
+  try {
+    const entries = readdirSync(targetDir)
+    if (entries.includes(skillName)) return skillName
+    const lower = skillName.toLowerCase()
+    return entries.find(e => e.toLowerCase() === lower) ?? null
+  } catch {
+    return null
+  }
+}
+
 export function classifyLink(targetDir: string, skillName: string, srcDir: string): LinkState {
   const dst = join(targetDir, skillName)
   let st
   try { st = lstatSync(dst) } catch { return "missing" }
+  // A hit whose real casing differs is a DIFFERENT skill that the filesystem
+  // merely folded onto our name. We never created it (link names always come
+  // from the pack's own readdir), so we must not unlink or delete it.
+  const actual = onDiskEntryName(targetDir, skillName)
+  if (actual && actual !== skillName) return "name-collision"
   if (st.isSymbolicLink()) {
     try {
       if (realpathSync(dst) === realpathSync(srcDir)) return "linked"
@@ -129,7 +156,62 @@ export type AdoptResult = {
   target: string
   skill: string
   action: "linked" | "already-linked" | "skipped" | "replaced-copy" | "error"
+  /** Pre-adopt classification. Two skips are not the same: only "stale-copy" is --force-able. */
+  state?: LinkState
   detail?: string
+}
+
+export type UnadoptResult = {
+  target: string
+  skill: string
+  action: "removed" | "missing" | "foreign" | "not-link" | "error"
+  detail?: string
+}
+
+function comparablePath(path: string, platform = process.platform): string {
+  let normalized = resolve(path)
+  if (platform === "win32") {
+    normalized = normalized.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/i, "")
+    normalized = normalized.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase()
+  } else {
+    normalized = normalized.replace(/\/+$/, "") || "/"
+  }
+  return normalized
+}
+
+export function unadoptSkill(target: SkillTarget, skillName: string, ownedRoot: string): UnadoptResult {
+  if (!/^[a-z0-9][a-z0-9._-]*$/i.test(skillName)) {
+    return { target: target.id, skill: skillName, action: "error", detail: "invalid skill name" }
+  }
+  if (!isAbsoluteOwnedRoot(ownedRoot)) {
+    return { target: target.id, skill: skillName, action: "error", detail: "--owned-root must be absolute" }
+  }
+
+  const destination = join(target.dir, skillName)
+  let stat
+  try {
+    stat = lstatSync(destination)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === "ENOENT") return { target: target.id, skill: skillName, action: "missing" }
+    return { target: target.id, skill: skillName, action: "error", detail: (error as Error).message }
+  }
+  if (!stat.isSymbolicLink()) {
+    return { target: target.id, skill: skillName, action: "not-link", detail: "destination is a real file or directory" }
+  }
+
+  try {
+    const recorded = readlinkSync(destination)
+    const recordedAbsolute = resolve(dirname(destination), recorded)
+    const expected = resolve(ownedRoot, skillName)
+    if (comparablePath(recordedAbsolute) !== comparablePath(expected)) {
+      return { target: target.id, skill: skillName, action: "foreign", detail: "link target is outside the owned skill root" }
+    }
+    unlinkSync(destination)
+    return { target: target.id, skill: skillName, action: "removed" }
+  } catch (error) {
+    return { target: target.id, skill: skillName, action: "error", detail: (error as Error).message }
+  }
 }
 
 export function adoptSkill(target: SkillTarget, skill: SkillInfo, force: boolean): AdoptResult {
@@ -138,6 +220,16 @@ export function adoptSkill(target: SkillTarget, skill: SkillInfo, force: boolean
   try {
     mkdirSync(target.dir, { recursive: true })
     if (state === "linked") return { target: target.id, skill: skill.name, action: "already-linked" }
+    if (state === "name-collision") {
+      // Not force-overridable by design: on a case-insensitive filesystem the
+      // colliding directory is another author's skill, and --force would rmSync
+      // hand-edited work with no recovery path.
+      const actual = onDiskEntryName(target.dir, skill.name)
+      return {
+        target: target.id, skill: skill.name, action: "skipped", state,
+        detail: `${join(target.dir, actual ?? skill.name)} already exists with different casing — a separate skill, not a stale copy of '${skill.name}'. Not replaced (not even with --force). Rename or remove it yourself if you want this one linked.`,
+      }
+    }
     if (state === "foreign") {
       // ln -sfn semantics: replacing a symlink (even one pointing elsewhere)
       // destroys no data — the target directory is untouched.
@@ -145,7 +237,7 @@ export function adoptSkill(target: SkillTarget, skill: SkillInfo, force: boolean
     } else if (state === "stale-copy") {
       if (!force) {
         return {
-          target: target.id, skill: skill.name, action: "skipped",
+          target: target.id, skill: skill.name, action: "skipped", state,
           detail: `${dst} is a real directory (stale copy?) — re-run with --force to replace it with a link`,
         }
       }
@@ -206,7 +298,9 @@ export function maybeEmitSkillsHint(argv: string[], env: Record<string, string |
     if (!summary.packDir || summary.targets.length === 0) return
     const gaps: string[] = []
     for (const t of summary.targets) {
-      const unlinked = Object.entries(t.states).filter(([, st]) => st !== "linked")
+      // name-collision is excluded: `adopt` will never link it, so counting it
+      // here would nag every 24h about something the suggested command can't fix.
+      const unlinked = Object.entries(t.states).filter(([, st]) => st !== "linked" && st !== "name-collision")
       if (unlinked.length > 0) {
         gaps.push(`${t.id}: ${unlinked.length} of ${t.total} not linked`)
       }
@@ -283,6 +377,10 @@ export function runSkillsCommand(filtered: string[], jsonMode: boolean): null {
       console.log(`${t.id} (${t.dir}): ${t.linked}/${t.total} linked`)
       for (const [name, st] of Object.entries(t.states)) {
         console.log(`  ${st === "linked" ? "✓" : st === "missing" ? "·" : "!"} ${name}: ${st}`)
+        if (st === "name-collision") {
+          const actual = onDiskEntryName(t.dir, name)
+          console.log(`      '${actual}' already occupies this name (case-only difference) — adopt leaves it alone, --force included`)
+        }
       }
     }
     return null
@@ -313,8 +411,10 @@ export function runSkillsCommand(filtered: string[], jsonMode: boolean): null {
       console.log("  text e<ref>                 one element's textContent (includes display:none text)")
       console.log("  html e<ref>                 raw outerHTML markup")
       console.log("  read --tree-only / tree     a11y tree of interactive elements + refs for act")
-      console.log("  find \"<term>\"               locate elements by accessible name (returns refs, NOT text search)")
-      console.log("  search <query>              in-page text search")
+      console.log("  find \"<term>\"               current-page rendered text + accessible elements (snippets + refs)")
+      console.log("  find \"<term>\" --text-only   current-page rendered-text snippets only")
+      console.log("  find \"<term>\" --elements-only  accessible controls only")
+      console.log("  websearch \"<query>\"          configured default provider in a managed background tab")
       console.log("  table/links/forms/query     structured JSON extraction")
       console.log("\nFull machine-readable semantics: interceptor manifest")
     }
@@ -370,13 +470,69 @@ export function runSkillsCommand(filtered: string[], jsonMode: boolean): null {
         const mark = r.action === "error" ? "✗" : r.action === "skipped" ? "!" : "✓"
         console.log(`${mark} ${r.target}/${r.skill}: ${r.action}${r.detail ? ` — ${r.detail}` : ""}`)
       }
-      const skipped = results.filter(r => r.action === "skipped").length
-      if (skipped) console.log(`\n${skipped} destination(s) were real directories — re-run with --force to replace them with links.`)
+      const staleCopies = results.filter(r => r.action === "skipped" && r.state === "stale-copy").length
+      const collisions = results.filter(r => r.action === "skipped" && r.state === "name-collision").length
+      if (staleCopies) console.log(`\n${staleCopies} destination(s) were real directories — re-run with --force to replace them with links.`)
+      // Deliberately not offered as a --force candidate: --force refuses these.
+      if (collisions) console.log(`\n${collisions} destination(s) collide with an existing skill by case only. --force will not touch them — rename or remove the existing directory first.`)
     }
     if (results.some(r => r.action === "error")) process.exit(1)
     return null
   }
 
-  console.error(`error: unknown skills subcommand '${sub}'. Usage: interceptor skills [list|status|show <name>|adopt [names…] [--into t1,t2] [--all] [--force]]`)
+  if (sub === "unadopt") {
+    if (filtered.includes("--force")) {
+      console.error("error: skills unadopt never accepts --force")
+      process.exit(1)
+    }
+    const rootIndex = filtered.indexOf("--owned-root")
+    const ownedRoot = rootIndex >= 0 ? filtered[rootIndex + 1] : ""
+    if (!ownedRoot || ownedRoot.startsWith("--") || !isAbsoluteOwnedRoot(ownedRoot)) {
+      console.error("error: skills unadopt requires --owned-root <absolute-path>")
+      process.exit(1)
+    }
+    const all = filtered.includes("--all")
+    const intoIds = parseInto(filtered)
+    const targets = intoIds
+      ? allTargets().filter(target => intoIds.includes(target.id))
+      : detectedTargets()
+    if (intoIds) {
+      const known = new Set(allTargets().map(target => target.id))
+      const bad = intoIds.filter(id => !known.has(id))
+      if (bad.length > 0) {
+        console.error(`error: unknown target(s) ${bad.join(", ")} (valid: claude, codex, agents, openclaw, opencode)`)
+        process.exit(1)
+      }
+    }
+    const nameArgs: string[] = []
+    for (let index = 2; index < filtered.length; index++) {
+      if (filtered[index].startsWith("--")) break
+      nameArgs.push(filtered[index])
+    }
+    const knownNames = new Set(skills.map(skill => skill.name))
+    const unknown = nameArgs.filter(name => !knownNames.has(name))
+    if (unknown.length > 0) {
+      console.error(`error: unknown skill(s) ${unknown.join(", ")}. Installed: ${skills.map(skill => skill.name).join(", ")}`)
+      process.exit(1)
+    }
+    const requestedNames = all || nameArgs.length === 0 ? skills.map(skill => skill.name) : nameArgs
+    const results: UnadoptResult[] = []
+    for (const target of targets) {
+      for (const skillName of requestedNames) results.push(unadoptSkill(target, skillName, ownedRoot))
+    }
+    const success = results.every(result => result.action !== "error")
+    if (jsonMode) {
+      console.log(JSON.stringify({ success, results }, null, 2))
+    } else {
+      for (const result of results) {
+        const mark = result.action === "error" ? "✗" : result.action === "removed" ? "✓" : "·"
+        console.log(`${mark} ${result.target}/${result.skill}: ${result.action}${result.detail ? ` — ${result.detail}` : ""}`)
+      }
+    }
+    if (!success) process.exit(1)
+    return null
+  }
+
+  console.error(`error: unknown skills subcommand '${sub}'. Usage: interceptor skills [list|status|show <name>|adopt ...|unadopt [names…] [--into t1,t2] [--all] --owned-root <path>]`)
   process.exit(1)
 }

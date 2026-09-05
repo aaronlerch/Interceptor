@@ -16,6 +16,9 @@ export const INTERCEPTOR_TIMEOUT_MS = parseInt(process.env.INTERCEPTOR_TIMEOUT |
 // chart and fall back to a weaker secondary source. 45s lets the vision rung
 // of the deep-research escalation chain actually complete.
 const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
+  // A manual update check waits up to 10s for Sparkle's delegate conclusion
+  // before returning a truthful `checking` result. Leave transport headroom.
+  macos_update: 20_000,
   macos_listen: 60_000,
   macos_vad: 60_000,
   // monitor start/stop can do non-trivial setup/teardown (AX
@@ -24,6 +27,11 @@ const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
   // RPC an elevated deadline as a safety margin so a momentarily busy main
   // run loop never trips the old 15s timeout that left a split-brain envelope.
   macos_monitor: 60_000,
+  // issue #244: the registration box and gated releases wait on a person; sudo
+  // may run an installer; the admin-prompt fill polls the dialog.
+  macos_secret: 620_000,
+  macos_sudo: 620_000,
+  macos_authdialog: 60_000,
   binary_sink_save: 600_000,
   screenshot_background: 45_000,
   canvas_read: 45_000,
@@ -49,16 +57,89 @@ const ACTION_TIMEOUT_OVERRIDES_MS: Record<string, number> = {
 const SCREENSHOT_TIMEOUT_MS = 175_000
 
 export function pickTimeoutForAction(action: Action): number {
+  if (action.type === "daemon_shutdown" && typeof action.timeoutMs === "number") {
+    return Math.min(62_000, Math.max(2_000, action.timeoutMs + 2_000))
+  }
   if (action.type === "screenshot") {
     return SCREENSHOT_TIMEOUT_MS
   }
   return ACTION_TIMEOUT_OVERRIDES_MS[action.type] ?? INTERCEPTOR_TIMEOUT_MS
 }
 
+// True for the browser-extension lane — the actions whose generic timeout
+// hint says "Ensure Chrome/Brave is open". Bridge/upload lanes carry
+// their own tailored hints and never need the context probe.
+export function isGenericBrowserAction(actionType: string): boolean {
+  return actionType !== "daemon_shutdown"
+    && !actionType.startsWith("macos_")
+    && actionType !== "file_upload"
+    && actionType !== "file_upload_chunk"
+}
+
+// When the daemon reports a live browser context at the moment a request times
+// out, "Ensure Chrome/Brave is open" is provably the wrong hint (issue #161) —
+// the usual culprit is an oversized/slow response, not a dead extension.
+export function timeoutMessageConnected(actionType: string, ms: number): string {
+  const seconds = Math.round(ms / 1000)
+  const base = `timeout: no response for '${actionType}' after ${seconds}s. ` +
+    `A browser context is connected, so the extension is reachable — this is usually an oversized or slow response, not a dead extension.`
+  if (actionType === "net_log") {
+    return `${base} Retry with a smaller --limit, use --since <ts> to fetch incrementally, or --filter to narrow.`
+  }
+  return `${base} Retry; if it persists, the tab may be busy or the response too large.`
+}
+
+// Minimal one-shot `{type:"contexts"}` probe with its own short deadline. The
+// daemon answers from its connection table without touching the extension, so
+// this cleanly separates "daemon up with a browser attached" from "nothing
+// listening". Never rejects — resolves null on any failure.
+export function probeContextCount(timeoutMs = 1500): Promise<number | null> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (v: number | null): void => { if (!done) { done = true; resolve(v) } }
+    const timer = setTimeout(() => finish(null), timeoutMs)
+    let buffer = Buffer.alloc(0)
+    const handlers: Bun.SocketHandler<undefined> = {
+      open(socket: Bun.Socket<undefined>) {
+        const payload = JSON.stringify({ id: crypto.randomUUID(), action: { type: "contexts" } })
+        const encoded = Buffer.from(payload, "utf-8")
+        const header = Buffer.alloc(4)
+        header.writeUInt32LE(encoded.byteLength, 0)
+        try { socket.write(Buffer.concat([header, encoded])) } catch { finish(null) }
+      },
+      data(socket: Bun.Socket<undefined>, raw: Buffer<ArrayBufferLike>) {
+        buffer = Buffer.concat([buffer, Buffer.from(raw)])
+        if (buffer.length >= 4) {
+          const msgLen = buffer.readUInt32LE(0)
+          if (msgLen > 0 && msgLen <= MAX_UPLOAD_FRAME_BYTES && buffer.length >= 4 + msgLen) {
+            clearTimeout(timer)
+            try {
+              const resp = JSON.parse(buffer.subarray(4, 4 + msgLen).toString("utf-8")) as DaemonResponse
+              const ids = resp.result?.success && Array.isArray(resp.result.data) ? resp.result.data as unknown[] : null
+              finish(ids ? ids.length : null)
+            } catch { finish(null) }
+            try { socket.end() } catch {}
+          }
+        }
+      },
+      close() { clearTimeout(timer); finish(null) },
+      connectError() { clearTimeout(timer); finish(null) },
+      error() { clearTimeout(timer); finish(null) },
+    }
+    const connect = IS_WIN
+      ? Bun.connect({ hostname: "127.0.0.1", port: IPC_PORT, socket: handlers })
+      : Bun.connect({ unix: SOCKET_PATH, socket: handlers })
+    void connect.catch(() => finish(null))
+  })
+}
+
 // Branch the timeout hint on `macos_*` so bridge commands don't get a
 // Chrome/Brave-extension troubleshooting hint.
 function timeoutMessage(actionType: string, ms: number): string {
   const seconds = Math.round(ms / 1000)
+  if (actionType === "daemon_shutdown") {
+    return `timeout: the daemon did not acknowledge shutdown within ${seconds}s.`
+  }
   if (actionType.startsWith("macos_")) {
     return `timeout: no response for '${actionType}' after ${seconds}s. The macOS bridge may be waiting on a TCC permission prompt (Microphone / Speech Recognition for listen/vad, Screen Recording for screenshot/capture/vision). Check System Settings → Privacy & Security.`
   }
@@ -82,15 +163,20 @@ export type DaemonResponse = {
 // `{id, action, tabId}` verbatim to the extension.
 let globalGroup: string | undefined
 let globalGroupColor: string | undefined
+let globalGroupSoft = false
 
-export function setGlobalGroup(group?: string, groupColor?: string): void {
+export function setGlobalGroup(group?: string, groupColor?: string, soft = false): void {
   globalGroup = group
   globalGroupColor = groupColor
+  globalGroupSoft = soft
 }
 
-function withGroup(action: Action): Action {
+/** Exported for tests (wire-shape assertion); production callers use sendCommand. */
+export function withGroup(action: Action): Action {
   if (!globalGroup || action.group !== undefined) return action
   const scoped: Action = { ...action, group: globalGroup }
+  // Automatic session scope is a preference, not an isolation boundary.
+  if (globalGroupSoft) scoped.groupSoft = true
   if (globalGroupColor && scoped.groupColor === undefined) scoped.groupColor = globalGroupColor
   return scoped
 }
@@ -127,7 +213,18 @@ export function sendCommand(rawAction: Action, tabId?: number, contextId?: strin
       if (!resolved) {
         resolved = true
         if (socketRef) try { socketRef.end() } catch {}
-        reject(new Error(timeoutMessage(action.type, timeoutMs)))
+        // Browser-lane timeouts: check whether the daemon still holds a live
+        // context before blaming the extension (issue #161). Other lanes keep
+        // their tailored hints without the probe round-trip.
+        if (isGenericBrowserAction(action.type)) {
+          void probeContextCount().then((count) => {
+            reject(new Error(count && count > 0
+              ? timeoutMessageConnected(action.type, timeoutMs)
+              : timeoutMessage(action.type, timeoutMs)))
+          })
+        } else {
+          reject(new Error(timeoutMessage(action.type, timeoutMs)))
+        }
       }
     }, timeoutMs)
 
@@ -195,7 +292,17 @@ export function sendCommandWs(rawAction: Action, tabId?: number, contextId?: str
 
     const timeoutMs = pickTimeoutForAction(action)
     const timer = setTimeout(() => {
-      reject(new Error(`timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
+      // Same context-awareness as the socket path: a live context at timeout
+      // means the extension is reachable and payload size is the likely cause.
+      if (isGenericBrowserAction(action.type)) {
+        void probeContextCount().then((count) => {
+          reject(new Error(count && count > 0
+            ? timeoutMessageConnected(action.type, timeoutMs)
+            : `timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
+        })
+      } else {
+        reject(new Error(`timeout: no response for '${action.type}' after ${timeoutMs / 1000}s via WebSocket.`))
+      }
     }, timeoutMs)
 
     const ws = new WebSocket(`ws://localhost:${WS_PORT}`)

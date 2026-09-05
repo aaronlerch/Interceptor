@@ -53,6 +53,15 @@ refresh_interceptor_daemon() {
     fi
   fi
 
+  # The pid file and socket describe a live process. Removing them while that
+  # process is still running (a daemon this script chose not to stop, or one
+  # the kill did not reach) strands every CLI command on "daemon failed to
+  # start": the next spawn loses the port to the survivor. Only a dead pid
+  # leaves files that are safe to remove.
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    log_install "daemon pid $pid is still running; leaving its runtime files in place"
+    return
+  fi
   rm -f "$DAEMON_PID_PATH" "$DAEMON_SOCKET_PATH" 2>/dev/null || true
 }
 
@@ -85,6 +94,21 @@ refresh_interceptor_bridge() {
       fi
     fi
   fi
+
+  # Installs before 0.23.24 could leave a second, unsupervised bridge running
+  # (the daemon's old recovery ladder `open`ed the bundle while launchd was
+  # throttled). It never appears in the pid file, so stop every remaining
+  # interceptor-bridge for this user before the supervised one is bootstrapped.
+  local leftover=""
+  for leftover in $(pgrep -u "$TARGET_UID" -x interceptor-bridge 2>/dev/null || true); do
+    log_install "stopping leftover interceptor-bridge pid=$leftover before LaunchAgent bootstrap"
+    kill "$leftover" 2>/dev/null || true
+  done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -u "$TARGET_UID" -x interceptor-bridge >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  pkill -KILL -u "$TARGET_UID" -x interceptor-bridge 2>/dev/null || true
 
   rm -f "$BRIDGE_PID_PATH" "$BRIDGE_SOCKET_PATH" 2>/dev/null || true
 }

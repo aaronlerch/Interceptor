@@ -3,6 +3,7 @@ import {
   GROUP_LABEL_RE, ensureNamedGroup, addTabToNamedGroup, labelForGroupId,
   namedGroups, hydrateNamedGroups, groupTitleFor, hasTabGroupApi
 } from "../tab-group"
+import { resolveTabLifecycle, policyMayDecideReuse } from "../tab-lifecycle"
 import { waitForTabLoad } from "../content-bridge"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
@@ -81,7 +82,22 @@ export async function handleTabActions(
       // keeps one agent's --reuse from hijacking another agent's tab
       // (per-agent isolation). Falls back to creating a new tab if the group is empty
       // or the candidate tab disappeared between query and update.
-      if (action.reuse) {
+      //
+      // Policy default: `open` marks reuse-undecided calls with
+      // `reusePolicy` and the resolved tabLifecycle policy decides — but ONLY
+      // for named groups. In the shared default group "most recent tab" can be
+      // a sibling agent's, so the policy never engages there; explicit --reuse
+      // (action.reuse === true) still works everywhere, --no-reuse
+      // (action.reuse === false) blocks both paths.
+      let reuseWanted = action.reuse === true
+      if (!reuseWanted && policyMayDecideReuse(action)) {
+        try {
+          reuseWanted = (await resolveTabLifecycle()).policy.reuse
+        } catch {
+          reuseWanted = false
+        }
+      }
+      if (reuseWanted) {
         const groupId = group ? await ensureNamedGroup(group) : await ensureInterceptorGroup()
         if (groupId !== -1) {
           const groupTabs = await chrome.tabs.query({ groupId })
@@ -101,10 +117,21 @@ export async function handleTabActions(
                 // the reused tab on demand without disturbing the user's
                 // focus on every routine reuse call.
                 const reuseActivate = (action.active as boolean | undefined) === true
-                const updateProps: chrome.tabs.UpdateProperties = { url: targetUrl }
-                if (reuseActivate) updateProps.active = true
-                const updated = await chrome.tabs.update(candidate.id, updateProps)
-                await waitForTabLoad(candidate.id)
+                // `websearch` needs a managed destination before the browser's
+                // provider API navigates it. In prepare-only mode, reuse the
+                // candidate in place rather than blanking it first; activation
+                // remains the same explicit opt-in as ordinary tab creation.
+                let updated: chrome.tabs.Tab | undefined = candidate
+                if (action.prepareOnly === true) {
+                  updated = reuseActivate
+                    ? await chrome.tabs.update(candidate.id, { active: true })
+                    : await chrome.tabs.get(candidate.id)
+                } else {
+                  const updateProps: chrome.tabs.UpdateProperties = { url: targetUrl }
+                  if (reuseActivate) updateProps.active = true
+                  updated = await chrome.tabs.update(candidate.id, updateProps)
+                  await waitForTabLoad(candidate.id)
+                }
                 // Pin the reused tab as the auto-target for subsequent commands.
                 // Mirrors the new-tab path below: every successful tab_create
                 // — whether new or reused — must update the (per-group)
@@ -142,6 +169,11 @@ export async function handleTabActions(
         const groupId = group
           ? await addTabToNamedGroup(newTab.id, group, action.groupColor)
           : await addTabToInterceptorGroup(newTab.id)
+        // Chrome may deactivate a newly-created active tab while moving it
+        // into a tab group. Reassert the caller's explicit activation only
+        // after group placement completes. This changes the active tab inside
+        // the existing browser window but does not focus the browser window.
+        if (shouldActivate) await chrome.tabs.update(newTab.id, { active: true })
         // Pin the newly-created tab as the auto-target for subsequent commands
         // so a fresh CLI invocation (no --tab) routes to this tab instead of a
         // stale activeTabId or whatever Chrome reports as "active in currentWindow"
@@ -202,7 +234,7 @@ export async function handleTabActions(
       }
       await ensureInterceptorGroup()
       await hydrateNamedGroups()
-      const live = await chrome.tabGroups.query({})
+      const live = await chrome.tabGroups.query({}).catch(() => []) // windowless profile → no groups (issue #162)
       // Re-adopt named groups the registry lost (e.g. browser restart restored
       // the window): exact match on the brand-composed `<brand>-<label>` title.
       // ponytail: current brand prefix only; a pre-rebrand title is re-adopted on the next brand change

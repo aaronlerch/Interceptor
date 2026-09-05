@@ -8,7 +8,8 @@ Full surface for `interceptor` (no prefix). Reference doc — load when you need
 interceptor open <url>                             # Open + wait + tree + text
 interceptor open <url> --full | --tree-only | --text-only
 interceptor open <url> --timeout 15000
-interceptor open <url> --reuse                     # Navigate latest Interceptor-group tab instead of creating
+interceptor open <url> --reuse                     # Navigate latest managed tab instead of creating
+interceptor open <url> --no-reuse                  # Force a new tab (overrides the named-group reuse default)
 
 interceptor read                                   # Current page tree + text
 interceptor read e12 [--tree-only | --text-only]   # Scoped sub-tree
@@ -18,9 +19,16 @@ interceptor read --include-frames                  # Descend into iframes
 interceptor read e2_7 --include-frames --tree-only # Framed ref
 interceptor text --markdown                        # Standalone markdown dump
 interceptor text e12 --markdown                    # Element rendered as markdown
+
+interceptor websearch "<query>"                    # Configured default provider → managed background tab + tree/text
+interceptor websearch "<query>" --text-only --full
+interceptor websearch "<query>" --reuse             # Reuse the latest managed tab
+interceptor websearch "<query>" --no-reuse          # Force a new managed tab
+interceptor websearch "<query>" --activate          # Explicitly foreground the destination
+interceptor websearch "<query>" --no-wait           # Return after provider dispatch
 ```
 
-`--reuse` for long automation — without it, dead tabs accumulate. Reading strategy: start with `read`/`open`, not a screenshot. Re-read after every mutating action.
+In a **named group**, including an automatic session group, `open` reuses that group's most-recent tab **by default** (address-bar semantics; policy set in the extension popup) — pass `--no-reuse` to keep the current page and open another. Shared-default `open` and `tab new` create by default; `--reuse` opts in per call. Reading strategy: start with `read`/`open`, not a screenshot. Re-read after every mutating action.
 
 **`--markdown` is a SWAP for `--text-only`, not an extra command.** It renders the same content with structure preserved (`<strong>` → `**bold**`, `<h1-6>` → `#`/`##`/..., lists, tables). Use it *instead of* plain `--text-only` when the task asks for the "exact text" / "exact summary" of a section, or the page has visually emphasized text near plain descriptive copy — markdown lets you tell the real answer from decoy or instructional prose. **Never run both modes** — pick one and commit. Skip markdown for raw fact lookups (single date, name, number) where flat text is enough.
 
@@ -29,6 +37,10 @@ interceptor text e12 --markdown                    # Element rendered as markdow
 ```bash
 interceptor find "Submit"
 interceptor find "Email" --role textbox
+interceptor find "contract clause" --text-only     # Complete rendered-text snapshot; bounded snippets
+interceptor find "Submit" --elements-only          # Accessible controls + actionable refs only
+interceptor read --include-frames                   # Populate child-frame element refs
+interceptor find "privacy" --include-frames        # Frame IDs + framed refs such as e2_7
 
 interceptor act e7                                 # Click + read after
 interceptor act e9 "example user"                  # Type into field
@@ -39,15 +51,18 @@ interceptor act e20 --no-read
 
 **After `act --trusted` reports success, read the page once and commit.** Do not re-execute the same click via a different surface (`interceptor macos click ...`, manual coordinates, etc.) to "verify" — the page's own state is the verification, and the trusted event is the same trusted event regardless of which surface posted it. Escalating to a different surface to redo a successful browser action is the most common way to blow the command budget. `interceptor macos` remains the right surface for native-app tasks; this rule only constrains within-task redo behavior on the browser.
 
-`find` uses semantic + text matching — faster than scanning a big tree. Low-level actions when `act` is not enough:
+Unqualified `find` returns two typed current-page sections: literal case-insensitive matches from the complete `document.body.innerText` snapshot, and semantic accessible-element matches. It does not navigate, scroll, focus, or highlight. `--limit` caps returned matches per category while preserving total counts. Low-level actions when `act` is not enough:
 
 ```bash
 interceptor click e7
+interceptor click --selector "button span" --nth 4   # CSS-selector click; 0-based --nth matches query output; quote selectors with spaces
 interceptor type e9 "..."
 interceptor keys "Meta+K"
 interceptor select e12 "Option label"
 interceptor hover e3 | drag e4 e8 | dblclick e5 | rightclick e5
 ```
+
+On pages whose a11y tree comes back empty (some SPAs render nothing tree-visible), `interceptor query "<css>"` still finds elements — and each result carries a clickable `e<ref>`, so every ref verb (`click`, `type`, `check`, …) works on what query found. A navigating click resolves as `{navigated: true, url}` rather than an error; a selector click that produces no DOM change auto-escalates to an OS-level click when the OS transport is available.
 
 ## Inspection + Network
 
@@ -61,7 +76,7 @@ Passive network (preferred over CDP):
 
 ```bash
 interceptor net log [--filter <p>] [--since 30s] [--limit 100]
-interceptor net log --format json|har|pcapng [--out <path>]
+interceptor net log --format json|har|pcapng [--out <path>] [--redact-auth]   # file is 0600; headers kept unless --redact-auth
 interceptor net headers [--filter <p>]
 interceptor net clear
 ```
@@ -132,6 +147,8 @@ interceptor canvas log [N] [--kind fillText]
 interceptor canvas objects [N] [--kind text]
 ```
 
+`log` / `objects` / `status` read the observer that runs in the page's own MAIN-world realm, so they reflect what the page actually drew. Pass `N` (a `canvas list` index) to scope to one canvas; omit it for all canvases.
+
 Pixels only when observer data is insufficient:
 
 ```bash
@@ -152,7 +169,8 @@ For Canva, Google Docs/Slides/Sheets. Run `scene profile` first.
 interceptor scene profile [--verbose]
 interceptor scene list [--type text]
 interceptor scene hit 400 300
-interceptor scene click | dblclick | select | cursor-to <scene-ref>
+interceptor scene click <scene-ref> [--trusted]   # --trusted posts OS-level input for isTrusted-gated canvases
+interceptor scene dblclick | select | cursor-to <scene-ref>
 interceptor scene selected
 interceptor scene text <scene-ref> [--with-html]
 interceptor scene insert "New text"
@@ -176,11 +194,14 @@ interceptor wait-stable
 interceptor tabs
 interceptor tab new <url>             # Background tab in the interceptor group
 interceptor tab new <url> --activate  # Explicit foregrounding
+interceptor tab new <url> --reuse     # Navigate the group's most-recent tab instead of creating
 interceptor tab switch <tab-id>
 interceptor tab close <tab-id>
 
 interceptor open <url> --group <label>   # Open into a named per-agent group "<brand>-<label>" (created on first use)
-interceptor read --group <label>         # Any command scopes to that group's tabs; env INTERCEPTOR_GROUP is the fallback
+interceptor read --group <label>         # Any command scopes to that group's tabs; env INTERCEPTOR_GROUP is the fallback.
+                                         # No explicit scope: supported agent shells get a soft session group (s-<hash16>).
+interceptor open <url> --shared-group     # Suppress session scope; use the shared default Interceptor group.
 interceptor group list                   # All live tab groups: label, title, color, tab count
 interceptor group close <label>          # Atomically close every tab in a named group (other groups untouched)
 interceptor window list
@@ -193,7 +214,7 @@ interceptor window resize --state maximized               # Don't combine maximi
 
 Use `--tab <id>` for a specific tab; `--any-tab` only when explicitly authorized.
 
-When several agents share one browser context, give each its own `--group <label>` (or set `INTERCEPTOR_GROUP` once per agent): every command then resolves and acts only within that agent's tab group, `--reuse` reuses only that group's tabs, and cross-group targets are rejected. Labels match `[A-Za-z0-9_-]{1,32}`; pick a color with `--group-color <grey|blue|red|yellow|green|pink|purple|cyan|orange>` on first open. Close your group when the job is done.
+Solo agent work needs no label: `INTERCEPTOR_SESSION_ID` is the neutral session contract, and verified Maestro, Claude Code, and Codex variables are detected automatically. Interceptor hashes the full id into `s-<hash16>` and sends only that opaque label. The scope is SOFT: it supplies tab reuse and idle cleanup, but an empty session group can fall back to the active managed tab. Concurrent lanes often share one host session id, so each lane needs its own `--group lane-<n>` or `INTERCEPTOR_SESSION_ID`. An explicit `--group <label>` or non-empty `INTERCEPTOR_GROUP` provides HARD isolation by default: resolution stays in the named group and cross-group targets are rejected unless `--any-tab` is explicitly authorized. `--shared-group` or empty `INTERCEPTOR_GROUP=` suppresses session scope but still uses the shared default Interceptor group. Labels match `[A-Za-z0-9_-]{1,32}`. Pick a color with `--group-color <grey|blue|red|yellow|green|pink|purple|cyan|orange>` on first open. Close your group when the job is done, then use `group list` as proof. The extension auto-closes groups after 10 minutes without tab activity by default; metadata polls do not keep them alive.
 
 ## Cookies / Storage / History / Bookmarks
 

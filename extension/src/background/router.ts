@@ -74,12 +74,13 @@ const DOWNLOAD_ACTIONS = new Set([
 ])
 const SESSION_ACTIONS = new Set(["session_list", "session_restore"])
 const NOTIFICATION_ACTIONS = new Set(["notification_create", "notification_clear"])
+const SEARCH_ACTIONS = new Set(["search_capability", "search_query"])
 const BROWSING_DATA_ACTIONS = new Set(["browsing_data_remove"])
 const HEADER_ACTIONS = new Set(["headers_modify"])
 const EVALUATE_ACTIONS = new Set(["evaluate"])
 const BINARY_SINK_ACTIONS = new Set(["binary_sink_save"])
 const STYLE_ACTIONS = new Set(["style_inject", "style_remove"])
-const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"])
+const FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree", "frames_find"])
 const META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group"])
 const PASSIVE_NET_ACTIONS = new Set([
   "net_log", "net_clear", "net_headers", "sse_log", "sse_streams", "sse_chunk",
@@ -113,7 +114,7 @@ export async function routeAction(
   if (DOWNLOAD_ACTIONS.has(action.type)) return handleDownloadActions(action, tabId)
   if (SESSION_ACTIONS.has(action.type)) return handleSessionActions(action, tabId)
   if (NOTIFICATION_ACTIONS.has(action.type)) return handleNotificationActions(action, tabId)
-  if (action.type === "search_query") return handleSearchActions(action, tabId)
+  if (SEARCH_ACTIONS.has(action.type)) return handleSearchActions(action, tabId)
   if (BROWSING_DATA_ACTIONS.has(action.type)) return handleBrowsingDataActions(action, tabId)
   if (HEADER_ACTIONS.has(action.type)) return handleHeaderActions(action, tabId)
   if (EVALUATE_ACTIONS.has(action.type)) return handleEvaluateActions(action, tabId)
@@ -129,7 +130,7 @@ export async function routeAction(
   // Default: forward to content script
   const contentResult = await sendToContentScript(
     tabId, action, action.frameId as number | undefined
-  ) as { success: boolean; error?: string; data?: unknown; warning?: string }
+  ) as { success: boolean; error?: string; data?: unknown; warning?: string; refId?: string }
 
   const shouldSceneEscalate =
     action.type === "scene_click" &&
@@ -137,8 +138,11 @@ export async function routeAction(
     ((action.os === true) || contentResult.warning?.includes("no DOM change")) &&
     activeTransport !== "none"
 
+  // click_selector escalates through the same path: the content handler
+  // reports the clicked element's refId, which os_click resolves to screen
+  // coordinates exactly like a ref-targeted click.
   const shouldClickEscalate =
-    action.type === "click" &&
+    (action.type === "click" || action.type === "click_selector") &&
     contentResult.success &&
     contentResult.warning?.includes("no DOM change") &&
     activeTransport !== "none"
@@ -151,6 +155,7 @@ export async function routeAction(
     const osResult = await handleOsInputActions({
       ...action,
       type: "os_click",
+      ref: contentResult.refId ?? action.ref,
       x: resolvedAt?.x ?? action.x,
       y: resolvedAt?.y ?? action.y
     }, tabId)
@@ -177,7 +182,10 @@ export async function routeAction(
           reason: action.os === true
             ? "trusted scene click failed"
             : "synthetic produced no DOM change, os_click failed",
-          suggestion: "verify element is interactive and Chrome window is visible"
+          os_error: osResult.error,
+          suggestion: (typeof osResult.data === "object" && osResult.data &&
+            (osResult.data as { hint?: string }).hint) ||
+            "verify element is interactive and Chrome window is visible"
         }
       }
     }

@@ -1206,6 +1206,16 @@ chrome.runtime.onMessage.addListener((msg) => {
   } catch {}
 });
 
+// extension/src/content/sensitive.ts
+var sensitiveElements = new WeakSet;
+function markSensitive(el) {
+  sensitiveElements.add(el);
+}
+function isSensitive(el) {
+  return sensitiveElements.has(el);
+}
+var SECURE_MASK = "***SECURE***";
+
 // extension/src/content/monitor.ts
 init_ref_registry();
 init_a11y_tree();
@@ -1283,6 +1293,8 @@ function describeTarget(target) {
   return out;
 }
 function isPasswordLike(el) {
+  if (isSensitive(el))
+    return true;
   if (!(el instanceof HTMLInputElement))
     return false;
   const type = (el.type || "").toLowerCase();
@@ -1297,6 +1309,8 @@ function isPasswordLike(el) {
   return false;
 }
 function maskedValue(el) {
+  if (isSensitive(el))
+    return SECURE_MASK;
   const len = (el.value || "").length;
   return `***${len}***`;
 }
@@ -1369,7 +1383,9 @@ function handleInput(e) {
       return;
     const info = describeTarget(target);
     let v = "";
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    if (isSensitive(target)) {
+      v = SECURE_MASK;
+    } else if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
       if (target instanceof HTMLInputElement && isPasswordLike(target)) {
         v = maskedValue(target);
       } else {
@@ -1396,7 +1412,9 @@ function handleChange(e) {
       return;
     const info = describeTarget(target);
     let v = "";
-    if (target instanceof HTMLInputElement) {
+    if (isSensitive(target)) {
+      v = SECURE_MASK;
+    } else if (target instanceof HTMLInputElement) {
       if (isPasswordLike(target)) {
         v = maskedValue(target);
       } else if (target.type === "checkbox" || target.type === "radio") {
@@ -1863,6 +1881,34 @@ async function handleClick(action) {
   }
   return { success: true, data: clickMsg };
 }
+async function handleClickSelector(action) {
+  const selector = String(action.selector ?? "");
+  if (!selector)
+    return { success: false, error: "click_selector: no selector given" };
+  let matches;
+  try {
+    matches = document.querySelectorAll(selector);
+  } catch {
+    return { success: false, error: `click_selector: invalid CSS selector ${JSON.stringify(selector)}` };
+  }
+  const nth = typeof action.nth === "number" ? action.nth : 0;
+  const el = matches[nth];
+  if (!el) {
+    return {
+      success: false,
+      error: `click_selector: ${selector} matched ${matches.length} element(s); no index ${nth}`
+    };
+  }
+  scrollIntoViewIfNeeded(el);
+  dispatchClickSequence(el, action.x, action.y);
+  const clickedRef = getOrAssignRef(el);
+  const mutated = await waitForMutation(200);
+  const msg = `clicked ${clickedRef} — ${selector}[${nth}] of ${matches.length}`;
+  if (!mutated) {
+    return { success: true, data: msg, refId: clickedRef, warning: `no DOM change after click — if the site requires trusted events, try: interceptor click --trusted ${clickedRef}` };
+  }
+  return { success: true, data: msg, refId: clickedRef };
+}
 async function handleDblclick(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
@@ -1933,6 +1979,8 @@ async function handleInputText(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
     return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+  if (action.sensitive === true)
+    markSensitive(el);
   el.focus();
   const text = action.text;
   const tag = el.tagName;
@@ -1967,7 +2015,7 @@ async function handleInputText(action) {
   if (shadowRoot) {
     const innerInput = shadowRoot.querySelector("input, textarea, [contenteditable='true']");
     if (innerInput) {
-      return handleInputText({ type: "input_text", ref: getOrAssignRef(innerInput), text, clear: action.clear });
+      return handleInputText({ type: "input_text", ref: getOrAssignRef(innerInput), text, clear: action.clear, sensitive: action.sensitive });
     }
   }
   const role = el.getAttribute("role");
@@ -2719,6 +2767,7 @@ async function handleExtractHtml(action) {
 
 // extension/src/content/data/query.ts
 init_input_simulation();
+init_ref_registry();
 async function handleQuery(action) {
   const selector = action.selector;
   const els = document.querySelectorAll(selector);
@@ -2728,6 +2777,7 @@ async function handleQuery(action) {
       count: els.length,
       elements: Array.from(els).slice(0, 20).map((el, i) => ({
         index: i,
+        ref: getOrAssignRef(el),
         tag: el.tagName.toLowerCase(),
         text: (el.textContent || "").trim().slice(0, 80),
         id: el.id || undefined,
@@ -3028,17 +3078,58 @@ init_ref_registry();
 init_element_discovery();
 init_a11y_tree();
 init_input_simulation();
-async function handleFindElement(action) {
-  const query = (action.query || "").toLowerCase();
-  const targetRole = (action.role || "").toLowerCase();
-  const limit = action.limit || 10;
+function findRenderedText(renderedText, rawQuery, limit = 10, contextChars = 80) {
+  const query = rawQuery.trim();
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 10;
+  const matches = [];
+  let total = 0;
+  if (query.length > 0) {
+    const haystack = renderedText.toLowerCase();
+    const needle = query.toLowerCase();
+    let from = 0;
+    while (from <= haystack.length - needle.length) {
+      const start = haystack.indexOf(needle, from);
+      if (start === -1)
+        break;
+      const end = start + query.length;
+      total++;
+      if (matches.length < boundedLimit) {
+        const snippetStart = Math.max(0, start - contextChars);
+        const snippetEnd = Math.min(renderedText.length, end + contextChars);
+        const prefix = snippetStart > 0 ? "…" : "";
+        const suffix = snippetEnd < renderedText.length ? "…" : "";
+        matches.push({
+          start,
+          end,
+          matchedText: renderedText.slice(start, end),
+          snippet: `${prefix}${renderedText.slice(snippetStart, snippetEnd).replace(/\s+/g, " ").trim()}${suffix}`
+        });
+      }
+      from = end;
+    }
+  }
+  return {
+    total,
+    returned: matches.length,
+    truncated: total > matches.length,
+    scannedCharacters: renderedText.length,
+    scanTruncated: false,
+    matches
+  };
+}
+function findAccessibleElements(rawQuery, rawRole, limit = 10) {
+  const query = rawQuery.trim().toLowerCase();
+  const targetRole = rawRole.trim().toLowerCase();
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 10;
   const results = [];
   for (const [refId, weakRef] of refRegistry) {
     const el = weakRef.deref();
     if (!el || !el.isConnected || !isVisible(el))
       continue;
-    const role = getEffectiveRole(el).toLowerCase();
-    const name = getAccessibleName(el).toLowerCase();
+    const effectiveRole = getEffectiveRole(el);
+    const accessibleName = getAccessibleName(el);
+    const role = effectiveRole.toLowerCase();
+    const name = accessibleName.toLowerCase();
     let score = 0;
     if (targetRole && role !== targetRole)
       continue;
@@ -3060,10 +3151,28 @@ async function handleFindElement(action) {
         score += 30;
     }
     if (score > 0)
-      results.push({ refId, role: getEffectiveRole(el), name: getAccessibleName(el), score });
+      results.push({ refId, role: effectiveRole, name: accessibleName, score });
   }
   results.sort((a, b) => b.score - a.score);
-  return { success: true, data: results.slice(0, limit) };
+  const matches = results.slice(0, boundedLimit);
+  return { total: results.length, returned: matches.length, truncated: results.length > matches.length, matches };
+}
+async function handleFindElement(action) {
+  const query = String(action.query || "").trim();
+  if (!query)
+    return { success: false, error: "find requires a non-empty query" };
+  const role = String(action.role || "");
+  const limit = typeof action.limit === "number" ? action.limit : 10;
+  const requestedMode = action.mode === "text" || action.mode === "elements" ? action.mode : "hybrid";
+  const mode = role ? "elements" : requestedMode;
+  const data = { query, mode };
+  if (mode !== "elements") {
+    data.text = findRenderedText(document.body?.innerText || "", query, limit);
+  }
+  if (mode !== "text") {
+    data.elements = findAccessibleElements(query, role, limit);
+  }
+  return { success: true, data };
 }
 async function handleSemanticResolve(action) {
   const match = findBestMatch(action.name, action.role);
@@ -3083,7 +3192,7 @@ async function handleFindAndType(action) {
   const match = findBestMatch(action.name, action.role, action.text);
   if (!match)
     return { success: false, error: "no matching element found (score < 30)" };
-  const typeResult = await handleInputText({ type: "input_text", ref: match.refId, text: action.inputText, clear: action.clear });
+  const typeResult = await handleInputText({ type: "input_text", ref: match.refId, text: action.inputText, clear: action.clear, sensitive: action.sensitive });
   return { success: true, data: { matched: { ref: match.refId, role: match.role, name: match.name, score: match.score }, actionResult: typeResult } };
 }
 async function handleFindAndCheck(action) {
@@ -4724,6 +4833,8 @@ async function executeAction(action) {
         return getPageState(action.full);
       case "click":
         return handleClick(action);
+      case "click_selector":
+        return handleClickSelector(action);
       case "dblclick":
         return handleDblclick(action);
       case "rightclick":

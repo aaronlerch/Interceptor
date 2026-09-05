@@ -13,6 +13,14 @@ interceptor macos act <ref> "hello"            # AX value-set (no focus change)
 interceptor macos inspect                      # Tree + apps + frontmost info
 ```
 
+### Self-update rules
+
+- Run `interceptor update`. Inspect `outcome`, `selectedVersion`, and `phase`.
+- If `outcome` is `checking`, run `interceptor update status`.
+- If `outcome` is `update_available`, run `interceptor macos read --app interceptor-bridge`, then act on **Install Update**.
+- After download, read the changed alert for a fresh ref, then act on **Install and Relaunch**.
+- When macOS requests administrator authentication and the operator stored a secret for it, fill it: `interceptor macos authdialog status` to see the prompt, then `interceptor macos authdialog fill --secret <name> --submit`. With no stored secret, stop and tell the user which secret to register.
+
 ## Apps + Windows
 
 ```bash
@@ -65,6 +73,29 @@ OS-level escalation (for HID-source-state checks; follows frontmost):
 interceptor macos type "..." --os
 interceptor macos keys "..." --os
 ```
+
+## Secret vault + admin prompts
+
+Credentials live in the macOS keychain and are delivered by name. The daemon resolves the value after logging the action (name only), checks the secret's target allowlist against the real target, and hands the value to one delivery leg. Values never appear on argv, in logs, events, monitor transcripts, MCP results, or diagnose output.
+
+```bash
+interceptor macos secret register <name> [--gate none|touchid|biometry] [--target sudo|macos:<bundleId>|browser:<host>|ios|any]... [--reuse <s>]
+                                                    # native box: secure field + confirm; default gate none (unattended)
+interceptor macos secret set <name> --stdin         # headless: value from stdin (hidden TTY prompt without --stdin)
+interceptor macos secret list                       # names, gates, targets, release counts
+interceptor macos secret status                     # backend + Touch ID availability
+interceptor macos secret rm <name>
+interceptor macos secret unlock <name> --for 30m    # one OS prompt now; releases inside the window skip the prompt
+interceptor macos secret lock [<name>]
+interceptor macos secret reveal <name>              # human read-back: always OS-gated, TTY only, refused under --json / MCP
+
+interceptor macos type [<ref>] --secret <name> [--app X]     # deliver into a native field (target: macos:<bundleId>)
+interceptor macos sudo --secret <name> [--keep] -- installer -pkg X.pkg -target /   # sudo -S stdin (target: sudo)
+interceptor macos authdialog status                 # is a SecurityAgent prompt up? shape: touchid | password
+interceptor macos authdialog fill --secret <name> [--submit]  # presses "Use Password" on a Touch ID sheet, types, submits
+```
+
+Rules: `--secret` and literal text are mutually exclusive. Never ask the user to paste a password into chat; ask them to run `secret register`. A `target_denied` error means the secret's allowlist does not include this app or host; do not work around it by retargeting.
 
 ## Capture + Screenshot
 
@@ -181,12 +212,15 @@ See `permissions.md` for response shape and worked examples.
 ```bash
 interceptor macos monitor start --instruction "..."
 interceptor macos monitor status | list | tail <sid> | tail <sid> --raw
-interceptor macos monitor pause | resume | stop <sid>
+interceptor macos monitor pause | resume | stop [--sid <sid>]
+interceptor macos monitor stop --task <taskId|name>          # epilogue: snapshot + transcript + quality grade
 interceptor macos monitor export <sid>                       # text default
 interceptor macos monitor export <sid> --plan | --with-bodies | --json
 ```
 
 Scope: `--app`, `--apps a,b`, `--all-apps`. Optional sources: `--include clipboard|files|network|log|notifications|speech`, `--frames N`, `--vision-text`, `--watch-path <p>`, `--log-predicate "<NSPredicate>"`.
+
+`--include speech` emits throttled partials plus utterance-final `speech_segment` events (`isFinal: true`, with text) at utterance boundaries. Task verbs (`interceptor monitor task snapshot|quality|diagnose`) accept the task name or id; `quality` synthesizes a missing transcript before grading. Prefer `stop --task` over `stop --sid` — only the task stop runs the epilogue.
 
 ## Overlays + Container + AppIntent
 

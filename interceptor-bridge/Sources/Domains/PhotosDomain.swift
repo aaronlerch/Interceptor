@@ -309,6 +309,12 @@ final class PhotosDomain: DomainHandler, @unchecked Sendable {
         guard let id = action["id"] as? String, let outPath = action["out"] as? String else {
             completion(WireFormat.error("photos.export: <id> and --out required")); return
         }
+        // Validated up front, before the asset fetch, so an unsupported value reports itself
+        // rather than hiding behind a "not found" from an unrelated bad id.
+        let wantFormat = (action["format"] as? String)?.lowercased()
+        if let want = wantFormat, want != "jpeg", want != "png" {
+            completion(WireFormat.error("photos.export: --format must be jpeg or png (got \(want))")); return
+        }
         let result = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
         guard let a = result.firstObject else { completion(WireFormat.error("photos.export: not found")); return }
         let outURL = URL(fileURLWithPath: (outPath as NSString).expandingTildeInPath)
@@ -319,17 +325,25 @@ final class PhotosDomain: DomainHandler, @unchecked Sendable {
         opts.isNetworkAccessAllowed = true
 
         if let sizePx = action["size"] as? Int, sizePx > 0 {
+            // --format composes with --size: encode the resized image as PNG when asked,
+            // else JPEG (the long-standing default). Otherwise --size + --format png
+            // writes JPEG bytes under a .png name — the same trusts-the-extension
+            // breakage the no-size branch below exists to prevent.
+            let usePNG = wantFormat == "png"
             let target = CGSize(width: sizePx, height: sizePx)
             manager.requestImage(for: a, targetSize: target, contentMode: .aspectFit, options: opts) { image, _ in
                 guard let image = image,
                       let tiff = image.tiffRepresentation,
                       let rep = NSBitmapImageRep(data: tiff),
-                      let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+                      let data = rep.representation(
+                        using: usePNG ? .png : .jpeg,
+                        properties: usePNG ? [:] : [.compressionFactor: 0.85])
                 else { completion(WireFormat.error("photos.export: encode failed")); return }
                 do {
                     try data.write(to: outURL)
                     completion(WireFormat.success([
-                        "ok": true, "assetId": id, "filePath": outURL.path, "uti": "public.jpeg",
+                        "ok": true, "assetId": id, "filePath": outURL.path,
+                        "uti": usePNG ? "public.png" : "public.jpeg",
                         "bytes": data.count,
                         "originalWidth": a.pixelWidth, "originalHeight": a.pixelHeight,
                         "exportWidth": Int(image.size.width), "exportHeight": Int(image.size.height),
@@ -341,11 +355,32 @@ final class PhotosDomain: DomainHandler, @unchecked Sendable {
         } else {
             manager.requestImageDataAndOrientation(for: a, options: opts) { data, uti, _, _ in
                 guard let data = data else { completion(WireFormat.error("photos.export: no data")); return }
+                // Without --size this hands back the asset's original bytes, which for most
+                // iPhone captures is HEIC. --format lets a caller ask for something portable
+                // without also having to resize; previously it was accepted and discarded,
+                // so `--format jpeg --out shot.jpg` wrote a HEIC under a .jpg name and every
+                // downstream consumer that trusts the extension broke confusingly.
+                var outData = data
+                var outUTI: String? = uti
+                if let want = wantFormat, want == "jpeg" || want == "png" {
+                    let targetUTI = want == "jpeg" ? "public.jpeg" : "public.png"
+                    if uti != targetUTI {
+                        guard let rep = NSBitmapImageRep(data: data),
+                              let converted = rep.representation(
+                                using: want == "jpeg" ? .jpeg : .png,
+                                properties: want == "jpeg" ? [.compressionFactor: 0.85] : [:])
+                        else {
+                            completion(WireFormat.error("photos.export: transcode to \(want) failed")); return
+                        }
+                        outData = converted
+                        outUTI = targetUTI
+                    }
+                }
                 do {
-                    try data.write(to: outURL)
+                    try outData.write(to: outURL)
                     completion(WireFormat.success([
                         "ok": true, "assetId": id, "filePath": outURL.path,
-                        "uti": uti as Any? ?? NSNull(), "bytes": data.count,
+                        "uti": outUTI as Any? ?? NSNull(), "bytes": outData.count,
                         "originalWidth": a.pixelWidth, "originalHeight": a.pixelHeight,
                     ]))
                 } catch {
@@ -409,8 +444,13 @@ final class PhotosDomain: DomainHandler, @unchecked Sendable {
         opts.isSynchronous = false
         opts.deliveryMode = .highQualityFormat
         opts.isNetworkAccessAllowed = true
-        let save = (action["save"] as? Bool) ?? false
         let outRequested = action["out"] as? String
+        // Passing --out is itself a request to write a file. Requiring --save alongside it
+        // meant `thumbnail <id> --out shot.jpg` wrote nothing and instead returned the image
+        // inline as a base64 dataUrl, which for an agent caller is a large payload delivered
+        // at exactly the moment it asked for a path instead. Backward compatible: --out
+        // without --save previously had no effect, so nothing can depend on the old behavior.
+        let save = (action["save"] as? Bool) ?? (outRequested != nil)
         PHImageManager.default().requestImage(for: a, targetSize: target, contentMode: .aspectFit, options: opts) { image, _ in
             guard let image = image else { completion(WireFormat.error("photos.thumbnail: no image")); return }
             guard let tiff = image.tiffRepresentation,

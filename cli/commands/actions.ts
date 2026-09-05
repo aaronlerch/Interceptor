@@ -19,12 +19,45 @@ function parseAt(filtered: string[]): { x?: number; y?: number } {
   return {}
 }
 
-export function parseActionsCommand(filtered: string[]): Action {
+export function parseActionsCommand(filtered: string[], positionalCount?: number): Action {
   const cmd = filtered[0]
 
   switch (cmd) {
     case "click": {
       const useOs = hasTrustedFlag(filtered)
+      // Click by CSS SELECTOR.
+      //
+      // `click` resolved only a11y refs/indices, while `query` locates elements
+      // by selector and returns no ref. On any page whose a11y tree comes back
+      // empty the tool could therefore SEE an element and be unable to click
+      // it — the two halves never met. Observed on perplexity.ai answer pages,
+      // where the tree is empty while `query "button span"` finds the control
+      // exactly.
+      const selIdx = filtered.indexOf("--selector")
+      const nthIdx = filtered.indexOf("--nth")
+      if (selIdx !== -1) {
+        const selector = filtered[selIdx + 1]
+        // A missing operand leaves the next token undefined or another flag —
+        // erroring beats falling through to parseElementTarget("--selector").
+        if (!selector || selector.startsWith("--")) {
+          console.error('error: --selector requires a CSS selector value. Quote selectors containing spaces, e.g. --selector "button span"')
+          process.exit(1)
+        }
+        let nth = 0
+        if (nthIdx !== -1) {
+          const rawNth = filtered[nthIdx + 1]
+          nth = Number(rawNth)
+          if (!Number.isInteger(nth) || nth < 0) {
+            console.error(`error: --nth requires a non-negative integer (0-based, matching query output), got '${rawNth ?? ""}'`)
+            process.exit(1)
+          }
+        }
+        return { type: "click_selector", selector, nth, ...parseAt(filtered) }
+      }
+      if (nthIdx !== -1) {
+        console.error("error: --nth requires --selector")
+        process.exit(1)
+      }
       const target = parseElementTarget(filtered[1])
       const at = parseAt(filtered)
       if (useOs) {
@@ -40,7 +73,26 @@ export function parseActionsCommand(filtered: string[]): Action {
       const append = filtered.includes("--append")
       const useOs = hasTrustedFlag(filtered)
       const target = parseElementTarget(filtered[1])
-      const textArgs = filtered.slice(2).filter(a => a !== "--append" && !TRUSTED_FLAG_VALUES.includes(a))
+      // Normalized argv is [cmd, ...positionals, ...flags]; the typed text is
+      // the positional span after the target. Sweeping everything after index 2
+      // used to ingest flags AND their values (`type e1 999 --frame 4897` typed
+      // "999 --frame 4897" — issue #217). The filter fallback keeps direct
+      // callers (tests) that don't pass the boundary working.
+      const textArgs = positionalCount !== undefined
+        ? filtered.slice(2, positionalCount + 1)
+        : filtered.slice(2).filter(a => a !== "--append" && !TRUSTED_FLAG_VALUES.includes(a) && a !== "--secret" && filtered[filtered.indexOf(a) - 1] !== "--secret")
+      // issue #244: `--secret <name>` types a vault value by name. The daemon
+      // resolves it after logging and checks the page host against the
+      // secret's allowlist; the CLI process never holds the value.
+      const secretIdx = filtered.indexOf("--secret")
+      if (secretIdx !== -1) {
+        const secretName = filtered[secretIdx + 1]
+        if (!secretName || secretName.startsWith("--")) { console.error("error: --secret requires a secret name"); process.exit(1) }
+        if (textArgs.join("").length) { console.error("error: --secret and literal text are mutually exclusive"); process.exit(1) }
+        if (useOs) return { type: "os_type", ...target, secret: secretName }
+        if (target.semantic) return { type: "find_and_type", name: target.semantic.name, role: target.semantic.role, secret: secretName, clear: !append }
+        return { type: "input_text", ...target, secret: secretName, clear: !append }
+      }
       if (useOs) {
         return { type: "os_type", ...target, text: textArgs.join(" ") }
       } else if (target.semantic) {

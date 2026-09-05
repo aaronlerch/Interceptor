@@ -1,5 +1,7 @@
-if (!(window as any).__interceptor_canvas_installed) {
-  ;(window as any).__interceptor_canvas_installed = true
+import { K_CANVAS, K_CANVAS_OBSERVER, K_CANVAS_WRAPPED, K_GETCTX_WRAPPED } from "./inject-keys"
+
+if (!(window as any)[K_CANVAS]) {
+  ;(window as any)[K_CANVAS] = true
 
   // Dormant-until-attached: patching CanvasRenderingContext2D.prototype taxes
   // EVERY draw op (fillText/fillRect/stroke/drawImage/…). On chart-heavy pages
@@ -21,7 +23,7 @@ if (!(window as any).__interceptor_canvas_installed) {
     patch2DPrototype((window as any).CanvasRenderingContext2D?.prototype)
     patchGetContext((window as any).HTMLCanvasElement, "HTMLCanvasElement")
     patchGetContext((window as any).OffscreenCanvas, "OffscreenCanvas")
-    ;(window as any).__interceptorCanvasObserver = observer
+    ;(window as any)[K_CANVAS_OBSERVER] = observer
   }
 
   function setCanvasCapture(active: boolean): void {
@@ -223,8 +225,8 @@ if (!(window as any).__interceptor_canvas_installed) {
   }
 
   function patch2DPrototype(proto: CanvasRenderingContext2D | any): void {
-    if (!proto || proto.__interceptor_canvas_wrapped) return
-    proto.__interceptor_canvas_wrapped = true
+    if (!proto || (proto as any)[K_CANVAS_WRAPPED]) return
+    ;(proto as any)[K_CANVAS_WRAPPED] = true
 
     const wrap = (name: string, handler: (ctx: CanvasRenderingContext2D, args: unknown[], out: unknown) => void) => {
       const orig = proto[name]
@@ -425,10 +427,10 @@ if (!(window as any).__interceptor_canvas_installed) {
   }
 
   function patchGetContext(Ctor: any, label: string): void {
-    if (!Ctor || !Ctor.prototype || Ctor.prototype.__interceptor_canvas_get_context_wrapped) return
+    if (!Ctor || !Ctor.prototype || (Ctor.prototype as any)[K_GETCTX_WRAPPED]) return
     const orig = Ctor.prototype.getContext
     if (typeof orig !== "function") return
-    Ctor.prototype.__interceptor_canvas_get_context_wrapped = true
+    ;(Ctor.prototype as any)[K_GETCTX_WRAPPED] = true
     Ctor.prototype.getContext = function (type: string, ...rest: unknown[]) {
       const ctx = orig.call(this, type, ...rest)
       // Idle fast path: don't register/log getContext calls while dormant.
@@ -457,4 +459,6 @@ if (!(window as any).__interceptor_canvas_installed) {
   // NOTE: no eager patching here. The prototype is patched lazily by
   // ensureCanvasPatched() the first time a canvas/scene command enables capture
   // (see the `__interceptor_canvas_set` listener at the top of this block).
+  // ensureCanvasPatched() also publishes the observer under K_CANVAS_OBSERVER,
+  // which is where the page-canonical reader (upstream 9854e56) looks for it.
 }

@@ -124,7 +124,7 @@ async function ensureNamedGroup(label) {
     }
   }
   const title = groupTitleFor(label);
-  const groups = await chrome.tabGroups.query({});
+  const groups = await chrome.tabGroups.query({}).catch(() => []);
   const match = groups.find((g) => g.title === title);
   if (match) {
     namedGroups.set(label, match.id);
@@ -207,7 +207,7 @@ async function ensureInterceptorGroup() {
     }
   }
   const candidates = await getCandidateTitles();
-  const groups = await chrome.tabGroups.query({});
+  const groups = await chrome.tabGroups.query({}).catch(() => []);
   const match = groups.find((g) => typeof g.title === "string" && candidates.includes(g.title));
   if (match) {
     interceptorGroupId = match.id;
@@ -277,6 +277,32 @@ function shouldRetryContentScript(error) {
     return false;
   return error.includes("Receiving end does not exist") || error.includes("Could not establish connection") || error.includes("disconnected port") || error.includes("message channel is closed") || error.includes("no response from content script");
 }
+var INPUT_ACTIONS = new Set([
+  "click",
+  "click_selector",
+  "click_at",
+  "dblclick",
+  "rightclick",
+  "drag",
+  "input_text",
+  "send_keys",
+  "select_option",
+  "check",
+  "file_upload",
+  "file_upload_chunk",
+  "find_and_click",
+  "find_and_type",
+  "find_and_check",
+  "scene_click",
+  "scene_dblclick",
+  "scene_select",
+  "scene_insert"
+]);
+function isResponseLoss(error) {
+  if (!error)
+    return false;
+  return error.includes("message channel is closed") || error.includes("disconnected port") || error.includes("no response from content script");
+}
 
 // extension/src/background/content-bridge.ts
 async function injectContentScript(tabId, frameId) {
@@ -289,7 +315,7 @@ async function injectContentScript(tabId, frameId) {
     return { success: false, error: err.message };
   }
 }
-var NAVIGATION_CAPABLE_ACTIONS = new Set(["click", "click_at", "dblclick", "find_and_click"]);
+var NAVIGATION_CAPABLE_ACTIONS = new Set(["click", "click_at", "dblclick", "find_and_click", "click_selector"]);
 async function sendToContentScriptOnce(tabId, action, frameId) {
   const watchesNavigation = NAVIGATION_CAPABLE_ACTIONS.has(action.type);
   let initialUrl;
@@ -359,6 +385,23 @@ async function sendToContentScript(tabId, action, frameId) {
   const first = await sendToContentScriptOnce(tabId, action, frameId);
   if (first.success || !shouldRetryContentScript(first.error))
     return first;
+  if (INPUT_ACTIONS.has(action.type) && isResponseLoss(first.error)) {
+    let navigating = false;
+    try {
+      navigating = (await chrome.tabs.get(tabId)).status === "loading";
+    } catch {}
+    if (navigating) {
+      return {
+        success: true,
+        data: `${action.type} delivered; the page began navigating before the reply arrived`,
+        warning: "reply channel closed during navigation — re-read page state to confirm the outcome"
+      };
+    }
+    return {
+      success: false,
+      error: `${action.type} was delivered but the reply channel closed (${first.error}) — not auto-retried to avoid firing it twice; re-read page state to confirm the outcome, then retry deliberately`
+    };
+  }
   await new Promise((resolve) => setTimeout(resolve, 250));
   const retryWithoutInject = await sendToContentScriptOnce(tabId, action, frameId);
   if (retryWithoutInject.success)
@@ -552,16 +595,51 @@ async function cdpAttachActDetach(tabId, method, params) {
 }
 
 // extension/src/background/capabilities/os-input.ts
+var FOREGROUND_HINT = "trusted OS input needs the target tab visible in the OS-focused window — " + "`interceptor tab switch <id>` foregrounds it (explicit focus-moving opt-in), " + "or drop --trusted for background-safe synthetic input";
+async function requireForegroundTab(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) {
+    return { ok: false, result: { success: false, error: `tab ${tabId} not found` } };
+  }
+  const win = await chrome.windows.get(tab.windowId).catch(() => null);
+  if (!win) {
+    return { ok: false, result: { success: false, error: `window ${tab.windowId} not found for tab ${tabId}` } };
+  }
+  if (win.state === "minimized") {
+    return { ok: false, result: {
+      success: false,
+      error: `window ${tab.windowId} is minimized — trusted OS input needs on-screen pixels to hit`,
+      data: { hint: FOREGROUND_HINT, windowState: win.state }
+    } };
+  }
+  if (!tab.active) {
+    return { ok: false, result: {
+      success: false,
+      error: `tab ${tabId} is not the active tab of window ${tab.windowId} — a trusted OS event would hit the window's visible tab instead`,
+      data: { hint: FOREGROUND_HINT }
+    } };
+  }
+  if (!win.focused) {
+    return { ok: false, result: {
+      success: false,
+      error: `window ${tab.windowId} is not the OS-focused window — trusted OS events are routed by the OS to whatever is frontmost, not to the target tab`,
+      data: { hint: FOREGROUND_HINT }
+    } };
+  }
+  return { ok: true, windowBounds: {
+    left: win.left || 0,
+    top: win.top || 0,
+    width: win.width || 0,
+    height: win.height || 0
+  } };
+}
 async function handleOsInputActions(action, tabId) {
   switch (action.type) {
     case "os_click": {
-      const win = await chrome.windows.getCurrent();
-      const windowBounds = {
-        left: win.left || 0,
-        top: win.top || 0,
-        width: win.width || 0,
-        height: win.height || 0
-      };
+      const fg = await requireForegroundTab(tabId);
+      if (!fg.ok)
+        return fg.result;
+      const windowBounds = fg.windowBounds;
       let pageX = action.x;
       let pageY = action.y;
       if ((action.index !== undefined || action.ref) && (pageX === undefined || pageY === undefined)) {
@@ -593,9 +671,16 @@ async function handleOsInputActions(action, tabId) {
         }
       };
     }
-    case "os_key":
+    case "os_key": {
+      const fg = await requireForegroundTab(tabId);
+      if (!fg.ok)
+        return fg.result;
       return { success: true, data: { method: "os_event", key: action.key, modifiers: action.modifiers || [] } };
+    }
     case "os_type": {
+      const fg = await requireForegroundTab(tabId);
+      if (!fg.ok)
+        return fg.result;
       if (action.index !== undefined || action.ref) {
         await sendToContentScript(tabId, { type: "focus", index: action.index, ref: action.ref });
         await new Promise((r) => setTimeout(r, 50));
@@ -603,13 +688,10 @@ async function handleOsInputActions(action, tabId) {
       return { success: true, data: { method: "os_event", text: action.text } };
     }
     case "os_move": {
-      const win = await chrome.windows.getCurrent();
-      const windowBounds = {
-        left: win.left || 0,
-        top: win.top || 0,
-        width: win.width || 0,
-        height: win.height || 0
-      };
+      const fg = await requireForegroundTab(tabId);
+      if (!fg.ok)
+        return fg.result;
+      const windowBounds = fg.windowBounds;
       const chromeUiHeight = action.chromeUiHeight || 88 + (debuggerAttached.has(tabId) ? 35 : 0);
       return {
         success: true,
@@ -1275,30 +1357,65 @@ async function handleCaptureStreamActions(action, tabId) {
   return { success: false, error: `unknown capture action: ${action.type}` };
 }
 
+// extension/src/inject-keys.ts
+var IK_NET = "z9n0";
+var IK_CANVAS = "z9c0";
+var IK_WS = "z9w0";
+var IK_BROADCAST = "z9b0";
+var IK_BEACON = "z9k0";
+var IK_TT_POLICY = "z9t0";
+var IK_SINK_TT_POLICY = "z9t1";
+var IK_CANVAS_OBSERVER = "z9o0";
+var IK_CANVAS_WRAPPED = "z9r0";
+var IK_GETCTX_WRAPPED = "z9r1";
+var K_NET = Symbol.for(IK_NET);
+var K_CANVAS = Symbol.for(IK_CANVAS);
+var K_WS = Symbol.for(IK_WS);
+var K_BROADCAST = Symbol.for(IK_BROADCAST);
+var K_BEACON = Symbol.for(IK_BEACON);
+var K_TT_POLICY = Symbol.for(IK_TT_POLICY);
+var K_CANVAS_OBSERVER = Symbol.for(IK_CANVAS_OBSERVER);
+var K_CANVAS_WRAPPED = Symbol.for(IK_CANVAS_WRAPPED);
+var K_GETCTX_WRAPPED = Symbol.for(IK_GETCTX_WRAPPED);
+var TT_POLICY_NAME = "tt-e";
+var SINK_TT_POLICY_NAME = "tt-s";
+
 // extension/src/background/capabilities/canvas.ts
-function normalizeCanvasLogKind(kind) {
-  return String(kind || "").trim();
-}
-function summarizeCanvasKinds(entries) {
-  const out = {};
-  for (const entry of entries) {
-    const kind = normalizeCanvasLogKind(entry.kind);
-    if (!kind)
-      continue;
-    out[kind] = (out[kind] || 0) + 1;
-  }
-  return out;
-}
 async function executeInMainWorld(tabId, func, args = []) {
+  const mapped = args.map((arg) => arg === undefined ? null : arg);
+  if (chrome.userScripts && typeof chrome.userScripts.execute === "function") {
+    try {
+      const argsLiteral = "[" + args.map((a) => a === undefined ? "undefined" : JSON.stringify(a)).join(",") + "]";
+      const code = `(${func.toString()}).apply(null, ${argsLiteral})`;
+      const results2 = await chrome.userScripts.execute({
+        target: { tabId },
+        world: "MAIN",
+        js: [{ code }]
+      });
+      const first = results2?.[0];
+      if (first && !first.error)
+        return first.result;
+    } catch {}
+  }
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: args.map((arg) => arg === undefined ? null : arg),
+    args: mapped,
     func
   });
   return results[0]?.result;
 }
-function hostCanvasSignals(limit = 20) {
+function hostCanvasSignals(limit = 20, obsKey) {
+  function summarizeCanvasKinds(entries) {
+    const out = {};
+    for (const entry of entries) {
+      const kind = String(entry.kind || "").trim();
+      if (!kind)
+        continue;
+      out[kind] = (out[kind] || 0) + 1;
+    }
+    return out;
+  }
   const canvases = Array.from(document.querySelectorAll("canvas"));
   const max = Number.isFinite(limit) && limit > 0 ? limit : 20;
   const safeSlice = (arr) => arr.slice(0, max);
@@ -1339,7 +1456,7 @@ function hostCanvasSignals(limit = 20) {
       keys: value && typeof value === "object" ? Object.keys(value).slice(0, 12) : undefined
     }];
   }));
-  const observer = window.__interceptorCanvasObserver || null;
+  const observer = (obsKey ? window[Symbol.for(obsKey)] : null) || null;
   const excalidrawScene = parseLocalStorageJson("excalidraw");
   const docsSemanticMirror = !!docsTextboxSummary.exists;
   const observerReasons = Array.isArray(observer?.partialCoverageReasons) ? observer.partialCoverageReasons.slice() : [];
@@ -1437,7 +1554,7 @@ function canvasAccessibleText(canvasIndex) {
     canvasCount: canvases.length
   };
 }
-function canvasObserverSummary(limit = 100, kinds, canvasIndex) {
+function canvasObserverSummary(limit = 100, kinds, canvasIndex, obsKey) {
   function normalize(kind) {
     return String(kind || "").trim();
   }
@@ -1452,7 +1569,7 @@ function canvasObserverSummary(limit = 100, kinds, canvasIndex) {
     return out;
   }
   function resolveCanvasId(observer2, canvasIndex2) {
-    if (canvasIndex2 === undefined)
+    if (canvasIndex2 === undefined || canvasIndex2 === null)
       return;
     const canvases = Array.isArray(observer2?.canvases) ? observer2.canvases.slice() : [];
     const ordered = canvases.sort((a, b) => {
@@ -1465,7 +1582,7 @@ function canvasObserverSummary(limit = 100, kinds, canvasIndex) {
     const canvasId2 = ordered[canvasIndex2]?.canvasId;
     return typeof canvasId2 === "string" && canvasId2 ? canvasId2 : null;
   }
-  const observer = window.__interceptorCanvasObserver || null;
+  const observer = (obsKey ? window[Symbol.for(obsKey)] : null) || null;
   if (!observer || !Array.isArray(observer.log)) {
     return {
       installed: false,
@@ -1493,12 +1610,12 @@ function canvasObserverSummary(limit = 100, kinds, canvasIndex) {
     entries: bounded
   };
 }
-function canvasObserverObjectsSummary(limit = 100, kind, canvasIndex) {
+function canvasObserverObjectsSummary(limit = 100, kind, canvasIndex, obsKey) {
   function normalize(value) {
     return String(value || "").trim();
   }
   function resolveCanvasId(observer2, canvasIndex2) {
-    if (canvasIndex2 === undefined)
+    if (canvasIndex2 === undefined || canvasIndex2 === null)
       return;
     const canvases = Array.isArray(observer2?.canvases) ? observer2.canvases.slice() : [];
     const ordered = canvases.sort((a, b) => {
@@ -1511,7 +1628,7 @@ function canvasObserverObjectsSummary(limit = 100, kind, canvasIndex) {
     const canvasId2 = ordered[canvasIndex2]?.canvasId;
     return typeof canvasId2 === "string" && canvasId2 ? canvasId2 : null;
   }
-  const observer = window.__interceptorCanvasObserver || null;
+  const observer = (obsKey ? window[Symbol.for(obsKey)] : null) || null;
   if (!observer || !Array.isArray(observer.objects)) {
     return {
       installed: false,
@@ -1643,17 +1760,7 @@ function inferRouteCandidates(entries, filter, limit = 20) {
     score: candidate.count + candidate.reasons.size * 2 + (candidate.methods.has("POST") ? 3 : 0) + ([...candidate.contentTypes].some((ct) => ct.toLowerCase().includes("json")) ? 2 : 0)
   })).sort((a, b) => b.score - a.score || b.count - a.count || b.lastSeen - a.lastSeen).slice(0, Math.max(1, limit));
 }
-async function ensureCanvasCaptureEnabled(tabId) {
-  try {
-    await executeInMainWorld(tabId, () => {
-      try {
-        document.dispatchEvent(new CustomEvent("__interceptor_canvas_set", { detail: { active: true } }));
-      } catch {}
-    });
-  } catch {}
-}
 async function handleCanvasActions(action, tabId) {
-  await ensureCanvasCaptureEnabled(tabId);
   switch (action.type) {
     case "canvas_list": {
       const data = await executeInMainWorld(tabId, walkCanvasElements);
@@ -1661,7 +1768,7 @@ async function handleCanvasActions(action, tabId) {
     }
     case "canvas_status": {
       const list = await executeInMainWorld(tabId, walkCanvasElements);
-      const host = await executeInMainWorld(tabId, hostCanvasSignals, [action.limit]);
+      const host = await executeInMainWorld(tabId, hostCanvasSignals, [action.limit, IK_CANVAS_OBSERVER]);
       return {
         success: true,
         data: {
@@ -1675,11 +1782,11 @@ async function handleCanvasActions(action, tabId) {
       return { success: true, data };
     }
     case "canvas_log": {
-      const data = await executeInMainWorld(tabId, canvasObserverSummary, [action.limit, action.kinds, action.canvasIndex]);
+      const data = await executeInMainWorld(tabId, canvasObserverSummary, [action.limit, action.kinds, action.canvasIndex, IK_CANVAS_OBSERVER]);
       return { success: true, data };
     }
     case "canvas_objects": {
-      const data = await executeInMainWorld(tabId, canvasObserverObjectsSummary, [action.limit, action.kind, action.canvasIndex]);
+      const data = await executeInMainWorld(tabId, canvasObserverObjectsSummary, [action.limit, action.kind, action.canvasIndex, IK_CANVAS_OBSERVER]);
       return { success: true, data };
     }
     case "canvas_routes": {
@@ -1816,11 +1923,63 @@ async function handleCanvasActions(action, tabId) {
   return { success: false, error: `unknown canvas action: ${action.type}` };
 }
 
+// extension/src/background/tab-lifecycle.ts
+var DEFAULT_TAB_LIFECYCLE = { reuse: true, idleCloseMinutes: 10 };
+var STORAGE_KEY = "tabLifecycle";
+var GROUP_LAST_SEEN_PREFIX = "groupLastSeen:";
+function normalizeTabLifecycle(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const reuse = typeof obj.reuse === "boolean" ? obj.reuse : DEFAULT_TAB_LIFECYCLE.reuse;
+  let idle = DEFAULT_TAB_LIFECYCLE.idleCloseMinutes;
+  if (typeof obj.idleCloseMinutes === "number" && Number.isFinite(obj.idleCloseMinutes)) {
+    idle = Math.max(0, Math.round(obj.idleCloseMinutes));
+  }
+  return { reuse, idleCloseMinutes: idle };
+}
+function policyMayDecideReuse(action) {
+  return action.reuse === undefined && action.reusePolicy === true && typeof action.group === "string" && action.group.length > 0;
+}
+async function readArea(area) {
+  try {
+    const storageArea = chrome.storage[area];
+    if (!storageArea || typeof storageArea.get !== "function")
+      return;
+    const stored = await storageArea.get(STORAGE_KEY);
+    const raw = stored?.[STORAGE_KEY];
+    if (raw === undefined || raw === null)
+      return;
+    return normalizeTabLifecycle(raw);
+  } catch {
+    return;
+  }
+}
+async function resolveTabLifecycle() {
+  const managed = await readArea("managed");
+  if (managed)
+    return { policy: managed, source: "managed" };
+  const local = await readArea("local");
+  if (local)
+    return { policy: local, source: "local" };
+  return { policy: { ...DEFAULT_TAB_LIFECYCLE }, source: "default" };
+}
+function sessionArea3() {
+  const storage = chrome.storage;
+  return storage.session ?? chrome.storage.local;
+}
+function stampKey(label) {
+  return `${GROUP_LAST_SEEN_PREFIX}${label}`;
+}
+function recordGroupActivity(label) {
+  try {
+    sessionArea3().set({ [stampKey(label ?? "")]: Date.now() }).catch(() => {});
+  } catch {}
+}
+
 // extension/src/background/capabilities/tabs.ts
 function activeTabKey(group) {
   return group ? `activeTabId:${group}` : "activeTabId";
 }
-function sessionArea3() {
+function sessionArea4() {
   const storage = chrome.storage;
   return storage.session ?? chrome.storage.local;
 }
@@ -1853,7 +2012,15 @@ async function handleTabActions(action, tabId) {
       if (group && !GROUP_LABEL_RE.test(group)) {
         return { success: false, error: `invalid group label '${group}' — must match [A-Za-z0-9_-]{1,32}` };
       }
-      if (action.reuse) {
+      let reuseWanted = action.reuse === true;
+      if (!reuseWanted && policyMayDecideReuse(action)) {
+        try {
+          reuseWanted = (await resolveTabLifecycle()).policy.reuse;
+        } catch {
+          reuseWanted = false;
+        }
+      }
+      if (reuseWanted) {
         const groupId = group ? await ensureNamedGroup(group) : await ensureInterceptorGroup();
         if (groupId !== -1) {
           const groupTabs = await chrome.tabs.query({ groupId });
@@ -1863,12 +2030,17 @@ async function handleTabActions(action, tabId) {
             if (candidate?.id !== undefined) {
               try {
                 const reuseActivate = action.active === true;
-                const updateProps = { url: targetUrl };
-                if (reuseActivate)
-                  updateProps.active = true;
-                const updated = await chrome.tabs.update(candidate.id, updateProps);
-                await waitForTabLoad(candidate.id);
-                await sessionArea3().set({ [activeTabKey(group)]: candidate.id });
+                let updated = candidate;
+                if (action.prepareOnly === true) {
+                  updated = reuseActivate ? await chrome.tabs.update(candidate.id, { active: true }) : await chrome.tabs.get(candidate.id);
+                } else {
+                  const updateProps = { url: targetUrl };
+                  if (reuseActivate)
+                    updateProps.active = true;
+                  updated = await chrome.tabs.update(candidate.id, updateProps);
+                  await waitForTabLoad(candidate.id);
+                }
+                await sessionArea4().set({ [activeTabKey(group)]: candidate.id });
                 return {
                   success: true,
                   data: { tabId: candidate.id, url: updated?.url ?? targetUrl, groupId, group, reused: true }
@@ -1887,7 +2059,9 @@ async function handleTabActions(action, tabId) {
       });
       if (newTab.id) {
         const groupId = group ? await addTabToNamedGroup(newTab.id, group, action.groupColor) : await addTabToInterceptorGroup(newTab.id);
-        await sessionArea3().set({ [activeTabKey(group)]: newTab.id });
+        if (shouldActivate)
+          await chrome.tabs.update(newTab.id, { active: true });
+        await sessionArea4().set({ [activeTabKey(group)]: newTab.id });
         const data = { tabId: newTab.id, url: newTab.url, groupId, group, reused: false };
         const groupWarning = groupWarningFor(groupId, hasTabGroupApi());
         if (groupWarning)
@@ -1900,10 +2074,10 @@ async function handleTabActions(action, tabId) {
       const closedId = action.tabId || tabId;
       await chrome.tabs.remove(closedId);
       const keys = ["activeTabId", typeof action.group === "string" ? activeTabKey(action.group) : null].filter((k) => !!k);
-      const stored = await sessionArea3().get(keys);
+      const stored = await sessionArea4().get(keys);
       for (const key of keys) {
         if (stored[key] === closedId)
-          await sessionArea3().remove(key);
+          await sessionArea4().remove(key);
       }
       return { success: true };
     }
@@ -1936,7 +2110,7 @@ async function handleTabActions(action, tabId) {
       }
       await ensureInterceptorGroup();
       await hydrateNamedGroups();
-      const live = await chrome.tabGroups.query({});
+      const live = await chrome.tabGroups.query({}).catch(() => []);
       const prefix = `${groupTitleFor("")}`;
       for (const g of live) {
         if (typeof g.title !== "string" || !g.title.startsWith(prefix))
@@ -2142,6 +2316,64 @@ async function handleWindowActions(action, _tabId) {
 }
 
 // extension/src/background/capabilities/navigation.ts
+var HISTORY_GO_START_MS = 2000;
+async function waitForNavigationStart(tabId, beforeUrl, timeoutMs = HISTORY_GO_START_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab)
+      return false;
+    if (tab.status === "loading" || (tab.url ?? "") !== beforeUrl)
+      return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+async function historyGo(tabId, delta, deps = { waitForTabLoad }) {
+  const label = delta < 0 ? "back" : "forward";
+  const before = await chrome.tabs.get(tabId).catch(() => null);
+  if (!before)
+    return { success: false, error: `tab ${tabId} not found` };
+  let apiError;
+  try {
+    if (delta < 0)
+      await chrome.tabs.goBack(tabId);
+    else
+      await chrome.tabs.goForward(tabId);
+    await deps.waitForTabLoad(tabId);
+    return { success: true };
+  } catch (err) {
+    apiError = err.message;
+  }
+  let ack;
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (d) => new Promise((resolve) => {
+        for (const ev of ["popstate", "hashchange", "pagehide"])
+          addEventListener(ev, () => resolve(ev), { once: true });
+        setTimeout(() => resolve(false), 800);
+        history.go(d);
+      }),
+      args: [delta]
+    });
+    const results = Array.isArray(injected) ? injected.map((r) => r?.result) : [];
+    ack = results.find((r) => typeof r === "string");
+  } catch (err) {
+    if (!await waitForNavigationStart(tabId, before.url ?? "")) {
+      return { success: false, error: `${apiError} (page-side history.${label}() also failed: ${err.message})` };
+    }
+    await deps.waitForTabLoad(tabId);
+    return { success: true };
+  }
+  if (ack === "popstate" || ack === "hashchange")
+    return { success: true };
+  if (!ack && !await waitForNavigationStart(tabId, before.url ?? "")) {
+    return { success: false, error: `no ${label} history for tab ${tabId} — nothing to go ${label} to` };
+  }
+  await deps.waitForTabLoad(tabId);
+  return { success: true };
+}
 async function handleNavigationActions(action, tabId) {
   switch (action.type) {
     case "navigate":
@@ -2149,13 +2381,9 @@ async function handleNavigationActions(action, tabId) {
       await waitForTabLoad(tabId);
       return { success: true };
     case "go_back":
-      await chrome.tabs.goBack(tabId);
-      await waitForTabLoad(tabId);
-      return { success: true };
+      return historyGo(tabId, -1);
     case "go_forward":
-      await chrome.tabs.goForward(tabId);
-      await waitForTabLoad(tabId);
-      return { success: true };
+      return historyGo(tabId, 1);
     case "reload":
       await chrome.tabs.reload(tabId, { bypassCache: !!action.bypassCache });
       await waitForTabLoad(tabId);
@@ -2340,10 +2568,33 @@ async function handleNotificationActions(action, _tabId) {
 }
 
 // extension/src/background/capabilities/search.ts
-async function handleSearchActions(action, _tabId) {
+async function handleSearchActions(action, tabId) {
+  const searchApi = chrome.search;
+  if (action.type === "search_capability") {
+    return {
+      success: true,
+      data: { available: typeof searchApi?.query === "function" }
+    };
+  }
   if (action.type === "search_query") {
-    await chrome.search.query({ text: action.query, disposition: "NEW_TAB" });
-    return { success: true };
+    if (typeof searchApi?.query !== "function") {
+      return {
+        success: false,
+        error: "websearch is unavailable in this browser context: chrome.search.query is not exposed; no fallback provider was used"
+      };
+    }
+    const query = String(action.query || "");
+    if (!query.trim())
+      return { success: false, error: "websearch requires a non-empty query" };
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      return { success: false, error: "websearch requires a managed target tab" };
+    }
+    try {
+      await searchApi.query({ text: query, tabId });
+      return { success: true, data: { tabId, query } };
+    } catch (err) {
+      return { success: false, error: `default-provider search failed: ${err.message}` };
+    }
   }
   return { success: false, error: `unknown search action: ${action.type}` };
 }
@@ -2491,8 +2742,9 @@ async function executeEval(tabId, world, code) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world,
-    args: [code],
-    func: async (c) => {
+    args: [code, IK_TT_POLICY, TT_POLICY_NAME],
+    func: async (c, ttKey, ttName) => {
+      const TT = Symbol.for(ttKey);
       function clone(v) {
         if (v === null || v === undefined)
           return v;
@@ -2515,21 +2767,21 @@ async function executeEval(tabId, world, code) {
         const w = window;
         let source = c;
         if (w.trustedTypes) {
-          if (!w.__interceptor_tt_policy) {
+          if (!w[TT]) {
             try {
-              w.__interceptor_tt_policy = w.trustedTypes.createPolicy("interceptor-eval", {
+              w[TT] = w.trustedTypes.createPolicy(ttName, {
                 createScript: (s) => s
               });
             } catch {
               try {
-                w.__interceptor_tt_policy = w.trustedTypes.createPolicy("interceptor-eval-" + Date.now(), {
+                w[TT] = w.trustedTypes.createPolicy(ttName + "-" + Date.now(), {
                   createScript: (s) => s
                 });
               } catch {}
             }
           }
-          if (w.__interceptor_tt_policy) {
-            source = w.__interceptor_tt_policy.createScript(c);
+          if (w[TT]) {
+            source = w[TT].createScript(c);
           }
         }
         let r = (0, eval)(source);
@@ -2555,8 +2807,7 @@ async function reloadTabForCspRetry(tabId) {
   await chrome.tabs.reload(tabId, { bypassCache: true });
   await waitForTabLoad(tabId, 15000);
 }
-var CSP_STRIP_REFUSED = "MAIN-world eval is blocked by this page's Content-Security-Policy / Trusted Types. " + "Stripping the page's CSP header would disable the site's own XSS defenses for this tab, " + "so it is off by default. Re-run with --allow-csp-strip if you intend that.";
-async function runWithCspStripBypass(tabId, world, run, opts = {}) {
+async function runWithCspStripBypass(tabId, world, run) {
   const first = await run(tabId, world);
   if (first.success || world !== "MAIN") {
     return first;
@@ -2576,17 +2827,6 @@ async function runWithCspStripBypass(tabId, world, run, opts = {}) {
   }
   if (!isCspUnsafeEvalError(first.error) && !isTrustedTypesError(first.error)) {
     return first;
-  }
-  if (!opts.allowCspStrip) {
-    return {
-      success: false,
-      error: CSP_STRIP_REFUSED,
-      data: {
-        originalError: first.error,
-        cspBypassApplied: false,
-        cspStripAvailable: true
-      }
-    };
   }
   try {
     await installCspBypassForTab(tabId);
@@ -2624,7 +2864,6 @@ async function handleEvaluateActions(action, tabId) {
   }
   const code = action.code;
   const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
-  const allowCspStrip = action.allowCspStrip === true;
   const initialUserScriptWorld = world === "MAIN" ? "MAIN" : "USER_SCRIPT";
   const userScriptAttempt = await executeWithUserScripts(tabId, initialUserScriptWorld, code);
   if (userScriptAttempt.available) {
@@ -2637,7 +2876,7 @@ async function handleEvaluateActions(action, tabId) {
       return userScriptAttempt.result ?? { success: false, error: "no result" };
     }
   }
-  return runWithCspStripBypass(tabId, world, (t, w) => executeEval(t, w, code), { allowCspStrip });
+  return runWithCspStripBypass(tabId, world, (t, w) => executeEval(t, w, code));
 }
 
 // extension/src/background/capabilities/binary-sink.ts
@@ -2646,8 +2885,9 @@ async function executeNormalize(tabId, world, code) {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
     world,
-    args: [code],
-    func: async (sourceCode) => {
+    args: [code, IK_SINK_TT_POLICY, SINK_TT_POLICY_NAME],
+    func: async (sourceCode, ttKey, ttName) => {
+      const TT = Symbol.for(ttKey);
       async function normalize(value) {
         if (value && typeof value.then === "function") {
           value = await value;
@@ -2722,12 +2962,12 @@ async function executeNormalize(tabId, world, code) {
         const w = window;
         let evalSource = sourceCode;
         if (w.trustedTypes) {
-          if (!w.__interceptor_sink_tt_policy) {
-            w.__interceptor_sink_tt_policy = w.trustedTypes.createPolicy("interceptor-binary-sink", {
+          if (!w[TT]) {
+            w[TT] = w.trustedTypes.createPolicy(ttName, {
               createScript: (s) => s
             });
           }
-          evalSource = w.__interceptor_sink_tt_policy.createScript(sourceCode);
+          evalSource = w[TT].createScript(sourceCode);
         }
         const value = (0, eval)(evalSource);
         return { success: true, data: await normalize(value) };
@@ -2738,8 +2978,8 @@ async function executeNormalize(tabId, world, code) {
   });
   return results[0]?.result ?? { success: false, error: "no result" };
 }
-async function prepareByteSource(tabId, code, world, allowCspStrip) {
-  const evalResult = await runWithCspStripBypass(tabId, world, (t, w) => executeNormalize(t, w, code), { allowCspStrip });
+async function prepareByteSource(tabId, code, world) {
+  const evalResult = await runWithCspStripBypass(tabId, world, (t, w) => executeNormalize(t, w, code));
   if (!evalResult.success)
     return evalResult;
   let descriptor = evalResult.data;
@@ -2967,13 +3207,12 @@ async function handleBinarySinkActions(action, tabId) {
   const code = action.code;
   const out = action.out;
   const world = action.world === "ISOLATED" ? "ISOLATED" : "MAIN";
-  const allowCspStrip = action.allowCspStrip === true;
   const chunkSize = typeof action.chunkSize === "number" && action.chunkSize > 0 ? Math.floor(action.chunkSize) : DEFAULT_CHUNK_SIZE;
   if (!out)
     return { success: false, error: "missing output path" };
   if (!code)
     return { success: false, error: "missing expression" };
-  const prepared = await prepareByteSource(tabId, code, world, allowCspStrip);
+  const prepared = await prepareByteSource(tabId, code, world);
   if (!prepared.success)
     return prepared;
   const source = prepared.data;
@@ -3090,7 +3329,7 @@ async function handleStyleActions(action, tabId) {
 }
 
 // extension/src/background/capabilities/frames.ts
-async function handleFrameActions(action, tabId) {
+async function handleFrameActions(action, tabId, sendFrame = sendToContentScript) {
   if (action.type === "frames_list") {
     const frames = await chrome.webNavigation.getAllFrames({ tabId });
     return {
@@ -3137,7 +3376,7 @@ async function handleFrameActions(action, tabId) {
           treeAction.index = targetIndex;
         if (targetRef)
           treeAction.ref = targetRef;
-        const treeResp = await sendToContentScript(tabId, treeAction, f.frameId);
+        const treeResp = await sendFrame(tabId, treeAction, f.frameId);
         if (!treeResp.success) {
           entry.opaque = true;
           entry.error = treeResp.error || "unreachable frame";
@@ -3151,7 +3390,7 @@ async function handleFrameActions(action, tabId) {
             textAction.index = targetIndex;
           if (targetRef)
             textAction.ref = targetRef;
-          const textResp = await sendToContentScript(tabId, textAction, f.frameId);
+          const textResp = await sendFrame(tabId, textAction, f.frameId);
           if (textResp.success && typeof textResp.data === "string") {
             entry.text = textResp.data;
           }
@@ -3164,14 +3403,144 @@ async function handleFrameActions(action, tabId) {
     }));
     return { success: true, data: { frames: results }, tabId };
   }
+  if (action.type === "frames_find") {
+    const query = String(action.query || "").trim();
+    if (!query)
+      return { success: false, error: "find requires a non-empty query" };
+    const limit = typeof action.limit === "number" ? Math.max(0, Math.floor(action.limit)) : 10;
+    const role = typeof action.role === "string" ? action.role : "";
+    const mode = role ? "elements" : action.mode === "text" || action.mode === "elements" ? action.mode : "hybrid";
+    let frames;
+    try {
+      frames = await chrome.webNavigation.getAllFrames({ tabId }) || undefined;
+    } catch (err) {
+      return { success: false, error: `getAllFrames failed: ${err.message}` };
+    }
+    if (!frames?.length) {
+      const data2 = { query, mode, frames: [] };
+      if (mode !== "elements") {
+        data2.text = {
+          total: 0,
+          returned: 0,
+          truncated: false,
+          scannedCharacters: 0,
+          scanTruncated: false,
+          matches: []
+        };
+      }
+      if (mode !== "text") {
+        data2.elements = { total: 0, returned: 0, truncated: false, matches: [] };
+      }
+      return { success: true, data: data2, tabId };
+    }
+    const perFrameResults = await Promise.all(frames.map(async (frame) => {
+      const frameMeta = {
+        frameId: frame.frameId,
+        parentFrameId: frame.parentFrameId,
+        url: frame.url
+      };
+      const result = {
+        frameMeta,
+        textMatches: [],
+        elementMatches: [],
+        textTotal: 0,
+        elementTotal: 0,
+        scannedCharacters: 0,
+        scanTruncated: false
+      };
+      try {
+        const response = await sendFrame(tabId, {
+          type: "find_element",
+          query,
+          role,
+          mode,
+          limit,
+          frameId: frame.frameId
+        }, frame.frameId);
+        if (!response.success || !response.data || typeof response.data !== "object") {
+          frameMeta.opaque = true;
+          frameMeta.error = response.error || "unreachable frame";
+          return result;
+        }
+        const data2 = response.data;
+        if (data2.text) {
+          result.textTotal = data2.text.total;
+          result.scannedCharacters = data2.text.scannedCharacters || 0;
+          result.scanTruncated = data2.text.scanTruncated === true;
+          result.textMatches = data2.text.matches.map((match) => ({ ...match, frameId: frame.frameId }));
+        }
+        if (data2.elements) {
+          result.elementTotal = data2.elements.total;
+          for (const match of data2.elements.matches) {
+            const refId = frame.frameId === 0 ? match.refId : match.refId.replace(/^e(\d+)$/, `e${frame.frameId}_$1`);
+            result.elementMatches.push({ ...match, refId, frameId: frame.frameId });
+          }
+        }
+      } catch (err) {
+        frameMeta.opaque = true;
+        frameMeta.error = err.message || "injection failed";
+      }
+      return result;
+    }));
+    const frameResults = perFrameResults.map((result) => result.frameMeta);
+    const textMatches = [];
+    const elementMatches = [];
+    let textTotal = 0;
+    let elementTotal = 0;
+    let scannedCharacters = 0;
+    let scanTruncated = false;
+    for (const result of perFrameResults) {
+      textTotal += result.textTotal;
+      elementTotal += result.elementTotal;
+      scannedCharacters += result.scannedCharacters;
+      scanTruncated ||= result.scanTruncated;
+      textMatches.push(...result.textMatches);
+      elementMatches.push(...result.elementMatches);
+    }
+    const data = { query, mode, frames: frameResults };
+    if (mode !== "elements") {
+      const matches = textMatches.slice(0, limit);
+      data.text = {
+        total: textTotal,
+        returned: matches.length,
+        truncated: textTotal > matches.length,
+        scannedCharacters,
+        scanTruncated,
+        matches
+      };
+    }
+    if (mode !== "text") {
+      const matches = elementMatches.slice(0, limit);
+      data.elements = {
+        total: elementTotal,
+        returned: matches.length,
+        truncated: elementTotal > matches.length,
+        matches
+      };
+    }
+    return { success: true, data, tabId };
+  }
   return { success: false, error: `unknown frame action: ${action.type}` };
 }
 
 // extension/src/background/capabilities/meta.ts
 async function handleMetaActions(action, tabId) {
   switch (action.type) {
-    case "status":
-      return { success: true, data: { connected: true, version: chrome.runtime.getManifest().version } };
+    case "status": {
+      let tabLifecycle;
+      try {
+        const resolved = await resolveTabLifecycle();
+        tabLifecycle = { ...resolved.policy, source: resolved.source };
+      } catch {}
+      return {
+        success: true,
+        data: {
+          connected: true,
+          version: chrome.runtime.getManifest().version,
+          ...tabLifecycle ? { tabLifecycle } : {}
+        }
+      };
+    }
     case "reload_extension":
       setTimeout(() => chrome.runtime.reload(), 100);
       return { success: true, data: "reloading in 100ms" };
@@ -3288,6 +3657,32 @@ async function injectPageCommNow(tabId) {
 function restorePageCommCaptureConfig() {
   readPageCommConfig().then((config) => config.enabled ? registerPageCommScript(config) : undefined).catch((err) => console.warn("failed to restore page communication capture config:", err.message));
 }
+var NET_LOG_BODY_BUDGET_BYTES = 8 * 1024 * 1024;
+var utf8 = new TextEncoder;
+function budgetNetLogEntries(entries, budgetBytes = NET_LOG_BODY_BUDGET_BYTES) {
+  const out = new Array(entries.length);
+  let used = 0;
+  let over = false;
+  for (let i = entries.length - 1;i >= 0; i--) {
+    const entry = entries[i];
+    if (!over) {
+      let size = 0;
+      try {
+        size = utf8.encode(JSON.stringify(entry)).byteLength;
+      } catch {
+        size = 0;
+      }
+      used += size;
+      if (used <= budgetBytes) {
+        out[i] = entry;
+        continue;
+      }
+      over = true;
+    }
+    out[i] = typeof entry.body === "string" && entry.body.length > 0 ? { ...entry, body: "", truncated: true } : entry;
+  }
+  return out;
+}
 async function handlePassiveNetActions(action, tabId) {
   switch (action.type) {
     case "net_log": {
@@ -3300,7 +3695,7 @@ async function handlePassiveNetActions(action, tabId) {
         return { success: false, error: result.error || "failed to get passive net log" };
       let entries = result.data || [];
       const limit = action.limit || 100;
-      entries = entries.slice(-limit);
+      entries = budgetNetLogEntries(entries.slice(-limit));
       return { success: true, data: entries };
     }
     case "page_comm_log": {
@@ -4361,12 +4756,13 @@ var DOWNLOAD_ACTIONS = new Set([
 ]);
 var SESSION_ACTIONS = new Set(["session_list", "session_restore"]);
 var NOTIFICATION_ACTIONS = new Set(["notification_create", "notification_clear"]);
+var SEARCH_ACTIONS = new Set(["search_capability", "search_query"]);
 var BROWSING_DATA_ACTIONS = new Set(["browsing_data_remove"]);
 var HEADER_ACTIONS = new Set(["headers_modify"]);
 var EVALUATE_ACTIONS = new Set(["evaluate"]);
 var BINARY_SINK_ACTIONS = new Set(["binary_sink_save"]);
 var STYLE_ACTIONS = new Set(["style_inject", "style_remove"]);
-var FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree"]);
+var FRAME_ACTIONS = new Set(["frames_list", "frames_read_tree", "frames_find"]);
 var META_ACTIONS = new Set(["status", "reload_extension", "capabilities", "cdp_tree", "brand_set_tab_group"]);
 var PASSIVE_NET_ACTIONS = new Set([
   "net_log",
@@ -4432,7 +4828,7 @@ async function routeAction(action, tabId) {
     return handleSessionActions(action, tabId);
   if (NOTIFICATION_ACTIONS.has(action.type))
     return handleNotificationActions(action, tabId);
-  if (action.type === "search_query")
+  if (SEARCH_ACTIONS.has(action.type))
     return handleSearchActions(action, tabId);
   if (BROWSING_DATA_ACTIONS.has(action.type))
     return handleBrowsingDataActions(action, tabId);
@@ -4458,13 +4854,14 @@ async function routeAction(action, tabId) {
     return handlePowerIdleActions(action);
   const contentResult = await sendToContentScript(tabId, action, action.frameId);
   const shouldSceneEscalate = action.type === "scene_click" && contentResult.success && (action.os === true || contentResult.warning?.includes("no DOM change")) && activeTransport !== "none";
-  const shouldClickEscalate = action.type === "click" && contentResult.success && contentResult.warning?.includes("no DOM change") && activeTransport !== "none";
+  const shouldClickEscalate = (action.type === "click" || action.type === "click_selector") && contentResult.success && contentResult.warning?.includes("no DOM change") && activeTransport !== "none";
   if (shouldClickEscalate || shouldSceneEscalate) {
     const resolvedAt = typeof contentResult.data === "object" && contentResult.data ? contentResult.data.at : undefined;
     console.log(`auto-escalating ${action.type} to OS-level input`);
     const osResult = await handleOsInputActions({
       ...action,
       type: "os_click",
+      ref: contentResult.refId ?? action.ref,
       x: resolvedAt?.x ?? action.x,
       y: resolvedAt?.y ?? action.y
     }, tabId);
@@ -4489,7 +4886,8 @@ async function routeAction(action, tabId) {
         diagnostics: {
           layers_tried: ["synthetic", "os_click"],
           reason: action.os === true ? "trusted scene click failed" : "synthetic produced no DOM change, os_click failed",
-          suggestion: "verify element is interactive and Chrome window is visible"
+          os_error: osResult.error,
+          suggestion: typeof osResult.data === "object" && osResult.data && osResult.data.hint || "verify element is interactive and Chrome window is visible"
         }
       }
     };
@@ -4506,39 +4904,6 @@ async function routeAction(action, tabId) {
   }
   return contentResult;
 }
-
-// extension/src/background/tab-active.ts
-var ACTIVE_IDLE_MS = 45000;
-var idleTimers = new Map;
-var CANVAS_ACTION = /^(canvas_|scene_)/;
-function send(tabId, msg) {
-  try {
-    chrome.tabs.sendMessage(tabId, msg, () => {
-      chrome.runtime.lastError;
-    });
-  } catch {}
-}
-function markTabActive(tabId, actionType) {
-  send(tabId, {
-    type: "interceptor_set_active",
-    active: true,
-    enableCanvas: CANVAS_ACTION.test(actionType || "")
-  });
-  const prev = idleTimers.get(tabId);
-  if (prev)
-    clearTimeout(prev);
-  idleTimers.set(tabId, setTimeout(() => {
-    idleTimers.delete(tabId);
-    send(tabId, { type: "interceptor_set_active", active: false });
-  }, ACTIVE_IDLE_MS));
-}
-chrome.tabs.onRemoved.addListener((tabId) => {
-  const t = idleTimers.get(tabId);
-  if (t) {
-    clearTimeout(t);
-    idleTimers.delete(tabId);
-  }
-});
 
 // extension/src/background/no-tab-actions.ts
 var NO_TAB_ACTIONS = new Set([
@@ -4563,7 +4928,7 @@ var NO_TAB_ACTIONS = new Set([
   "session_restore",
   "notification_create",
   "notification_clear",
-  "search_query",
+  "search_capability",
   "monitor_status",
   "monitor_start",
   "monitor_pause",
@@ -4592,6 +4957,24 @@ var messageQueue = [];
 var EXT_REQUEST_TIMEOUT_MS = 180000;
 var EXT_LONG_REQUEST_TIMEOUT_MS = 600000;
 var pendingRequests = new Map;
+function resolveGroupDispatchScope(action) {
+  const label = typeof action.group === "string" && action.group.length > 0 ? action.group : undefined;
+  const soft = label !== undefined && action.groupSoft === true;
+  return { label, soft, hard: label !== undefined && !soft && action.anyTab !== true };
+}
+async function managedTabGateError(tabId, groupLabel, groupHard) {
+  try {
+    if (groupHard) {
+      const inNamed = await isTabInNamedGroup(tabId, groupLabel);
+      return inNamed ? null : `tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`;
+    }
+    const inAny = await isTabInAnyManagedGroup(tabId);
+    return !inAny && anyManagedGroupKnown() ? `tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs` : null;
+  } catch {
+    const groupArg = groupHard && groupLabel ? ` --group ${groupLabel}` : "";
+    return `tab ${tabId} is unavailable; run 'interceptor tabs${groupArg}' to refresh tab IDs and retry`;
+  }
+}
 function activeTabKey2(group) {
   return group ? `activeTabId:${group}` : "activeTabId";
 }
@@ -4612,6 +4995,9 @@ function drainMessageQueue() {
     const queued = messageQueue.shift();
     handleDaemonMessage(queued);
   }
+}
+function noActiveTabError(windowCount) {
+  return windowCount === 0 ? "no browser window is open in this profile — 'interceptor open <url>' creates one in the background" : "no active tab";
 }
 async function handleDaemonMessage(msg) {
   if (!msg.action || !msg.id)
@@ -4660,20 +5046,26 @@ async function handleDaemonMessage(msg) {
     pendingRequests.delete(msg.id);
     sendToHost({ id: msg.id, result: { success: false, error } }, respondViaWs);
   };
-  const groupLabel = typeof action.group === "string" && action.group.length > 0 ? action.group : undefined;
+  const { label: groupLabel, soft: groupSoft, hard: groupHard } = resolveGroupDispatchScope(action);
   if (groupLabel && !GROUP_LABEL_RE.test(groupLabel)) {
     fail(`invalid group label '${groupLabel}' — must match [A-Za-z0-9_-]{1,32}`);
     return;
   }
   if (!tabId && needsTab(action.type)) {
     tabId = await getActiveTabId(groupLabel);
-    if (tabId && groupLabel) {
+    if (tabId && groupHard) {
       let stillInGroup = false;
       try {
         stillInGroup = await isTabInNamedGroup(tabId, groupLabel);
       } catch {}
       if (!stillInGroup)
         tabId = undefined;
+    } else if (tabId && groupSoft) {
+      try {
+        await chrome.tabs.get(tabId);
+      } catch {
+        tabId = undefined;
+      }
     }
   }
   if (!tabId && needsTab(action.type) && groupLabel) {
@@ -4683,32 +5075,25 @@ async function handleDaemonMessage(msg) {
       const candidate = groupTabs.filter((t) => typeof t.id === "number").sort((a, b) => b.id - a.id)[0];
       tabId = candidate?.id;
     }
-    if (!tabId) {
-      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}'`);
+    if (!tabId && groupHard) {
+      fail(`group '${groupLabel}' has no tabs — open one with 'interceptor open <url> --group ${groupLabel}', pass --any-tab to target the active tab, or set INTERCEPTOR_GROUP= (empty) to opt out of group scoping`);
       return;
     }
   }
   if (!tabId && needsTab(action.type)) {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
     tabId = activeTab?.id;
   }
   if (!tabId && needsTab(action.type)) {
-    fail("no active tab");
+    const windows = await chrome.windows.getAll().catch(() => null);
+    fail(noActiveTabError(windows ? windows.length : null));
     return;
   }
   if (tabId && needsTab(action.type) && !action.anyTab) {
-    if (groupLabel) {
-      const inNamed = await isTabInNamedGroup(tabId, groupLabel);
-      if (!inNamed) {
-        fail(`tab ${tabId} is not in group '${groupLabel}' — pass the owning group, or --any-tab to bypass`);
-        return;
-      }
-    } else {
-      const inAny = await isTabInAnyManagedGroup(tabId);
-      if (!inAny && anyManagedGroupKnown()) {
-        fail(`tab ${tabId} is not in the interceptor group — use 'interceptor tab new' to create managed tabs`);
-        return;
-      }
+    const membershipError = await managedTabGateError(tabId, groupLabel, groupHard);
+    if (membershipError) {
+      fail(membershipError);
+      return;
     }
   }
   if (tabId)
@@ -4722,8 +5107,8 @@ async function handleDaemonMessage(msg) {
       return;
     }
   }
-  if (tabId && needsTab(action.type))
-    markTabActive(tabId, action.type);
+  if (needsTab(action.type) || action.type === "tab_create")
+    recordGroupActivity(groupLabel ?? "");
   try {
     const result = await routeAction(action, tabId);
     if (tabId)
@@ -4980,6 +5365,7 @@ var lastNativeActivityAt = 0;
 var WS_URL = "ws://localhost:19222";
 var configuredContextId = null;
 var forceWebSocketTransport = false;
+var WebSocketImpl = globalThis.WebSocket;
 var safariNativeRelayEnabled = false;
 var safariNativeRelayClient = null;
 var WS_KEEPALIVE_MISS_LIMIT = 2;
@@ -5033,7 +5419,7 @@ function postNative(msg, port = nativePort) {
   return false;
 }
 function isWsOpen() {
-  if (!wsReady || !wsChannel || wsChannel.readyState !== WebSocket.OPEN)
+  if (!wsReady || !wsChannel || wsChannel.readyState !== WebSocketImpl.OPEN)
     return false;
   return true;
 }
@@ -5056,7 +5442,7 @@ function markWsRegistered() {
 }
 function sendWs(msg) {
   const channel = wsChannel;
-  if (!wsReady || !channel || channel.readyState !== WebSocket.OPEN)
+  if (!wsReady || !channel || channel.readyState !== WebSocketImpl.OPEN)
     return false;
   try {
     channel.send(JSON.stringify(msg));
@@ -5065,10 +5451,17 @@ function sendWs(msg) {
     return false;
   }
 }
+function extensionVersion() {
+  try {
+    return chrome.runtime.getManifest().version;
+  } catch {
+    return;
+  }
+}
 function sendWsRegistration(ws, contextId) {
   markWsUnregistered();
   try {
-    ws.send(JSON.stringify({ type: "extension", contextId }));
+    ws.send(JSON.stringify({ type: "extension", contextId, version: extensionVersion() }));
     return true;
   } catch (err) {
     console.error("ws context registration send error:", err);
@@ -5138,7 +5531,7 @@ function sendToHost(msg, forceWs, allowQueue = false) {
 function scheduleWsReconnect() {
   if (wsReconnectTimer)
     return;
-  if (wsChannel && (wsChannel.readyState === WebSocket.OPEN || wsChannel.readyState === WebSocket.CONNECTING))
+  if (wsChannel && (wsChannel.readyState === WebSocketImpl.OPEN || wsChannel.readyState === WebSocketImpl.CONNECTING))
     return;
   const delay = delayWithJitter(wsReconnectDelay);
   wsReconnectTimer = setTimeout(() => {
@@ -5317,7 +5710,7 @@ function startWsKeepAlive() {
     clearInterval(wsKeepAliveTimer);
   wsKeepAliveTimer = setInterval(() => {
     const channel = wsChannel;
-    if (!channel || channel.readyState !== WebSocket.OPEN) {
+    if (!channel || channel.readyState !== WebSocketImpl.OPEN) {
       if (wsKeepAliveTimer)
         clearInterval(wsKeepAliveTimer);
       wsKeepAliveTimer = null;
@@ -5363,10 +5756,10 @@ function connectWsChannel() {
     connectSafariNativeRelayChannel();
     return;
   }
-  if (wsChannel && (wsChannel.readyState === WebSocket.OPEN || wsChannel.readyState === WebSocket.CONNECTING))
+  if (wsChannel && (wsChannel.readyState === WebSocketImpl.OPEN || wsChannel.readyState === WebSocketImpl.CONNECTING))
     return;
   try {
-    const ws = new WebSocket(WS_URL);
+    const ws = new WebSocketImpl(WS_URL);
     wsChannel = ws;
     ws.onopen = async () => {
       if (wsChannel !== ws) {
@@ -5389,7 +5782,7 @@ function connectWsChannel() {
         } catch {}
         return;
       }
-      if (ws.readyState !== WebSocket.OPEN)
+      if (ws.readyState !== WebSocketImpl.OPEN)
         return;
       if (!sendWsRegistration(ws, contextId)) {
         closeWsForReconnect(ws);
@@ -5463,7 +5856,7 @@ function registerStorageContextListener() {
     const newId = changes.contextId.newValue;
     if (typeof newId !== "string" || newId.length === 0)
       return;
-    if (!newId || !wsChannel || wsChannel.readyState !== WebSocket.OPEN)
+    if (!newId || !wsChannel || wsChannel.readyState !== WebSocketImpl.OPEN)
       return;
     const channel = wsChannel;
     if (!sendWsRegistration(channel, newId)) {

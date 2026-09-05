@@ -1,9 +1,10 @@
+import { format } from "node:util"
 import { HELP, shortHelp, fullHelp, helpForCommand } from "./help"
 import { detectSurfaces, SURFACE_UPGRADE_HINT } from "./lib/surfaces"
 import { runSkillsCommand, maybeEmitSkillsHint } from "./commands/skills"
 import { runManifestCommand } from "./manifest"
-import { parseTabFlag, parseContextFlag, parseGroupFlag, parseGroupColorFlag } from "./parse"
-import { formatState, formatTabs, formatCookies, formatResult } from "./format"
+import { parseTabFlag, parseContextFlag, resolveGroupScope, parseGroupColorFlag } from "./parse"
+import { formatState, formatTabs, formatCookies, formatFind, formatResult } from "./format"
 import { sendCommand, sendCommandWs, setGlobalGroup, type DaemonResult, type DaemonResponse, type Action } from "./transport"
 import { UPLOAD_CHUNK_B64_BYTES } from "../shared/platform"
 import { chunkBase64 } from "../shared/upload"
@@ -31,7 +32,7 @@ import { parseBatchCommand } from "./commands/batch"
 import { parseMonitorCommand } from "./commands/monitor"
 import { parseSceneCommand } from "./commands/scene"
 import { parseSseCommand } from "./commands/sse"
-import { runCompoundCommand } from "./commands/compound"
+import { runCompoundCommand, webSearchQuery, webSearchTimeout } from "./commands/compound"
 import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
@@ -39,9 +40,21 @@ import { runInitCommand } from "./commands/init"
 import { runResearchCommand } from "./commands/research"
 import { runDiagnoseCommand } from "./commands/diagnose"
 import { runExtensionsCommand } from "./commands/extensions"
+import { runDaemonCommand } from "./commands/daemon"
 import { VERSION, BUILD_SHA, BUILD_DATE } from "./version"
 import { buildFilteredArgs } from "./global-flags"
-import { normalizeArgs } from "./normalize"
+import { normalizeArgsSplit } from "./normalize"
+
+// console.log must not be used for CLI output: Bun's console.log writer
+// silently drops everything past 64 KiB at exit when stderr and stdout share
+// one pipe (`2>&1`) and a stderr write (our transport trace line) precedes the
+// payload — on Bun 1.3.11 and 1.3.14, interpreted and compiled, any size.
+// process.stdout.write does not exhibit this, so route every console.log in
+// the process through it. console.error stays native: stderr payloads are
+// always smaller than the 64 KiB pipe buffer and never at risk.
+console.log = (...args: unknown[]): void => {
+  process.stdout.write(format(...args) + "\n")
+}
 
 // Command → module routing
 const STATE_CMDS = new Set(["state", "tree", "diff", "find", "text", "html"])
@@ -51,7 +64,7 @@ const TAB_CMDS = new Set(["tabs", "tab", "window", "frames", "session"])
 const NET_CMDS = new Set(["network", "net", "headers"])
 const SS_CMDS = new Set(["screenshot", "canvas", "capture", "ocr"])
 const DATA_CMDS = new Set(["cookies", "storage", "history", "bookmarks", "downloads", "clear", "clipboard"])
-const META_CMDS = new Set(["status", "reload", "meta", "links", "images", "forms", "info", "page_info", "query", "exists", "count", "table", "attr", "style", "events", "search", "notify", "sessions", "capabilities", "modals", "panels"])
+const META_CMDS = new Set(["status", "reload", "meta", "links", "images", "forms", "info", "page_info", "query", "exists", "count", "table", "attr", "style", "events", "notify", "sessions", "capabilities", "modals", "panels"])
 const EVAL_CMDS = new Set(["eval"])
 const SAVE_CMDS = new Set(["save"])
 const BRAND_CMDS = new Set(["brand"])
@@ -62,14 +75,16 @@ const POWER_CMDS = new Set(["keepawake", "idle"])
 const DELEGATE_CMDS = new Set(["delegate"])
 const SCENE_CMDS = new Set(["scene"])
 const SSE_CMDS = new Set(["sse"])
-const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect"])
+const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect", "websearch", "search"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
+const UPDATE_CMDS = new Set(["update"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const INIT_CMDS = new Set(["init"])
 const RESEARCH_CMDS = new Set(["research"])
 const DIAGNOSE_CMDS = new Set(["diagnose"])
 const EXTENSIONS_CMDS = new Set(["extensions"])
+const DAEMON_CMDS = new Set(["daemon"])
 const SKILLS_CMDS = new Set(["skills"])
 const MANIFEST_CMDS = new Set(["manifest"])
 const MCP_CMDS = new Set(["mcp"])
@@ -78,7 +93,7 @@ const MCP_CMDS = new Set(["mcp"])
 // bootstrap it themselves rather than relying on the pre-dispatch auto-spawn).
 // `research` prints guidance / manages an on-disk ledger — no browser, no daemon.
 // `diagnose` reads local state + optionally probes the daemon — never auto-spawns.
-const NO_DAEMON = new Set(["status", "help", "events", "delegate", "session", "upgrade", "init", "research", "extensions", "skills", "manifest", "diagnose", "mcp"])
+const NO_DAEMON = new Set(["status", "help", "events", "delegate", "session", "upgrade", "init", "research", "extensions", "skills", "manifest", "diagnose", "mcp", "daemon"])
 
 // Every command the CLI dispatches. Used to reject unknown commands
 // before any daemon-spawning side effect runs.
@@ -87,8 +102,8 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
-  ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
-  ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...MCP_CMDS,
+  ...UPDATE_CMDS, ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
+  ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...MCP_CMDS, ...DAEMON_CMDS,
   ...POWER_CMDS, ...DELEGATE_CMDS,
   "help", "contexts",
 ])
@@ -102,7 +117,9 @@ function unwrapResult(response: DaemonResponse): DaemonResult {
 
 async function main() {
   const args = process.argv.slice(2)
-  const jsonMode = args.includes("--json")
+  const optionTerminator = args.indexOf("--")
+  const globalArgs = optionTerminator === -1 ? args : args.slice(0, optionTerminator)
+  const jsonMode = globalArgs.includes("--json")
   // Screenshot responses can carry tens-to-hundreds of KB of base64
   // dataUrl payloads. Native-messaging port-based responses for that size
   // are unreliable on Brave/Chromium (messages are silently dropped despite
@@ -115,14 +132,17 @@ async function main() {
   // the action payload, e.g. "Unexpected token 'new'"). It therefore always
   // routes over WS — a stray --no-ws would otherwise produce a confusing parse
   // error. Screenshot still honors --no-ws as an escape hatch.
-  const useWs = args.includes("--ws") || isSaveCmd || (isScreenshotCmd && !args.includes("--no-ws"))
-  const anyTab = args.includes("--any-tab")
-  const globalTabId = parseTabFlag(args)
-  const globalContextId = parseContextFlag(args)
-  // --group / $INTERCEPTOR_GROUP scopes this invocation to a named tab
-  // group. Injected into every outgoing action at the transport choke point, so
-  // simple, compound, and looping command paths are all covered.
-  setGlobalGroup(parseGroupFlag(args), parseGroupColorFlag(args))
+  // issue #244: a secret-bearing action resolves inside the daemon's IPC handler,
+  // so it never takes the WebSocket lane.
+  const carriesSecret = args.includes("--secret") || (args[0] === "macos" && (args[1] === "secret" || args[1] === "sudo" || args[1] === "authdialog"))
+  const useWs = !carriesSecret && (globalArgs.includes("--ws") || isSaveCmd || (isScreenshotCmd && !globalArgs.includes("--no-ws")))
+  const anyTab = globalArgs.includes("--any-tab")
+  const globalTabId = parseTabFlag(globalArgs)
+  const globalContextId = parseContextFlag(globalArgs)
+  // Explicit or automatic session scope is injected into every outgoing
+  // action at the transport choke point, covering simple, compound, and loop paths.
+  const groupScope = resolveGroupScope(args)
+  setGlobalGroup(groupScope.label, parseGroupColorFlag(globalArgs), groupScope.soft)
 
   // Build filtered args (strip global flags). NB: --json is dual-purpose —
   // it can be a global "emit JSON output" boolean OR a domain-specific
@@ -173,8 +193,10 @@ async function main() {
   // rewrite argv to [cmd, ...positionals, ...flags] so flag
   // position never changes meaning (e.g. `open --text-only <url>` used to
   // create a tab whose URL was literally "--text-only"). macos passes
-  // through untouched — see cli/normalize.ts.
-  filtered = normalizeArgs(filtered)
+  // through untouched — see cli/normalize.ts. positionalCount marks where the
+  // positional span ends so text-sweeping parsers (type) never ingest flags.
+  const normalized = normalizeArgsSplit(filtered)
+  filtered = normalized.argv
 
   // Per-command --help / -h short-circuit. `interceptor open --help` prints
   // the open-specific help block; `interceptor --help` (no command) falls
@@ -207,9 +229,25 @@ async function main() {
     process.exit(1)
   }
 
+  // `websearch` validation happens before daemon auto-spawn so a malformed
+  // invocation has no browser or process side effects. The retained `search`
+  // alias uses the identical parser and lifecycle.
+  if ((cmd === "websearch" || cmd === "search") && !webSearchQuery(filtered)) {
+    console.error(`error: interceptor ${cmd} requires a non-empty query. Usage: interceptor ${cmd} "<query>"`)
+    process.exit(1)
+  }
+  if ((cmd === "websearch" || cmd === "search") && webSearchTimeout(filtered) === null) {
+    console.error("error: --timeout must be a non-negative integer")
+    process.exit(1)
+  }
+
   // fail fast (before any daemon spawn) when a surface is not
   // part of this install. Override with --all-surfaces / INTERCEPTOR_ALL_SURFACES.
-  if (MACOS_CMDS.has(cmd)) {
+  // `update` rides the macos surface: Sparkle lives in the bridge, so a mac
+  // browser-only install gets the upgrade hint instead of a bridge error.
+  // On win32 `update` skips the gate — its dispatch branch prints the
+  // Windows installer guidance instead of the macOS-only hint.
+  if (MACOS_CMDS.has(cmd) || (UPDATE_CMDS.has(cmd) && process.platform !== "win32")) {
     const surfaces = detectSurfaces(args)
     if (!surfaces.macos) {
       console.error(`error: ${SURFACE_UPGRADE_HINT}`)
@@ -222,6 +260,11 @@ async function main() {
   if (cmd !== "skills" && cmd !== "manifest") maybeEmitSkillsHint(args)
 
   let needsDaemon = !NO_DAEMON.has(cmd)
+  // win32 `update` prints static installer guidance — no daemon involved
+  // (on macOS it routes through the daemon to the bridge's Sparkle updater).
+  if (UPDATE_CMDS.has(cmd) && process.platform === "win32") {
+    needsDaemon = false
+  }
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
     needsDaemon = false
   }
@@ -235,6 +278,29 @@ async function main() {
 
   // Dispatch to command module
   let action: { type: string; [key: string]: unknown } | null
+
+  if (UPDATE_CMDS.has(cmd)) {
+    // `interceptor update` is the front door for updating Interceptor itself
+    // sugar for the retained-but-hidden
+    // `interceptor macos update check` — a user-initiated Sparkle check via the
+    // bridge that reports Sparkle's selected version, no-update result, or
+    // error. `interceptor update status` passes through to the lifecycle state.
+    //
+    // Windows has no Sparkle: updates ship as a signed installer (see
+    // docs/windows-install.md — run a newer architecture-matched Setup; the
+    // surface gate's macOS-only upgrade hint would be nonsense here).
+    if (process.platform === "win32") {
+      const msg = {
+        message: "Windows updates ship as a signed installer — download the latest Interceptor-Browser-<version>-windows-<arch>.exe and run Setup (upgrades preserve the install directory; downgrades are refused).",
+        releases: "https://github.com/Hacker-Valley-Media/Interceptor/releases",
+      }
+      console.log(jsonMode ? JSON.stringify({ success: true, data: msg }, null, 2) : `${msg.message}\n${msg.releases}`)
+      return
+    }
+    const sub = filtered[1] && !filtered[1].startsWith("-") ? filtered[1] : "check"
+    await runMacosCommand(["macos", "update", sub], { jsonMode, useWs, globalTabId, contextId: globalContextId })
+    return
+  }
 
   if (MACOS_CMDS.has(cmd)) {
     await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
@@ -270,6 +336,11 @@ async function main() {
 
   if (EXTENSIONS_CMDS.has(cmd)) {
     runExtensionsCommand(filtered, jsonMode)
+    return
+  }
+
+  if (DAEMON_CMDS.has(cmd)) {
+    await runDaemonCommand(filtered, jsonMode)
     return
   }
 
@@ -322,13 +393,13 @@ async function main() {
   }
 
   if (STATE_CMDS.has(cmd))       action = parseStateCommand(filtered)
-  else if (ACTION_CMDS.has(cmd)) action = parseActionsCommand(filtered)
+  else if (ACTION_CMDS.has(cmd)) action = parseActionsCommand(filtered, normalized.positionalCount)
   else if (NAV_CMDS.has(cmd))    action = parseNavigationCommand(filtered)
   else if (TAB_CMDS.has(cmd))    action = await parseTabsCommand(filtered)
   else if (NET_CMDS.has(cmd))    action = parseNetworkCommand(filtered)
   else if (SS_CMDS.has(cmd))     action = parseScreenshotCommand(filtered)
   else if (DATA_CMDS.has(cmd))   action = parseDataCommand(filtered)
-  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode)
+  else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode, globalContextId)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)
@@ -436,9 +507,9 @@ async function main() {
   // Apply global modifiers
   if (anyTab) action.anyTab = true
   if (filtered.includes("--changes")) action.changes = true
-  const frameIdx = args.indexOf("--frame")
-  if (frameIdx !== -1 && args[frameIdx + 1]) {
-    action.frameId = parseInt(args[frameIdx + 1])
+  const frameIdx = globalArgs.indexOf("--frame")
+  if (frameIdx !== -1 && globalArgs[frameIdx + 1]) {
+    action.frameId = parseInt(globalArgs[frameIdx + 1])
   }
 
   try {
@@ -507,6 +578,7 @@ async function main() {
             comment: `net log buffer dump (${captures.length} entries)`,
           },
           out: action.out as string | undefined,
+          redactAuth: action.redactAuth === true,
         })
         // pcapng with --out: also report saved path. har/json with --out: same. Both go to stderr so stdout stays clean.
         if (action.out) process.stderr.write(`saved: ${action.out}\n`)
@@ -531,9 +603,29 @@ async function main() {
         console.log(formatCookies(result.data as Parameters<typeof formatCookies>[0]))
         return
       }
+      if (action.type === "find_element" || action.type === "frames_find") {
+        console.log(formatFind(result.data as Parameters<typeof formatFind>[0]))
+        return
+      }
     }
 
+    // A background router older than this CLI forwards unrecognized action
+    // types to the content script, which answers "unknown action type: <t>" —
+    // the stale-extension-snapshot symptom after a pkg install (the running
+    // browser keeps the old service worker until reloaded). Label it.
+    if (!result.success && typeof result.error === "string" && result.error.startsWith("unknown action type:")) {
+      process.stderr.write(
+        `hint: the browser may be running an older Interceptor extension snapshot than this CLI (${VERSION}). ` +
+        `Run 'interceptor reload' (or reload the extension in the browser) and retry.\n`,
+      )
+    }
     console.log(formatResult(result, jsonMode))
+    // Issue #237: a failed action (`back` with no history, a rejected
+    // `navigate`, …) printed `error:` but the process still exited 0, so a
+    // scripted check read the failure as success. Every generic action funnels
+    // through this print, so the exit code is mapped once here. exitCode (not
+    // exit()) lets stdout drain and the transport close normally.
+    if (!result.success) process.exitCode = 1
   } catch (err) {
     console.error(`error: ${(err as Error).message}`)
     process.exit(1)

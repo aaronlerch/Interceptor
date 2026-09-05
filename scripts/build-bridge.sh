@@ -7,7 +7,7 @@
 #
 # Env overrides:
 #   INTERCEPTOR_SIGNING_IDENTITY  codesign identity (default: HVM Developer ID)
-#   INTERCEPTOR_BRIDGE_VERSION    version string in Info.plist (default 1.0.0)
+#   INTERCEPTOR_BRIDGE_VERSION    version string in Info.plist (default: package.json)
 #   INTERCEPTOR_ENABLE_PLATFORM_TARGETS=1
 #                                  compile in research-only platform target support
 #   INTERCEPTOR_SKIP_SIGNING=1    skip codesign + lsregister (dev mode)
@@ -21,7 +21,7 @@ DIST_DIR="$PROJECT_DIR/dist"
 
 INTERCEPTOR_SIGNING_IDENTITY="${INTERCEPTOR_SIGNING_IDENTITY:-Developer ID Application: HACKER VALLEY MEDIA, LLC (TPWBZD35WW)}"
 INTERCEPTOR_BRIDGE_IDENTIFIER="com.interceptor.bridge"
-INTERCEPTOR_BRIDGE_VERSION="${INTERCEPTOR_BRIDGE_VERSION:-1.0.0}"
+INTERCEPTOR_BRIDGE_VERSION="${INTERCEPTOR_BRIDGE_VERSION:-$(grep '"version"' "$PROJECT_DIR/package.json" | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')}"
 INTERCEPTOR_SPARKLE_FEED_URL="${INTERCEPTOR_SPARKLE_FEED_URL:-https://updates.hackervalley.media/appcast.xml}"
 INTERCEPTOR_SPARKLE_PUBLIC_KEY="${INTERCEPTOR_SPARKLE_PUBLIC_KEY:-dnUnuHGCO4obHb44Khlf2TZQFUMmFGGpm2c6j+EqmdU=}"
 ## Bridge carries Virtualization framework capabilities (VM lifecycle)
@@ -34,21 +34,32 @@ APP_ICON_NAME="interceptor"
 
 echo "==> Building interceptor-bridge (release)..."
 cd "$BRIDGE_DIR"
-SWIFT_FLAGS=()
+# BoringSSL embeds __FILE__ strings in the release binary. Map only SwiftPM's
+# dependency checkout root so those strings never disclose the build machine's
+# filesystem while source and module-cache diagnostics keep their normal paths.
+SWIFT_FLAGS=(
+  "-Xcc"
+  "-ffile-prefix-map=$BRIDGE_DIR/.build/checkouts=/src/interceptor-deps"
+)
 if [[ "${INTERCEPTOR_ENABLE_PLATFORM_TARGETS:-0}" == "1" ]]; then
   echo "==> Native platform target support: ENABLED (research build)"
   SWIFT_FLAGS+=("-Xswiftc" "-DINTERCEPTOR_ENABLE_PLATFORM_TARGETS")
-  swift build -c release "${SWIFT_FLAGS[@]}" 2>&1
 else
   echo "==> Native platform target support: disabled (public build)"
-  swift build -c release 2>&1
 fi
+swift build -c release "${SWIFT_FLAGS[@]}" 2>&1
 
 BINARY="$BRIDGE_DIR/.build/release/interceptor-bridge"
 if [ ! -f "$BINARY" ]; then
   echo "ERROR: Build failed — binary not found at $BINARY"
   exit 1
 fi
+
+# SwiftPM's final Mach-O symbol table records dependency and object-file paths
+# that compiler prefix maps do not cover. Remove local symbols before signing;
+# exported/runtime symbols remain intact.
+echo "==> Stripping local symbols from interceptor-bridge..."
+/usr/bin/strip -x "$BINARY"
 
 mkdir -p "$DIST_DIR"
 
@@ -236,6 +247,37 @@ else
   if security find-identity -p codesigning -v 2>/dev/null | grep -q "$INTERCEPTOR_SIGNING_IDENTITY"; then
     echo "==> Codesigning bundle with: $INTERCEPTOR_SIGNING_IDENTITY"
 
+    # issue #244: the secret vault stores items in the data protection
+    # keychain, which needs an application-identifier + keychain-access-groups
+    # entitlement authorized by an embedded Developer ID provisioning profile
+    # (TN3137). Embed the profile and add the three restricted entitlements
+    # only when the profile matches this identity's team and bundle id;
+    # otherwise sign with the base entitlements and the bridge reports
+    # dataProtection:false (the daemon keeps items in the login keychain).
+    SIGN_ENTITLEMENTS="$ENTITLEMENTS"
+    BRIDGE_PROFILE="${INTERCEPTOR_BRIDGE_PROFILE:-$SCRIPT_DIR/Interceptor-Bridge-Developer-ID.provisionprofile}"
+    TEAM_ID="$(echo "$INTERCEPTOR_SIGNING_IDENTITY" | sed -nE 's/.*\(([A-Z0-9]{10})\).*/\1/p')"
+    if [ -f "$BRIDGE_PROFILE" ] && [ -n "$TEAM_ID" ]; then
+      PROFILE_PLIST="$(mktemp -t bridge-profile).plist"
+      security cms -D -i "$BRIDGE_PROFILE" > "$PROFILE_PLIST" 2>/dev/null || true
+      PROFILE_APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.application-identifier' "$PROFILE_PLIST" 2>/dev/null || true)"
+      if [ "$PROFILE_APP_ID" = "$TEAM_ID.$INTERCEPTOR_BRIDGE_IDENTIFIER" ]; then
+        cp "$BRIDGE_PROFILE" "$APP_DIR/Contents/embedded.provisionprofile"
+        SIGN_ENTITLEMENTS="$(mktemp -t bridge-entitlements).plist"
+        cp "$ENTITLEMENTS" "$SIGN_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string $TEAM_ID.$INTERCEPTOR_BRIDGE_IDENTIFIER" "$SIGN_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $TEAM_ID" "$SIGN_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIGN_ENTITLEMENTS"
+        /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string $TEAM_ID.$INTERCEPTOR_BRIDGE_IDENTIFIER" "$SIGN_ENTITLEMENTS"
+        echo "==> Embedded provisioning profile ($PROFILE_APP_ID) + keychain-access-groups entitlement"
+      else
+        echo "==> Provisioning profile does not match $TEAM_ID.$INTERCEPTOR_BRIDGE_IDENTIFIER (got '${PROFILE_APP_ID:-none}'); signing without keychain-access-groups"
+      fi
+      rm -f "$PROFILE_PLIST"
+    else
+      echo "==> No bridge provisioning profile at $BRIDGE_PROFILE; signing without keychain-access-groups"
+    fi
+
     # Sign Sparkle.framework + nested helpers FIRST (inside-out is the rule).
     # Sparkle's helpers don't need our entitlements — they get hardened
     # runtime + timestamp only. The framework itself wraps everything.
@@ -265,19 +307,21 @@ else
     codesign --force --options runtime --timestamp \
       --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
       --identifier "$INTERCEPTOR_BRIDGE_IDENTIFIER" \
-      --entitlements "$ENTITLEMENTS" \
+      --entitlements "$SIGN_ENTITLEMENTS" \
       "$APP_DIR/Contents/MacOS/interceptor-bridge"
 
     codesign --force --options runtime --timestamp \
       --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
       --identifier "$INTERCEPTOR_BRIDGE_IDENTIFIER" \
-      --entitlements "$ENTITLEMENTS" \
+      --entitlements "$SIGN_ENTITLEMENTS" \
       "$APP_DIR"
 
     codesign --verify --strict --verbose=2 "$APP_DIR" || true
   else
     echo "==> Signing identity not present in keychain — performing ad-hoc sign for development."
     echo "    Set INTERCEPTOR_SIGNING_IDENTITY to a real Developer ID for distribution."
+    echo "    NOTE: TCC grants (Accessibility etc.) pin to this exact ad-hoc build and will NOT"
+    echo "    survive a rebuild — remove the stale System Settings row (−) and re-grant each time."
     if [ -d "$APP_DIR/Contents/Frameworks/Sparkle.framework" ]; then
       codesign --force --deep --sign - "$APP_DIR/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
     fi

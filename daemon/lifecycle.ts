@@ -1,5 +1,7 @@
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
-import { spawn } from "node:child_process"
+import { chmodSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { spawn, spawnSync } from "node:child_process"
+import { randomBytes, timingSafeEqual } from "node:crypto"
+import { win32 } from "node:path"
 
 export type PidState =
   | { status: "missing"; pid: null }
@@ -10,8 +12,8 @@ export type PidState =
 
 export type StartupDecision =
   | { action: "continue" }
-  | { action: "exit"; pid: number }
-  | { action: "relay"; pid: number }
+  | { action: "exit"; pid: number | null }
+  | { action: "relay"; pid: number | null }
   | { action: "spawn" }
   | { action: "clear-and-continue"; reason: string }
   | { action: "clear-and-spawn"; reason: string }
@@ -29,20 +31,107 @@ export type LockFileData = {
   // "native-singleton": a non-standalone process that fell back to serving
   // in-process after failing to spawn a detached standalone daemon.
   mode: "standalone" | "native-singleton"
+  shutdownProtocolVersion?: 1
+  shutdownToken?: string
 }
 
 export function readLockFile(lockPath: string): LockFileData | null {
   try {
-    return JSON.parse(readFileSync(lockPath, "utf-8")) as LockFileData
+    if (statSync(lockPath).size > 65_536) return null
+    const value = JSON.parse(readFileSync(lockPath, "utf-8")) as Record<string, unknown>
+    if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 0) return null
+    if (typeof value.version !== "string" || typeof value.execPath !== "string" || typeof value.startedAt !== "string") return null
+    if (typeof value.socketPath !== "string" || !Number.isSafeInteger(value.wsPort)) return null
+    if (value.mode !== "standalone" && value.mode !== "native-singleton") return null
+    if (value.shutdownProtocolVersion !== undefined && value.shutdownProtocolVersion !== 1) return null
+    if (value.shutdownToken !== undefined && (typeof value.shutdownToken !== "string" || !/^[0-9a-f]{64}$/.test(value.shutdownToken))) return null
+    if ((value.shutdownProtocolVersion === 1) !== (typeof value.shutdownToken === "string")) return null
+    return value as LockFileData
   } catch {
     return null
   }
 }
 
-export function writeLockFile(lockPath: string, data: LockFileData): void {
+export function generateShutdownToken(): string {
+  return randomBytes(32).toString("hex")
+}
+
+export function constantTimeTokenEquals(actual: unknown, expected: string): boolean {
+  if (typeof actual !== "string" || !/^[0-9a-f]{64}$/.test(actual) || !/^[0-9a-f]{64}$/.test(expected)) return false
+  return timingSafeEqual(Buffer.from(actual, "hex"), Buffer.from(expected, "hex"))
+}
+
+type SyncCommandResult = {
+  status: number | null
+  stdout: string
+  stderr: string
+  error?: Error
+}
+
+export type WindowsAclDeps = {
+  platform: NodeJS.Platform
+  env: NodeJS.ProcessEnv
+  spawnSync: (
+    command: string,
+    args: string[],
+    options: { encoding: "utf-8"; windowsHide: true },
+  ) => SyncCommandResult
+}
+
+const DEFAULT_WINDOWS_ACL_DEPS: WindowsAclDeps = {
+  platform: process.platform,
+  env: process.env,
+  spawnSync: (command, args, options) => spawnSync(command, args, options),
+}
+
+export function windowsSystem32Executable(executable: string, env: NodeJS.ProcessEnv = process.env): string {
+  return win32.join(env.SystemRoot || env.windir || "C:\\Windows", "System32", executable)
+}
+
+function commandFailureDetail(result: SyncCommandResult): string {
+  return result.error?.message
+    || result.stderr.trim()
+    || result.stdout.trim()
+    || (result.status === null ? "process did not exit" : `exit ${result.status}`)
+}
+
+export function currentWindowsSid(deps: WindowsAclDeps = DEFAULT_WINDOWS_ACL_DEPS): string {
+  const command = windowsSystem32Executable("whoami.exe", deps.env)
+  const result = deps.spawnSync(command, ["/user", "/fo", "csv", "/nh"], { encoding: "utf-8", windowsHide: true })
+  if (result.error || result.status !== 0) {
+    throw new Error(`cannot resolve the current Windows SID for lock-file ACL: ${command}: ${commandFailureDetail(result)}`)
+  }
+  const match = result.stdout.match(/S-1-(?:\d+-)+\d+/i)
+  if (!match) throw new Error(`whoami did not return a Windows SID: ${result.stdout.trim() || "empty output"}`)
+  return match[0]
+}
+
+export function restrictFileToCurrentUser(path: string, deps: WindowsAclDeps = DEFAULT_WINDOWS_ACL_DEPS): void {
+  if (deps.platform !== "win32") {
+    chmodSync(path, 0o600)
+    return
+  }
+  const sid = currentWindowsSid(deps)
+  const command = windowsSystem32Executable("icacls.exe", deps.env)
+  const result = deps.spawnSync(command, [path, "/inheritance:r", "/grant:r", `*${sid}:(F)`], {
+    encoding: "utf-8",
+    windowsHide: true,
+  })
+  if (result.error || result.status !== 0) {
+    throw new Error(`cannot restrict lock-file ACL: ${command}: ${commandFailureDetail(result)}`)
+  }
+}
+
+export function writeLockFile(lockPath: string, data: LockFileData, aclDeps: WindowsAclDeps = DEFAULT_WINDOWS_ACL_DEPS): void {
+  const tempPath = `${lockPath}.${process.pid}.${crypto.randomUUID()}.tmp`
   try {
-    writeFileSync(lockPath, JSON.stringify(data, null, 2), "utf-8")
-  } catch {}
+    writeFileSync(tempPath, `${JSON.stringify(data, null, 2)}\n`, { encoding: "utf-8", mode: 0o600, flag: "wx" })
+    restrictFileToCurrentUser(tempPath, aclDeps)
+    renameSync(tempPath, lockPath)
+  } catch (error) {
+    try { unlinkSync(tempPath) } catch {}
+    throw error
+  }
 }
 
 export function clearLockFile(lockPath: string): void {
@@ -123,9 +212,38 @@ export function clearDaemonRuntimeFiles(deps: Pick<LifecycleDeps, "unlinkSync" |
   try { deps.unlinkSync(deps.lockPath) } catch {}
 }
 
-export function decideDaemonStartupRole(standalone: boolean, state: PidState): StartupDecision {
+// Exit-path cleanup, gated on singleton ownership (PR #227). Today every
+// process that reaches the daemon's exit hook has already won the WS-port
+// gate: pid-election losers, gate losers, and native relays all exit before
+// the hook is registered, so `ownsRuntimeFiles` is true whenever this runs.
+// The guard is defensive against a future reordering; the runtime-file wipes
+// that actually strand a live daemon are the pid-file-driven clears in
+// bootstrap and the CLI's ensureDaemon, both of which now consult the port
+// first, and the pkg postinstall, which now removes files only for a dead pid.
+export function cleanupOwnedRuntimeFiles(
+  deps: Pick<LifecycleDeps, "unlinkSync" | "pidPath" | "lockPath" | "socketPath" | "isWin"> & { log?: (msg: string) => void },
+  ownsRuntimeFiles: boolean,
+): void {
+  if (!ownsRuntimeFiles) return
+  clearDaemonRuntimeFiles({ ...deps, log: deps.log ?? (() => {}) }, "exit")
+}
+
+// The pid file is advisory; the WS port is the singleton token (see
+// decideSingletonGate). `portHeld` is the answer from probing that port. While
+// it is held, a live singleton is serving whatever the pid file says, so this
+// process must never clear its runtime files or spawn a rival: relay to it
+// (native) or get out of its way (standalone). A pid that is alive while the
+// port is free is not a daemon (a daemon writes its pid only after binding
+// the port), so it is treated as stale.
+export function decideDaemonStartupRole(standalone: boolean, state: PidState, portHeld = false): StartupDecision {
+  if (portHeld) {
+    const pid = state.status === "alive" || state.status === "stale" ? state.pid : null
+    return standalone ? { action: "exit", pid } : { action: "relay", pid }
+  }
+
   if (state.status === "alive") {
-    return standalone ? { action: "exit", pid: state.pid } : { action: "relay", pid: state.pid }
+    const reason = `pid ${state.pid} alive but the singleton port is free`
+    return standalone ? { action: "clear-and-continue", reason } : { action: "clear-and-spawn", reason }
   }
 
   if (state.status === "stale") {

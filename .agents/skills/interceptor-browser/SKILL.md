@@ -13,14 +13,20 @@ This installed skill is self-contained. Source checkouts also have `AGENTS.md`, 
 
 ## Core Rules
 
-- Use compound commands (`open`, `read`, `act`, `inspect`) before low-level verbs.
+- Use compound commands (`open`, `websearch`, `read`, `act`, `inspect`) before low-level verbs.
+- `websearch "<query>"` searches through the browser's configured default provider in an Interceptor-managed background tab and returns the provider page. It is not Google-specific. `find "<query>"` never navigates: it searches the current page's complete rendered-text snapshot plus accessible elements. Use `find --text-only` for passages and `find --elements-only`/`--role` for controls.
 - Browser commands operate inside managed Interceptor tab groups. Do not use `--any-tab` unless the user explicitly authorizes acting outside those groups.
-- When other agents may share this browser, scope yourself with `--group <label>` on every command (or set `INTERCEPTOR_GROUP` once): your tabs live in their own colored group, resolution never leaves it, and cross-group targets are rejected. Run `interceptor group close <label>` when your job is done; `interceptor group list` shows what's running.
+- Supported agent shells get a soft per-session group automatically, labeled `s-<hash16>`, so bare commands reuse one tab per session and the idle sweeper has a cleanup unit. `INTERCEPTOR_SESSION_ID` is the harness-neutral contract; Interceptor also detects verified Maestro, Claude Code, and Codex session variables. Soft scope falls back to the active managed tab when the session group is empty. `--shared-group` (or empty `INTERCEPTOR_GROUP=`) explicitly uses Interceptor's shared default group; it does not remove managed grouping. **Concurrent lanes often share one host session id**, so give each lane a unique `--group lane-<n>` or `INTERCEPTOR_SESSION_ID`. Explicit `--group <label>` and non-empty `INTERCEPTOR_GROUP` provide hard isolation by default: resolution stays within that group and cross-group targets are rejected unless `--any-tab` is explicitly authorized. `interceptor group list` shows the automatic label.
+- Close your group with `interceptor group close <label>` when the job is done. The extension auto-closes groups after 10 minutes without tab activity by default; metadata polls such as `status` and `group list` do not keep a group alive. The timeout is configurable in the extension popup and is crash safety, not a substitute for cleanup.
+- In a named group, including an automatic session group, `open` navigates the group's most-recent tab by default (address-bar semantics; the reused tab stays in the background unless you add `--activate`). Pass `--no-reuse` when you need to keep the current page and open another, for example before comparing two pages or fanning out. `tab new` creates by default; explicit `--reuse` navigates the group's most-recent tab. Shared-default `open` creates by default.
 - `interceptor open <url>` and `interceptor tab new <url>` create background tabs by default. Only `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus.
 - If multiple browser profiles are connected, run `interceptor contexts` and pass `--context <id>`.
 - Safari registers as the stable context `safari`; route with `interceptor --context safari <verb>`. If it is absent, verify the notarized Interceptor Safari extension is enabled before attempting page commands. Safari's enable switch is a protected user-present action; never try to bypass its Touch ID/password gate.
 - Prefer structured reads (`read`, `tree`, `text`, `inspect`, `scene`) before screenshots. Open `references/screenshot-policy.md` before screenshot-heavy work.
+- Passwords and passcodes are typed by name from the keychain-backed vault: `interceptor type <ref> --secret <name>`. The daemon checks the tab's host against the secret's allowlist (`browser:<host>`) and the monitor records `***SECURE***`. Never put a credential in a literal `type` call or ask the user to paste one into chat; ask them to run `interceptor macos secret register <name> --target browser:<host>`.
 - Default to plain text output. Use `--json` only when piping into scripts or when a downstream tool needs a machine-readable contract.
+- Unknown flags are rejected (exit 1, naming the flag and command) rather than ignored, so a typo never reads as success; `screenshot` writes to disk with `--save`, not `--out`. Fix the flag instead of setting `INTERCEPTOR_LAX_FLAGS=1`.
+- A verb whose result is a failure prints `error: …` and exits non-zero (every browser verb, including `back`/`forward` with no history). Check `$?` in scripts; do not grep stdout for `error:` to detect failure.
 - If an already-loaded unpacked extension behaves stale after a package update, reload it from `chrome://extensions` or `brave://extensions`, or run `interceptor reload` once the extension is reachable.
 - Safari package updates are loaded through the containing app/appex; do not look for a Chrome-style unpacked-extension reload button.
 - Safari suspends its background worker when idle, so `--context safari` can briefly report "context 'safari' not found" between commands and then self-heal. Re-issue the command rather than treating one transient drop as failure. Note two Safari capability limits: `headers add` only modifies recognized standard headers (arbitrary `X-…` names are refused — use `override` instead), and passive `net` capture reflects genuine page traffic, not requests you originate from `eval` (its world is separate from the page's).
@@ -29,7 +35,8 @@ This installed skill is self-contained. Source checkouts also have `AGENTS.md`, 
 
 ```bash
 interceptor status                        # 1. Confirm daemon + extension are alive
-interceptor open "https://example.com"    # 2. Background tab + wait + tree + text
+interceptor websearch "example docs"      # 2a. Default provider → managed background results tab
+interceptor open "https://example.com"    # 2b. Or open a known URL → wait + tree + text
 interceptor read                          # 3. Current state (re-read after any mutation)
 interceptor act e5                        # 4. Click ref e5 (refs come from `read`)
 interceptor act e7 "example user"         # 5. Type into ref e7
@@ -79,8 +86,20 @@ If the target is **outside the page** - a native dialog, browser chrome (URL bar
 
 If the target is an **Electron / Chromium desktop app's web contents** (Slack, VS Code, Notion, Descript, etc.), use the CDP/app reference from `interceptor-macos`: `references/cdp-app.md`.
 
+If the task is **breadth research** — "investigate / go deep on / find everything about X" across many sources — load `interceptor-research`, which layers a planner loop, source ledger, and verification pass on top of this surface.
+
 ## Do Not Default To Troubleshooting
 
 - User wants a browser task completed → run Interceptor commands.
 - User wants Interceptor fixed, installed, or explained → that's a separate task; ask before diving into repo state.
 - Inside the Interceptor repo, use this skill for live browser validation, not as the primary source of repo-development instructions.
+
+## Completion
+
+A browser job is complete only when:
+
+- every claim about page state comes from a re-read (`read`/`inspect`) taken *after* the last mutation, not from the action's success alone;
+- artifacts you produced (screenshots, saved files, captured payloads) are named by absolute path in the report;
+- your tab group is closed (`interceptor group close <label>`) and `interceptor group list` no longer shows it — the list output is the proof, not the close command's exit code.
+
+Report what failed or was skipped as prominently as what worked. Never report only the happy fields.

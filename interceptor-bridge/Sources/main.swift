@@ -5,6 +5,16 @@ import Sparkle
 
 Platform.log("interceptor-bridge starting")
 Platform.cleanupSocket()
+// Lifecycle lock: held from pid publication through the socket bind (released
+// after `transport.start()` below) so an exiting older instance's cleanup can
+// never interleave with this instance taking ownership of the files.
+guard let lifecycleLockFD = Platform.acquireLifecycleLock(timeout: 5.0) else {
+    // Another instance is mid-start or mid-cleanup for longer than either
+    // ever takes. Starting unguarded would reopen the ownership race; exit
+    // non-zero instead so launchd's KeepAlive retries in a few seconds.
+    Platform.log("could not acquire the bridge lifecycle lock within 5 s; exiting so launchd retries")
+    exit(1)
+}
 Platform.writePID()
 
 let router = Router()
@@ -64,6 +74,10 @@ let detectDomain = DetectDomain()
 let translateDomain = TranslateDomain()
 let thumbnailDomain = ThumbnailDomain()
 let authDomain = AuthDomain()
+// issue #244: the secret vault's native pieces (registration box + data
+// protection keychain) and the administrator-prompt filler.
+let secretsDomain = SecretsDomain()
+let authDialogDomain = AuthDialogDomain()
 let calendarDomain = CalendarDomain()
 let remindersDomain = RemindersDomain()
 let contactsDomain = ContactsDomain()
@@ -134,6 +148,8 @@ router.register("detect", handler: detectDomain)
 router.register("translate", handler: translateDomain)
 router.register("thumbnail", handler: thumbnailDomain)
 router.register("auth", handler: authDomain)
+router.register("secrets", handler: secretsDomain)
+router.register("authdialog", handler: authDialogDomain)
 router.register("calendar", handler: calendarDomain)
 router.register("reminders", handler: remindersDomain)
 router.register("contacts", handler: contactsDomain)
@@ -147,6 +163,7 @@ router.register("share", handler: shareDomain)
 do {
     let transport = try Transport(router: router)
     transport.start()
+    Platform.releaseLifecycleLock(lifecycleLockFD)
 } catch {
     Platform.log("failed to start transport: \(error)")
     exit(1)
@@ -213,7 +230,8 @@ app.delegate = bridgeAppDelegate
 // SparkleUserDriverDelegate.swift for the full rationale and the gentle-
 // reminders contract. Held strongly here so it lives the lifetime of the
 // process — Sparkle weakly references its delegate.
-let sparkleUpdaterDelegate = SparkleUpdaterDelegate()
+let sparkleUpdateState = SparkleUpdateState()
+let sparkleUpdaterDelegate = SparkleUpdaterDelegate(updateState: sparkleUpdateState)
 let sparkleUserDriverDelegate = SparkleUserDriverDelegate()
 let updaterController = SPUStandardUpdaterController(
     startingUpdater: true,
@@ -225,7 +243,7 @@ let updaterController = SPUStandardUpdaterController(
 // can drive a user-initiated update check directly. Useful both for agents
 // and for verifying the activation-policy dialog path (since automatic
 // checks for LSUIElement apps may silently download rather than surface).
-let updateDomain = UpdateDomain(updaterController: updaterController)
+let updateDomain = UpdateDomain(updaterController: updaterController, updateState: sparkleUpdateState)
 router.register("update", handler: updateDomain)
 Platform.log("sparkle updater started; feed: \(updaterController.updater.feedURL?.absoluteString ?? "unset")")
 
