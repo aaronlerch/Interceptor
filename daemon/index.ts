@@ -547,6 +547,13 @@ async function deliverWithSecret(id: string, action: Record<string, unknown>, re
   if (literal.length > 0) { reply({ success: false, error: "--secret and literal text are mutually exclusive" }); return }
   const session = sessionLabel(action)
 
+  // Parse the reference BEFORE probing for a target. targetForAction() makes a
+  // round trip to the extension or the bridge; a malformed reference is knowable
+  // without one, and reporting a page-probe failure for what is actually a typo
+  // sends the operator after the wrong problem.
+  try { op.parseSecretRef(ref) }
+  catch (err) { const e = err as op.OpError; reply({ success: false, error: e.message, code: e.code }); return }
+
   let target: op.OpTarget
   try { target = await targetForAction(action, actionType, request) }
   catch (err) { reply({ success: false, error: (err as Error).message }); return }

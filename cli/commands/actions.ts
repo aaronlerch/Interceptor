@@ -88,7 +88,7 @@ export function parseActionsCommand(filtered: string[], positionalCount?: number
       const secretIdx = filtered.indexOf("--secret")
       if (secretIdx !== -1) {
         const secretRef = filtered[secretIdx + 1]
-        if (!secretRef || secretRef.startsWith("--")) { console.error("error: " + "error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
+        if (!secretRef || secretRef.startsWith("--") || !/^op:\/\/[^/]+\/[^/]+\/[^/]+$/.test(secretRef)) { console.error("error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
         if (textArgs.join("").length) { console.error("error: --secret and literal text are mutually exclusive"); process.exit(1) }
         const acctIdx = filtered.indexOf("--op-account")
         const opAccount = acctIdx === -1 ? undefined : filtered[acctIdx + 1]

@@ -226,7 +226,8 @@ describe("resolveOpSecret ordering", () => {
       { bin: "/op", run, env: {}, account: "my.1password.com" },
     )
     expect(res.value).toBe("hunter2")
-    for (const c of calls.filter((c) => c[1] !== "account")) {
+    expect(calls.length).toBeGreaterThan(0)
+    for (const c of calls) {
       expect(c).toContain("--account")
       expect(c).toContain("my.1password.com")
     }

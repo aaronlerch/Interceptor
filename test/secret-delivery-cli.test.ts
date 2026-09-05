@@ -87,6 +87,16 @@ describe("browser type --secret", () => {
     })
   })
 
+  test("a bare name is refused locally, before any daemon round trip", () => {
+    for (const bad of ["gmail", "op://Private/Gmail", "file:///etc/passwd"]) {
+      errors = []
+      const n = normalizeArgsSplit(["type", "e3", "--secret", bad])
+      expect(() => parseActionsCommand(n.argv, n.positionalCount)).toThrow("__exit_1")
+      expect(errors.join("\n")).toContain("op://<vault>/<item>/<field>")
+    }
+    expect(() => parseMacosCommand(["macos", "type", "--secret", "admin"])).toThrow("__exit_1")
+  })
+
   test("--op-account without a value is a usage error, not a swallowed flag", () => {
     const n = normalizeArgsSplit(["type", "e3", "--secret", REF, "--op-account"])
     expect(() => parseActionsCommand(n.argv, n.positionalCount)).toThrow("__exit_1")

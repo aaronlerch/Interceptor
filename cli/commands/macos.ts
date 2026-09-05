@@ -468,7 +468,7 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       // to match, so this path needs --op-any-target.
       if (filtered.includes("--secret")) {
         const secretRef = flagVal(filtered, "--secret")
-        if (!secretRef || secretRef.startsWith("--")) { console.error("error: " + "error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
+        if (!secretRef || secretRef.startsWith("--") || !/^op:\/\/[^/]+\/[^/]+\/[^/]+$/.test(secretRef)) { console.error("error: --secret requires a 1Password reference: op://<vault>/<item>/<field> (vault and item may each be a name or a UUID)"); process.exit(1) }
         const positionals = collectPositionals(filtered, 2, new Set(["--secret", "--op-account", "--app", "--pid"]))
         const ref = positionals[0] && /^e\d+$/.test(positionals[0]) ? positionals[0] : undefined
         const literal = ref ? positionals.slice(1) : positionals

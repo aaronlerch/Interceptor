@@ -209,14 +209,35 @@ export type RunOp = (argv: string[]) => Promise<{ ok: boolean; stdout: string; s
  * Argument array, never an interpolated string: the reference reaches us from a
  * CLI caller and must never be able to become shell syntax.
  */
+export const OP_TIMEOUT_MS = Number(process.env.INTERCEPTOR_OP_TIMEOUT_MS || 12_000)
+
 export const spawnOp: RunOp = async (argv) => {
   const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" })
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-  const exitCode = await proc.exited
-  return { ok: exitCode === 0, stdout, stderr }
+  let timedOut = false
+  const timer = setTimeout(() => { timedOut = true; try { proc.kill() } catch {} }, OP_TIMEOUT_MS)
+  try {
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    const exitCode = await proc.exited
+    if (timedOut) {
+      // `op` blocks on its authorization prompt. Without this the caller sees the
+      // transport's generic timeout, which blames the browser and sends the
+      // operator after the wrong problem entirely.
+      return {
+        ok: false,
+        stdout: "",
+        stderr:
+          `the 1Password CLI did not answer within ${Math.round(OP_TIMEOUT_MS / 1000)}s (${argv[1]} ${argv[2] ?? ""}). ` +
+          "It is usually waiting on an authorization prompt: bring 1Password to the front and approve it, or unlock the app. " +
+          "INTERCEPTOR_OP_TIMEOUT_MS raises the deadline.",
+      }
+    }
+    return { ok: exitCode === 0, stdout, stderr }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function accountArgs(account?: string): string[] {
@@ -298,7 +319,13 @@ export async function resolveOpSecret(
   const env = opts.env ?? process.env
   const ref = parseSecretRef(rawRef)
   const bin = opts.bin ?? resolveOpBinary(env)
-  const account = resolveAccount(opts.account, await signedInAccounts(bin, run), env)
+  // Only enumerate accounts when we genuinely have to disambiguate. `op account
+  // list` is the slowest call in this module and the one most likely to sit on a
+  // 1Password authorization prompt; running it on every delivery put a
+  // prompt-capable call on the hot path for no benefit when the account is
+  // already known from --op-account or INTERCEPTOR_OP_ACCOUNT.
+  const known = opts.account ?? env.INTERCEPTOR_OP_ACCOUNT
+  const account = known ?? resolveAccount(undefined, await signedInAccounts(bin, run), env)
 
   const urls = await itemUrls(bin, ref, account, run)
   const allowed = targetAllowedByItem(urls, target, { anyTarget: opts.anyTarget })

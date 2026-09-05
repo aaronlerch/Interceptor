@@ -211,11 +211,26 @@ exists to remove.
 got past auth and failed on vault lookup, not on ambiguity). With more than one
 account signed in, `--op-account` or `INTERCEPTOR_OP_ACCOUNT` is required.
 
+**`op` can block, and that is designed for.** Every invocation carries a 12s
+deadline (`INTERCEPTOR_OP_TIMEOUT_MS`). Without it a `op` sitting on a 1Password
+authorization prompt surfaced as the *transport's* generic 15s timeout, whose
+message blames the browser — sending the operator after entirely the wrong
+problem. The timeout message names the prompt instead. Found the honest way:
+live testing wedged `op` on this machine, and the first symptom was a browser
+error.
+
+**`op account list` is off the hot path.** It is the slowest call in the module
+and the one most likely to sit on an authorization prompt, so it runs *only*
+when the account is genuinely unknown — not when `--op-account` or
+`INTERCEPTOR_OP_ACCOUNT` already answers the question. The first draft called it
+on every delivery, which put a prompt-capable call in front of every single
+`--secret` use.
+
 **Regression guard.** `test/op-secrets.test.ts` (25 cases) covers reference
 parsing, absolute-path binary resolution, account disambiguation, the item-URL
-target check, and — most importantly — the **ordering**: three cases assert that
-a refused target, a URL-less item, and an ambiguous account each fail *before*
-`op read` appears in the recorded argv.
+target check, the two hot-path skips above, and — most importantly — the
+**ordering**: three cases assert that a refused target, a URL-less item, and an
+ambiguous account each fail *before* `op read` appears in the recorded argv.
 
 ---
 
