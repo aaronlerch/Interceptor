@@ -17,6 +17,7 @@ import {
   resolveAccount,
   resolveOpBinary,
   resolveOpSecret,
+  signedInAccounts,
   targetAllowedByItem,
   urlHost,
   type RunOp,
@@ -157,6 +158,14 @@ describe("the target check reads the 1Password item's own URLs", () => {
 })
 
 describe("op invocation", () => {
+  test("a failing account list throws instead of reporting zero accounts", async () => {
+    // "op did not answer" and "no accounts signed in" are different facts;
+    // collapsing them makes a wedged 1Password look like a sign-in problem.
+    const { run } = fakeOp({ account: { ok: false, stderr: "did not answer within 12s" } })
+    await expect(signedInAccounts("/op", run)).rejects.toMatchObject({ code: "op_failed" })
+  })
+
+
   test("itemUrls reads metadata only — the argv never contains 'read'", async () => {
     const { run, calls } = fakeOp({ item: { stdout: ITEM_WITH_URL } })
     const urls = await itemUrls("/opt/homebrew/bin/op", parseSecretRef("op://Private/Gmail/password"), "my.1password.com", run)

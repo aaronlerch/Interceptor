@@ -244,14 +244,21 @@ function accountArgs(account?: string): string[] {
   return account ? ["--account", account] : []
 }
 
+/**
+ * Throws rather than returning `[]` on failure. An empty list and "op never
+ * answered" are different facts, and collapsing them makes a wedged 1Password
+ * look like a sign-in problem — which sends the operator to the wrong place.
+ */
 export async function signedInAccounts(bin: string, run: RunOp = spawnOp): Promise<string[]> {
   const r = await run([bin, "account", "list", "--format", "json"])
-  if (!r.ok) return []
+  if (!r.ok) {
+    throw new OpError("op_failed", `could not list 1Password accounts: ${r.stderr.trim() || "unknown error"}`)
+  }
   try {
     const rows = JSON.parse(r.stdout) as Array<{ url?: string; user_uuid?: string }>
     return rows.map((a) => a.url || a.user_uuid || "").filter((s) => s.length > 0)
   } catch {
-    return []
+    throw new OpError("op_failed", "could not parse the 1Password account list")
   }
 }
 

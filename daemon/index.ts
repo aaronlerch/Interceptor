@@ -462,20 +462,31 @@ async function handleSecretAction(action: Record<string, unknown>, _request: Cli
   }
   try {
     const bin = op.resolveOpBinary()
-    const accounts = await op.signedInAccounts(bin)
+    let accounts: string[] = []
+    let reachable = true
+    let unreachable: string | undefined
+    try {
+      accounts = await op.signedInAccounts(bin)
+    } catch (err) {
+      // Distinguish "op did not answer" from "no accounts signed in". Reporting
+      // an empty list for a wedged op sends the operator to the wrong problem.
+      reachable = false
+      unreachable = (err as op.OpError).message
+    }
     let account: string | undefined
     let ambiguous: string | undefined
-    try {
-      account = op.resolveAccount(undefined, accounts)
-    } catch (err) {
-      ambiguous = (err as op.OpError).message
+    if (reachable) {
+      try { account = op.resolveAccount(undefined, accounts) }
+      catch (err) { ambiguous = (err as op.OpError).message }
     }
     return {
-      success: true,
+      success: reachable,
+      error: unreachable,
       data: {
         backend: "1password-cli",
         op: bin,
-        accounts,
+        reachable,
+        accounts: reachable ? accounts : null,
         account: account ?? null,
         accountAmbiguous: ambiguous ?? null,
         reference: "op://<vault>/<item>/<field>",
