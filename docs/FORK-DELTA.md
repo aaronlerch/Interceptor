@@ -293,7 +293,11 @@ revisitable rather than forgotten.
 
 ## Merge checklist
 
-1. `git fetch origin && git log --oneline valid/main..origin/main`
+1. `git fetch upstream && git log --oneline my-install..upstream/main`
+   Note the remote layout: `origin` is our fork (`aaronlerch/Interceptor`), whose
+   `main` is frozen at the fork point; `upstream` is Hacker-Valley-Media. The
+   working branch is `my-install`. `valid/main` throughout this document names
+   this line of work, not a ref that exists — never `reset --hard origin/main`.
 2. Review `.agents/skills/**` and `.agents/rules/**` diffs — these are agent
    instructions, not docs.
 3. Re-scan `extension/dist-mv2/*.js` for new remote hosts.

@@ -249,7 +249,7 @@ Actions:
   interceptor type <index|ref> <text>        Type into element (clears first)
   interceptor type <index|ref> <text> --append  Type without clearing
   interceptor type "role:name" <text>        Type using semantic selector (e.g. "button:Submit")
-  interceptor type <index|ref> --secret <name>   Type a vault secret by name (value resolved in the daemon, never shown)
+  interceptor type <index|ref> --secret op://<vault>/<item>/<field>   Type a 1Password field (resolved in the daemon, never shown)
   interceptor click "text:<query>"            Click first element whose textContent matches (e.g. "text:Save")
   interceptor select <index|ref> <value>     Select dropdown option
   interceptor focus <index|ref>              Focus element
@@ -510,7 +510,7 @@ macOS Bridge (full install only):
   interceptor macos click <ref> --double|--right
   interceptor macos type <ref> "<text>"      AX value-set on text-bearing role
   interceptor macos type "<text>" --app <name>   Type via postToPid keys
-  interceptor macos type [<ref>] --secret <name> Type a vault secret by name (allowlisted per app)
+  interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-target   Type a 1Password field into a native app
   interceptor macos keys "Meta+A" [--app <name>|--pid N]
   interceptor macos scroll up|down|left|right N [--app <name>] [--times N] [--interval-ms N]
   interceptor macos drag <fromRef> <toRef> [--app <name>]
