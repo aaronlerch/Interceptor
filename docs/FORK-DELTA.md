@@ -106,6 +106,23 @@ driven. Not a security change — kept here because it is the other reason
 `valid/main` diverges, and it is the piece most likely to conflict on merge
 (`extension/src/background/message-dispatch.ts` did).
 
+**Merge hazard it introduced.** The feature added
+`extension/src/background/tab-active.ts`, which registers
+`chrome.tabs.onRemoved` at import time, and put it on `message-dispatch`'s
+import list — so `transport` now pulls a `chrome` dependency in transitively.
+Upstream's `test/transport-halfopen-ws.test.ts` imports `transport` to exercise
+pure functions and installs no `chrome` global, so on this fork it threw during
+module evaluation. The half-initialized module then poisoned the cache for every
+later file importing `transport`, which is why the symptom showed up in
+`test/extension-ws-lifecycle.test.ts` instead — a file that stubs `chrome`
+correctly and passes in isolation.
+
+The fix is a `chrome` stub at the top of `transport-halfopen-ws.test.ts`. That
+file is otherwise byte-identical to upstream, so a merge that takes upstream's
+copy silently reverts the stub and the half-open WebSocket reconnect gate goes
+untested — the code that recovers a wedged browser connection. Check it after
+every merge.
+
 ---
 
 ## 5. `macos sudo` is removed

@@ -1,4 +1,26 @@
-import { describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
+
+// `transport` reaches `tab-active` via `message-dispatch`, and that module calls
+// `chrome.tabs.onRemoved.addListener` at import time. With no `chrome` global the
+// chain throws during module evaluation, which leaves the namespace half-built:
+// hoisted function declarations still resolve, but every `const` stays in its
+// temporal dead zone. That is why only two tests here failed — the ones touching
+// WS_KEEPALIVE_MISS_LIMIT — while the ones calling functions passed. The broken
+// module is then cached, so it also took down other files importing `transport`
+// later in the same run.
+//
+// These tests exercise pure functions; the stub only has to satisfy that
+// import-time side effect. Saved and restored so it does not leak into the files
+// that install their own fake chrome.
+const hadOriginalChrome = Object.prototype.hasOwnProperty.call(globalThis, "chrome")
+const originalChrome = (globalThis as { chrome?: unknown }).chrome
+;(globalThis as { chrome: unknown }).chrome = {
+  tabs: { onRemoved: { addListener: () => {} } },
+}
+afterAll(() => {
+  if (hadOriginalChrome) (globalThis as { chrome?: unknown }).chrome = originalChrome
+  else delete (globalThis as { chrome?: unknown }).chrome
+})
 
 // Half-open ws detection: after MV3 service-worker hibernation the OS socket can
 // wedge OPEN-but-dead — the extension's outbound keepalives keep flowing while
