@@ -3,33 +3,53 @@
 // running. `-f` matches whole command lines, and the installer's own line
 // contains the name (`bash scripts/install.sh --brave …`), so the browser
 // always looked running — and the "force restart" `pkill -f` signalled the
-// installer itself. The fix routes every check through browser_running /
-// kill_browser, whose Linux pattern is anchored to argv[0].
+// installer itself.
 //
+// The first fix anchored the Linux match to argv[0]: `^([^ ]*/)?google-chrome`.
+// That traded a false positive for a false NEGATIVE. Chromium re-execs its
+// browser process with argv[0] set to the real executable, so a Chrome started
+// from the desktop launcher runs as `/opt/google/chrome/chrome` and the
+// anchored pattern matched nothing at all (Ubuntu 24.04 / Chrome 152).
+//
+// A false negative is the worse direction: write_developer_mode_true() gates on
+// browser_running, so the installer would rewrite Preferences beneath a live
+// browser, which overwrites that file on shutdown and silently discards the
+// Developer-mode flip — leaving a dormant install that times out at 15s per
+// command.
+//
+// Detection now reads /proc/<pid>/exe, which is immune to argv[0] rewriting.
 // The helper is extracted from the real script text (single source of truth)
-// and exercised against live decoy processes with the host's pgrep.
+// and exercised against live decoy processes for BOTH regressions.
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync } from "bun"
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join, resolve } from "node:path"
 
 const REPO_ROOT = resolve(import.meta.dir, "..")
 const SCRIPT = readFileSync(resolve(REPO_ROOT, "scripts/install.sh"), "utf-8")
-const HELPER = SCRIPT.match(/browser_pgrep_pattern\(\) \{\n[\s\S]*?\n\}\n/)?.[0]
-const CAN_PGREP = process.platform !== "win32"
+const HELPER = SCRIPT.match(/browser_pids_for\(\) \{\n[\s\S]*?\n\}\n/)?.[0]
+const IS_LINUX = process.platform === "linux"
 
-function pattern(platform: "Linux" | "Darwin", name: string): string {
-  if (!HELPER) throw new Error("browser_pgrep_pattern() not found in scripts/install.sh")
-  const run = spawnSync(["bash", "-c", `PLATFORM=${platform}\n${HELPER}\nbrowser_pgrep_pattern "$1"`, "bash", name])
-  return run.stdout.toString()
-}
-function pgrepPids(pat: string): number[] {
-  const run = spawnSync(["pgrep", "-f", pat])
+function pidsFor(launcher: string, binDir: string): number[] {
+  if (!HELPER) throw new Error("browser_pids_for() not found in scripts/install.sh")
+  const run = spawnSync([
+    "bash",
+    "-c",
+    `PATH="$2:$PATH"\n${HELPER}\nbrowser_pids_for "$1"`,
+    "bash",
+    launcher,
+    binDir,
+  ])
   return run.stdout.toString().split("\n").filter(Boolean).map(Number)
 }
 
 const children: ReturnType<typeof spawn>[] = []
-afterAll(() => { for (const c of children) { try { c.kill() } catch {} } })
+const tmpDirs: string[] = []
+afterAll(() => {
+  for (const c of children) { try { c.kill() } catch {} }
+  for (const d of tmpDirs) { try { rmSync(d, { recursive: true, force: true }) } catch {} }
+})
 
 describe("install.sh browser-running detection (issue #172)", () => {
   test("every browser-running check goes through the helpers; no bare pgrep -f on the binary remains", () => {
@@ -43,30 +63,53 @@ describe("install.sh browser-running detection (issue #172)", () => {
     expect(SCRIPT.match(/\bkill_browser "\$/g)?.length).toBe(1)
   })
 
-  test("Linux pattern is anchored to argv[0]; Darwin keeps the .app path verbatim", () => {
-    expect(pattern("Linux", "brave")).toBe("^([^ ]*/)?brave")
-    expect(pattern("Linux", "google-chrome")).toBe("^([^ ]*/)?google-chrome")
-    const app = "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
-    expect(pattern("Darwin", app)).toBe(app)
+  test("the argv[0]-anchored pattern is gone; Linux detection reads /proc/<pid>/exe", () => {
+    // Guards the revert: that pattern cannot see a re-exec'd Chromium at all.
+    // Comments are stripped first — the rationale above deliberately quotes the
+    // old pattern, and documenting it must not trip its own regression guard.
+    const code = SCRIPT.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n")
+    expect(code).not.toMatch(/\^\(\[\^ \]\*\/\)\?/)
+    expect(code).not.toMatch(/browser_pgrep_pattern/)
+    expect(HELPER).toMatch(/\/proc\/\[0-9\]\*\/exe/)
   })
 
-  test.skipIf(!CAN_PGREP)("the installer's own argv no longer matches; a process launched as the browser still does", async () => {
-    // Decoy 1: the reporter's exact shape — a bash process whose command line
-    // carries `--brave` (installer argv) but whose argv[0] is bash.
-    // (`sleep 20; :` — two commands, so bash forks instead of exec'ing sleep in
-    // place, which would drop the installer-shaped argv from the process list.)
-    const installer = spawn({ cmd: ["bash", "-c", "sleep 20; :", "bash", "--browser-only", "--brave", "--profile", "Default"], stdout: "ignore", stderr: "ignore" })
-    // Decoy 2: a process launched AS the browser — argv[0] is the binary path,
-    // as with the real binary or a distro wrapper's `exec -a "$0"`.
-    const browser = spawn({ cmd: ["bash", "-c", "exec -a /opt/brave.com/brave/brave sleep 20"], stdout: "ignore", stderr: "ignore" })
+  test("Darwin keeps pgrep on the .app binary path", () => {
+    // The .app path never appears in the installer's own argv, so the Darwin
+    // branch is unambiguous and deliberately unchanged.
+    expect(SCRIPT).toMatch(/if \[\[ "\$PLATFORM" == "Darwin" \]\]; then\n {4}pgrep -f "\$1" >\/dev\/null 2>&1/)
+  })
+
+  test.skipIf(!IS_LINUX)("a re-exec'd browser is detected, and the installer's own argv still is not", async () => {
+    // A browser install dir: a launcher name on PATH beside the real binary,
+    // mirroring /opt/google/chrome/{google-chrome,chrome}.
+    const root = mkdtempSync(join(tmpdir(), "interceptor-browser-detect-"))
+    tmpDirs.push(root)
+    const binDir = join(root, "bin")
+    mkdirSync(binDir)
+    const realBinary = join(binDir, "chromelike")
+    copyFileSync("/bin/sleep", realBinary)
+    chmodSync(realBinary, 0o755)
+    symlinkSync(realBinary, join(binDir, "fakechrome"))
+
+    // Decoy 1 — the regression this test was originally written for: a bash
+    // process whose command line carries installer argv, but whose exe is bash.
+    const installer = spawn({
+      cmd: ["bash", "-c", "sleep 20; :", "bash", "--browser-only", "--fakechrome", "--profile", "Default"],
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    // Decoy 2 — the regression the argv[0] anchor introduced: a process running
+    // the browser binary whose argv[0] has been rewritten to something else,
+    // exactly as Chromium re-execs itself as /opt/google/chrome/chrome.
+    const browser = spawn({
+      cmd: ["bash", "-c", `exec -a /some/rewritten/argv0 ${realBinary} 20`],
+      stdout: "ignore",
+      stderr: "ignore",
+    })
     children.push(installer, browser)
     await Bun.sleep(300)
 
-    // The old predicate reproduces the bug: it matches the installer decoy.
-    expect(pgrepPids("brave")).toContain(installer.pid)
-
-    const anchored = pattern("Linux", "brave")
-    const pids = pgrepPids(anchored)
+    const pids = pidsFor("fakechrome", binDir)
     expect(pids).not.toContain(installer.pid)
     expect(pids).toContain(browser.pid)
   })

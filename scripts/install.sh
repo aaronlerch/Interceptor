@@ -109,27 +109,72 @@ browser_bin_for() {
   esac
 }
 
-# Is the target browser running? On Darwin BROWSER_BIN is the .app binary path,
-# which never appears in this script's own argv. On Linux it is a bare name
-# (brave, google-chrome) that DOES — `bash install.sh --brave` — so a plain
-# `pgrep -f` on that bare name matched the installer itself: every "is the browser
-# running" check answered yes, and the "force restart" pkill signalled the
-# script (issue #172). Anchor the Linux match to argv[0] so only a process
-# launched as the browser counts. Distro wrapper scripts `exec -a "$0"` the
-# real binary, so the wrapper name stays in argv[0]; the name is a prefix match
-# so google-chrome also covers google-chrome-stable.
-browser_pgrep_pattern() {
-  if [[ "$PLATFORM" == "Darwin" ]]; then
-    printf '%s' "$1"
-  else
-    printf '^([^ ]*/)?%s' "$1"
-  fi
+# Is the target browser running?
+#
+# Darwin: BROWSER_BIN is the .app binary path, which never appears in this
+# script's own argv, so `pgrep -f` on it is unambiguous. Unchanged.
+#
+# Linux: BROWSER_BIN is a launcher name (google-chrome, brave-browser) that DOES
+# appear in this script's own argv — `bash install.sh --brave` — so a plain
+# `pgrep -f` matched the installer itself (issue #172). The first fix for that
+# anchored the match to argv[0], on the assumption that distro wrappers
+# `exec -a "$0"` the real binary and so keep the launcher name in argv[0].
+#
+# That assumption is wrong. Chromium re-execs its own browser process with
+# argv[0] set to the real executable, so a Chrome started from the desktop
+# launcher runs as `/opt/google/chrome/chrome` and the anchored pattern matched
+# NOTHING. Verified 2026-09-08, Ubuntu 24.04 / Chrome 152:
+# `pgrep -f '^([^ ]*/)?google-chrome'` returned no PIDs with Chrome live.
+#
+# The false negative is the dangerous direction. write_developer_mode_true()
+# gates on browser_running, so the installer would rewrite Preferences beneath a
+# running browser; Chrome rewrites that file on shutdown and silently discards
+# the Developer-mode flip, leaving a dormant install that times out at 15s on
+# every command — the exact failure the preflight exists to prevent.
+#
+# Ask the kernel instead. /proc/<pid>/exe is the running executable, immune to
+# argv[0] rewriting, and it can never match this script (whose exe is bash).
+#
+# Echoes the PID of every live process executing the resolved browser binary, or
+# any sibling in its install directory (the wrapper and the real binary differ:
+# /opt/google/chrome/google-chrome vs /opt/google/chrome/chrome). A browser
+# installed straight into a shared system bindir yields no usable directory
+# boundary, so those fall back to an exact match on the resolved binary.
+browser_pids_for() {
+  local launcher resolved dir exe target pid
+  launcher="$(command -v "$1" 2>/dev/null)" || return 0
+  [[ -n "$launcher" ]] || return 0
+  resolved="$(readlink -f "$launcher" 2>/dev/null)" || return 0
+  [[ -n "$resolved" ]] || return 0
+  dir="$(dirname "$resolved")"
+  case "$dir" in
+    /|/bin|/sbin|/usr/bin|/usr/sbin|/usr/local/bin|/usr/local/sbin) dir="" ;;
+  esac
+  for exe in /proc/[0-9]*/exe; do
+    target="$(readlink "$exe" 2>/dev/null)" || continue
+    if [[ "$target" == "$resolved" ]] || { [[ -n "$dir" ]] && [[ "$target" == "$dir"/* ]]; }; then
+      pid="${exe#/proc/}"
+      printf '%s\n' "${pid%/exe}"
+    fi
+  done
 }
 browser_running() {
-  pgrep -f "$(browser_pgrep_pattern "$1")" >/dev/null 2>&1
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    pgrep -f "$1" >/dev/null 2>&1
+    return
+  fi
+  [[ -n "$(browser_pids_for "$1")" ]]
 }
 kill_browser() {
-  pkill -TERM -f "$(browser_pgrep_pattern "$1")" 2>/dev/null || true
+  if [[ "$PLATFORM" == "Darwin" ]]; then
+    pkill -TERM -f "$1" 2>/dev/null || true
+    return
+  fi
+  local pid
+  while read -r pid; do
+    [[ -n "$pid" ]] && kill -TERM "$pid" 2>/dev/null
+  done < <(browser_pids_for "$1")
+  return 0
 }
 
 # ── Parse flags ────────────────────────────────────────────────────────────────
