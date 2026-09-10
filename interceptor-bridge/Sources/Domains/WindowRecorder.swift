@@ -313,7 +313,7 @@ final class WindowRecorder: @unchecked Sendable {
                 // Block on frame zero. Reporting a start time taken from here
                 // instead would be wrong by the whole cold-start gap, and every
                 // offset the caller derives from it would inherit that error.
-                guard let firstFrame = probe.waitForFirstFrame(
+                guard let firstFrame = await probe.waitForFirstFrame(
                     timeoutMs: firstFrameTimeoutMs
                 ) else {
                     // Tear down rather than leave a stream writing to a file
@@ -409,13 +409,26 @@ final class WindowRecorder: @unchecked Sendable {
 
         Task { [weak self, finishTimeoutMs] in
             let stoppedAt = Date()
-            try? stream.removeRecordingOutput(recOutput)
-            try? await stream.stopCapture()
 
-            // SCRecordingOutput finalises the container asynchronously. Return
-            // before that and the caller reads a file whose moov atom has not
-            // been written — ffprobe reports a broken duration, or nothing.
-            let finished = delegate?.waitForFinish(timeoutMs: finishTimeoutMs) ?? true
+            // Stop the STREAM and let it finalise the recording output. Do NOT
+            // removeRecordingOutput first: yanking the output from a running
+            // stream races its finalisation, and the outcome is one of two
+            // wrong answers — `didFailWithError` (so a complete file is
+            // reported `finalized:false` with an error) or a `stopCapture()`
+            // that never returns (so the verb wedges past the CLI's 15s
+            // ceiling with the mp4 already whole on disk). Both were observed
+            // on the same build, minutes apart, which is what a race looks
+            // like. Stopping the stream is the documented way to close an
+            // SCRecordingOutput cleanly. (2026-09-10)
+            await Self.withTimeout(seconds: 10) {
+                try? await stream.stopCapture()
+            }
+
+            // SCRecordingOutput finalises the container asynchronously even
+            // after the stream is down. Return before that and the caller
+            // reads a file whose moov atom has not been written — ffprobe
+            // reports a broken duration, or nothing.
+            let finished = await delegate?.waitForFinish(timeoutMs: finishTimeoutMs) ?? true
 
             let bytes = recOutput.recordedFileSize
             let recordedSec = recOutput.recordedDuration.seconds
@@ -448,8 +461,27 @@ final class WindowRecorder: @unchecked Sendable {
         }
     }
 
+    /// Run `body`, giving up after `seconds`. ScreenCaptureKit calls are
+    /// normally prompt, but one that hangs must not take the wire request with
+    /// it — a caller that gets no reply cannot even find out where its file is.
+    private static func withTimeout(
+        seconds: Double,
+        _ body: @escaping @Sendable () async -> Void
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await body() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     /// Caller holds `lock`.
     private func reset() {
+        // Dropping the reference is the teardown. The stream has already been
+        // stopped, which is what finalises the output — see stop().
         stream = nil
         recordingOutput = nil
         recordingDelegate = nil
@@ -470,7 +502,6 @@ enum RecorderError: Error {
 /// Stamps the wall clock of the first `.complete` sample buffer and counts the
 /// rest. Deliberately does no pixel work.
 final class FirstCompleteFrameProbe: NSObject, SCStreamOutput, @unchecked Sendable {
-    private let gate = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var first: Date?
     private var count = 0
@@ -487,10 +518,21 @@ final class FirstCompleteFrameProbe: NSObject, SCStreamOutput, @unchecked Sendab
         }
     }
 
-    func waitForFirstFrame(timeoutMs: Int) -> Date? {
-        if let existing = lock.withLock({ first }) { return existing }
-        _ = gate.wait(timeout: .now() + .milliseconds(timeoutMs))
-        return lock.withLock { first }
+    /// Polled, not semaphored. `DispatchSemaphore.wait` inside a Swift
+    /// concurrency `Task` blocks a cooperative thread the runtime is entitled
+    /// to reuse, and ScreenCaptureKit delivers both sample buffers and
+    /// recording-lifecycle callbacks on queues of its own choosing — so a
+    /// blocking wait here can outlive its own timeout and never return. It did:
+    /// `capture record stop` hung past the CLI's 15s ceiling with the mp4
+    /// already complete on disk (2026-09-10). 20ms polling costs nothing next
+    /// to a 1.5s cold start and cannot wedge.
+    func waitForFirstFrame(timeoutMs: Int) async -> Date? {
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+        while true {
+            if let existing = lock.withLock({ first }) { return existing }
+            if Date() >= deadline { return nil }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 
     func stream(
@@ -511,15 +553,10 @@ final class FirstCompleteFrameProbe: NSObject, SCStreamOutput, @unchecked Sendab
         {
             return
         }
-        var signal = false
         lock.withLock {
             count += 1
-            if first == nil {
-                first = Date()
-                signal = true
-            }
+            if first == nil { first = Date() }
         }
-        if signal { gate.signal() }
     }
 }
 
@@ -528,7 +565,6 @@ final class FirstCompleteFrameProbe: NSObject, SCStreamOutput, @unchecked Sendab
 final class RecordingLifecycleDelegate: NSObject, SCRecordingOutputDelegate,
     @unchecked Sendable
 {
-    private let finishGate = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var failureMessage: String?
     private var finishedFlag = false
@@ -541,10 +577,20 @@ final class RecordingLifecycleDelegate: NSObject, SCRecordingOutputDelegate,
     var failure: String? { lock.withLock { failureMessage } }
     var finished: Bool { lock.withLock { finishedFlag } }
 
-    func waitForFinish(timeoutMs: Int) -> Bool {
-        if lock.withLock({ finishedFlag }) { return true }
-        _ = finishGate.wait(timeout: .now() + .milliseconds(timeoutMs))
-        return lock.withLock { finishedFlag }
+    /// Polled for the same reason as the probe above — see waitForFirstFrame.
+    /// A failure counts as finished: the caller wants to stop waiting and
+    /// report, and `failure` carries the reason.
+    func waitForFinish(timeoutMs: Int) async -> Bool {
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+        while true {
+            let (done, failed) = lock.withLock {
+                (finishedFlag, failureMessage != nil)
+            }
+            if done { return true }
+            if failed { return false }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 
     func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) {
@@ -556,7 +602,6 @@ final class RecordingLifecycleDelegate: NSObject, SCRecordingOutputDelegate,
     ) {
         lock.withLock { failureMessage = error.localizedDescription }
         Platform.log("capture record: FAILED \(path) — \(error.localizedDescription)")
-        finishGate.signal()
     }
 
     func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
@@ -566,6 +611,5 @@ final class RecordingLifecycleDelegate: NSObject, SCRecordingOutputDelegate,
                 + "(\(recordingOutput.recordedFileSize) bytes, "
                 + "\(recordingOutput.recordedDuration.seconds)s)"
         )
-        finishGate.signal()
     }
 }

@@ -5,6 +5,7 @@ import { registerBrandTabGroup } from "./background/brand-tab-group"
 import { registerTabLifecycle } from "./background/tab-lifecycle"
 import { registerDelegationListeners } from "./background/delegation"
 import { registerPowerIdleListeners } from "./background/keepawake"
+import { registerCspBypassCleanup } from "./background/capabilities/evaluate"
 import { initializeActionRouter } from "./background/router"
 
 // Register all event listeners
@@ -18,6 +19,7 @@ registerBrandTabGroup()
 registerTabLifecycle()
 registerDelegationListeners()
 registerPowerIdleListeners()
+registerCspBypassCleanup()
 
 // Startup connections
 // ensureInterceptorGroup() is a floating promise here — nothing awaits it, so an

@@ -2707,7 +2707,13 @@ function isCspEvalError(error) {
     return false;
   return isTrustedTypesError(error) || isCspUnsafeEvalError(error);
 }
-function buildCspBypassRule(tabId) {
+function buildCspBypassRule(tabId, host) {
+  const condition = {
+    tabIds: [tabId],
+    resourceTypes: ["main_frame", "sub_frame"]
+  };
+  if (host)
+    condition.requestDomains = [host];
   return {
     id: CSP_BYPASS_RULE_ID_BASE + tabId,
     priority: 10,
@@ -2718,12 +2724,10 @@ function buildCspBypassRule(tabId) {
         { header: "content-security-policy-report-only", operation: "remove" }
       ]
     },
-    condition: {
-      tabIds: [tabId],
-      resourceTypes: ["main_frame", "sub_frame"]
-    }
+    condition
   };
 }
+var CSP_BYPASS_RULE_ID_MAX = CSP_BYPASS_RULE_ID_BASE + 99999;
 async function executeWithUserScripts(tabId, world, code) {
   try {
     if (!chrome.userScripts || typeof chrome.userScripts.execute !== "function") {
@@ -2807,7 +2811,13 @@ async function executeEval(tabId, world, code) {
   return results[0]?.result ?? { success: false, error: "no result" };
 }
 async function installCspBypassForTab(tabId) {
-  const rule = buildCspBypassRule(tabId);
+  let host;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.url)
+      host = new URL(tab.url).hostname;
+  } catch {}
+  const rule = buildCspBypassRule(tabId, host);
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [rule.id],
     addRules: [rule]

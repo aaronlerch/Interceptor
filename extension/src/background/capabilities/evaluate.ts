@@ -22,7 +22,25 @@ export function isCspEvalError(error: string | undefined): boolean {
   return isTrustedTypesError(error) || isCspUnsafeEvalError(error)
 }
 
-export function buildCspBypassRule(tabId: number): chrome.declarativeNetRequest.Rule {
+/**
+ * Build the per-tab CSP-strip rule.
+ *
+ * `host` scopes it to the site the operator actually opted in for. Without it
+ * the rule follows the TAB, so a tab stripped for one site keeps loading every
+ * later site in it without CSP — the operator consented to one page and paid
+ * for wherever that tab wandered next. Passing the host is not always possible
+ * (the tab may be mid-navigation), and a tab-only rule is still what upstream
+ * ships, so it remains the fallback rather than an error.
+ */
+export function buildCspBypassRule(
+  tabId: number,
+  host?: string
+): chrome.declarativeNetRequest.Rule {
+  const condition: chrome.declarativeNetRequest.RuleCondition = {
+    tabIds: [tabId],
+    resourceTypes: ["main_frame", "sub_frame"]
+  }
+  if (host) condition.requestDomains = [host]
   return {
     id: CSP_BYPASS_RULE_ID_BASE + tabId,
     priority: 10,
@@ -33,11 +51,55 @@ export function buildCspBypassRule(tabId: number): chrome.declarativeNetRequest.
         { header: "content-security-policy-report-only", operation: "remove" }
       ]
     },
-    condition: {
-      tabIds: [tabId],
-      resourceTypes: ["main_frame", "sub_frame"]
-    }
+    condition
   }
+}
+
+/** Highest tab id the rule-id scheme can encode without colliding upward. */
+const CSP_BYPASS_RULE_ID_MAX = CSP_BYPASS_RULE_ID_BASE + 99_999
+
+/**
+ * Drop the CSP-strip rule for one tab.
+ *
+ * Called when the tab closes. This is not tidiness: Chrome REUSES tab ids, and
+ * the rule is a session rule that nothing else removes, so a stripped tab that
+ * closes leaves its id armed — and the next tab Chrome happens to give that id
+ * loads without CSP, on a site nobody opted in for, with no way to notice.
+ */
+export async function removeCspBypassForTab(tabId: number): Promise<void> {
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [CSP_BYPASS_RULE_ID_BASE + tabId]
+  })
+}
+
+/**
+ * Clear every CSP-strip rule this extension may have left installed.
+ *
+ * Session rules outlive the service worker, so a worker restart within the same
+ * browser session comes back to whatever the previous one armed — for tabs that
+ * may no longer exist. Purging at startup makes "no eval has asked for a strip
+ * since this worker started" mean "no strip is installed".
+ */
+export async function purgeCspBypassRules(): Promise<void> {
+  const existing = await chrome.declarativeNetRequest.getSessionRules()
+  const ours = existing
+    .filter((r) => r.id >= CSP_BYPASS_RULE_ID_BASE && r.id <= CSP_BYPASS_RULE_ID_MAX)
+    .map((r) => r.id)
+  if (ours.length > 0) {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ours })
+  }
+}
+
+/**
+ * Wire the cleanup to the tab lifecycle. Called once from the background entry
+ * point — not at module import, because this module is imported by tests that
+ * have no `chrome`.
+ */
+export function registerCspBypassCleanup(): void {
+  void purgeCspBypassRules().catch(() => undefined)
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void removeCspBypassForTab(tabId).catch(() => undefined)
+  })
 }
 
 async function executeWithUserScripts(
@@ -124,7 +186,16 @@ async function executeEval(
 }
 
 async function installCspBypassForTab(tabId: number): Promise<void> {
-  const rule = buildCspBypassRule(tabId)
+  // Scope the strip to the host currently loaded in the tab, so it covers the
+  // page the operator opted in for and not the tab's whole future.
+  let host: string | undefined
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    if (tab.url) host = new URL(tab.url).hostname
+  } catch {
+    // Mid-navigation, or a tab we cannot read. Fall back to the tab-only rule.
+  }
+  const rule = buildCspBypassRule(tabId, host)
   await chrome.declarativeNetRequest.updateSessionRules({
     removeRuleIds: [rule.id],
     addRules: [rule]
@@ -167,6 +238,13 @@ export const CSP_STRIP_REFUSED =
  * This is the shared bypass core (lifted out of handleEvaluateActions) so every
  * capability that evals into a page inherits the same strict-CSP / Trusted-Types
  * handling — and the same opt-in gate — instead of reimplementing a weaker one.
+ *
+ * The rule installed by step 3 is scoped to the tab AND the host, and is
+ * removed when the tab closes (see registerCspBypassCleanup). It is deliberately
+ * NOT removed the moment the retry succeeds: the document is already loaded
+ * without CSP by then, so removing it would change nothing for the current page
+ * while forcing a fresh strip-and-reload on every later navigation in a flow the
+ * operator has already opted into.
  */
 export async function runWithCspStripBypass(
   tabId: number,
