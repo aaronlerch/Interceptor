@@ -613,6 +613,28 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       // override with --timeout-ms.
       const timeoutMs = flagInt(filtered, "--timeout-ms")
       if (timeoutMs !== undefined) action.timeoutMs = timeoutMs
+
+      // `capture record start|stop|status` — window-scoped mp4. Its own verb
+      // rather than a flag on `capture start`, because it owns a separate
+      // stream: the frame-grab pipeline caches JPEGs for `capture frame`,
+      // this one writes a container and must not share that lifecycle.
+      if (op === "record") {
+        action.recordOp = filtered[3] || "status"
+        const out = flagVal(filtered, "--out")
+        if (out !== undefined) action.out = out
+        const window = flagInt(filtered, "--window")
+        if (window !== undefined) action.window = window
+        const titleContains = flagVal(filtered, "--title-contains")
+        if (titleContains !== undefined) action.titleContains = titleContains
+        const fps = flagInt(filtered, "--fps")
+        if (fps !== undefined) action.fps = fps
+        const pixelScale = flagInt(filtered, "--pixel-scale")
+        if (pixelScale !== undefined) action.pixelScale = pixelScale
+        // Off by default: a synthetic pointer drawn in the page composites
+        // into the window, and the real macOS cursor over the top of it
+        // records two pointers.
+        if (filtered.includes("--cursor")) action.cursor = true
+      }
       return action
     }
 

@@ -984,6 +984,10 @@ interceptor macos screenshot                     # Frontmost window
 interceptor macos screenshot --app "Finder"      # Specific app (works occluded / minimized / cross-Space)
 interceptor macos screenshot --save              # Save to disk; payload key is `filePath` (not `path`)
 interceptor macos capture start                  # Continuous 30fps capture
+
+# Record ONE window to an mp4, while you keep using the machine.
+interceptor macos capture record start --out ~/demo.mp4 --app "Google Chrome"
+interceptor macos capture record stop
 interceptor macos capture status                 # {active, hasFrame, frameAgeMs}
 interceptor macos capture frame                  # returns {dataUrl, bytes, width, height, format} — parity with screenshot
 interceptor macos capture frame --timeout-ms 5000  # Override the wait window for first-frame delivery

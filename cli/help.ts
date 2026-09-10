@@ -129,7 +129,7 @@ const MAP_MACOS = `MACOS — native apps via the accessibility tree, background-
   Compound   macos open <app> · macos read · macos act <ref> ["text"] · macos inspect
   AX+input   macos tree · find · value · action · focused · windows · move · resize · click · type · keys · scroll · drag
   Apps       macos apps · app activate|hide|quit|launch · frontmost · menu "<path>"
-  Capture    macos screenshot (occluded/minimized windows too) · capture · stream · display
+  Capture    macos screenshot (occluded/minimized windows too) · capture · capture record (window → mp4) · stream · display
   Scripts    macos script run --jxa|--jsc|--script · intent dispatch (Apple Events, no foregrounding)
   System     macos clipboard · notifications · files · fs read|write|search · url · log query
   Media/AI   macos vision (OCR any window) · listen (speech-to-text) · nlp · ai prompt · audio · sounds
@@ -535,6 +535,26 @@ macOS Bridge (full install only):
   interceptor macos capture start [--app <name>]
   interceptor macos capture frame [--timeout-ms 3000]      Block briefly for first frame; default 3000ms
   interceptor macos capture stop
+
+  Video (one window to an mp4, while you keep using the machine):
+  interceptor macos capture record start --out <path.mp4> [--app <name>]
+                                             [--title-contains <s>] [--window <id>]
+                                             [--fps 30] [--pixel-scale 2] [--cursor]
+                                             Blocks until frame ZERO lands, then returns
+                                             startedAtMs — the wall clock to anchor an
+                                             external timeline (narration, click log) to.
+                                             Anchoring to the start CALL is wrong by the
+                                             1.5-2s ScreenCaptureKit cold start.
+  interceptor macos capture record stop [--timeout-ms 10000]
+                                             Waits for the container to finalise; returns
+                                             finalized:false rather than a truncated file
+                                             you would not know was truncated.
+  interceptor macos capture record status
+                                             --app picks that app's LARGEST window (apps
+                                             register 0x0 helpers). Occluded windows record
+                                             fine; a minimised one has no backing surface
+                                             and is refused with that reason.
+                                             Needs Screen Recording, not Accessibility.
 
   Scripts and Apple Events (cross-app routing without raising):
   interceptor macos script run --jxa '<jxa>'

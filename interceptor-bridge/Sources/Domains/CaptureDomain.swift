@@ -7,6 +7,11 @@ import UniformTypeIdentifiers
 import ImageIO
 
 final class CaptureDomain: DomainHandler, @unchecked Sendable {
+    /// `capture record` — window-scoped mp4 with a trustworthy first-frame
+    /// timestamp. Separate object because it owns its own SCStream lifecycle
+    /// and must not share state with the frame-grab pipeline below; see
+    /// WindowRecorder.swift for why it is not MonitorDomain's --video.
+    private let recorder = WindowRecorder()
     private var activeStream: SCStream?
     // Strong reference to the SCStreamOutput we registered. Apple's
     // SCStream.addStreamOutput(_:type:sampleHandlerQueue:) does NOT
@@ -374,6 +379,8 @@ final class CaptureDomain: DomainHandler, @unchecked Sendable {
                 payload["frameAgeMs"] = Int(Date().timeIntervalSince(ts) * 1000)
             }
             completion(WireFormat.success(payload))
+        case "record":
+            recorder.handle(action, completion: completion)
         case "stop":
             lock.lock()
             activeStream?.stopCapture()
