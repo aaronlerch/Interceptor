@@ -1,5 +1,6 @@
 import { refRegistry } from "./ref-registry"
 import { getEffectiveRole, getAccessibleName } from "./a11y-tree"
+import { isValueSecret, SECURE_MASK } from "./sensitive"
 import { getRelevantAttrs } from "./element-tree"
 
 export interface SnapshotEntry {
@@ -21,7 +22,7 @@ export function cacheSnapshot() {
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: ((el as HTMLInputElement).value || "").slice(0, 40),
+      value: isValueSecret(el) ? SECURE_MASK : ((el as HTMLInputElement).value || "").slice(0, 40),
       states: getRelevantAttrs(el)
     })
   }
@@ -42,7 +43,7 @@ export function computeSnapshotDiff(): { success: boolean; error?: string; data?
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: ((el as HTMLInputElement).value || "").slice(0, 40),
+      value: isValueSecret(el) ? SECURE_MASK : ((el as HTMLInputElement).value || "").slice(0, 40),
       states: getRelevantAttrs(el)
     })
   }

@@ -1,5 +1,6 @@
 import { getOrAssignRef, refMetadata, pruneStaleRefs } from "./ref-registry"
 import { getEffectiveRole, getAccessibleName } from "./a11y-tree"
+import { isValueSecret, SECURE_MASK } from "./sensitive"
 import { getRelevantAttrs, buildSelector, hasOwnPointerCursor } from "./element-tree"
 
 export interface IndexedElement {
@@ -111,7 +112,7 @@ export function getInteractiveElements(): IndexedElement[] {
       const text = getAccessibleName(el)
       const attrs = getRelevantAttrs(el)
 
-      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: ((el as HTMLInputElement).value || "").slice(0, 40) })
+      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: isValueSecret(el) ? SECURE_MASK : ((el as HTMLInputElement).value || "").slice(0, 40) })
 
       results.push({ index: idx, refId, element: el, selector, tag, text, attrs })
     }
