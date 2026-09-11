@@ -47,6 +47,8 @@ interceptor act e9 "example user"                  # Type into field
 interceptor act e11 --keys "Enter"
 interceptor act e15 --trusted                      # HID-sourced click; page sees isTrusted: true. ESCALATION ONLY.
 interceptor act e20 --no-read
+# act takes the ref directly (act e5, never act click e5). A timeout or closed channel after dispatch
+# is reported as unverified delivery: read the target before retrying so you do not click twice.
 ```
 
 **After `act --trusted` reports success, read the page once and commit.** Do not re-execute the same click via a different surface (`interceptor macos click ...`, manual coordinates, etc.) to "verify" — the page's own state is the verification, and the trusted event is the same trusted event regardless of which surface posted it. Escalating to a different surface to redo a successful browser action is the most common way to blow the command budget. `interceptor macos` remains the right surface for native-app tasks; this rule only constrains within-task redo behavior on the browser.
@@ -195,6 +197,8 @@ interceptor tabs
 interceptor tab new <url>             # Background tab in the interceptor group
 interceptor tab new <url> --activate  # Explicit foregrounding
 interceptor tab new <url> --reuse     # Navigate the group's most-recent tab instead of creating
+                                      # New tabs land in the window that already holds Interceptor groups (own group's window first),
+                                      # not the focused window; the result's windowId says where. A window is created only when none is normal.
 interceptor tab switch <tab-id>
 interceptor tab close <tab-id>
 
@@ -259,6 +263,8 @@ interceptor raw '{"type":"any_action","key":"value"}'
 
 ```bash
 interceptor contexts                                # List IDs of all connected browser contexts
+interceptor contexts --verbose                      # Also kind, version, store/unpacked, extension ID, transports
+interceptor contexts rename <name> --context <id>   # Restore a context name after an extension ID change (the new ID starts empty)
 interceptor --context <id> read                     # Route command to a specific profile
 interceptor --context <id> open <url>
 interceptor --context <id> act e7 "value"
@@ -273,7 +279,7 @@ Primary use cases: multiple Chrome profiles logged in to different accounts, or 
 
 ```bash
 interceptor capabilities                            # Available input layers
-interceptor reload                                  # After extension changes during dev
+interceptor reload                                  # Unpacked copy: picks up the installed files; store copy: asks the Chrome Web Store for an update first
 ```
 
 ## Branding (white-label)
@@ -290,9 +296,23 @@ Runtime-configurable — no rebuild, no options page. Resolved from `chrome.stor
 ```bash
 interceptor eval --main "document.title"
 interceptor eval --main "window.__APP_STATE__"
+interceptor eval "document.title" --frame 4897        # Exactly that frame; a missing frame fails
+interceptor --frame 4897 eval "document.title"        # --frame is global: before or after the command
 ```
 
-Use only when no built-in command exposes what you need. Strict-CSP sites may trigger an automatic reload/retry on first attempt.
+Use only when no built-in command exposes what you need. Thrown exceptions, rejected promises, and syntax errors are failures (exit 1) in both worlds; top-level `await` works. The default isolated world may need Allow User Scripts enabled for the extension; `--main` is an explicit page-world choice. On a strict-CSP page `--main` may strip the header and reload the tab once, and the result says so; task verification never reloads.
+
+## Durable task state
+
+```bash
+interceptor monitor task create "Verify the saved draft"          # Returns a taskId; no recording needed
+interceptor monitor task checkpoint <taskId> --file <json>        # Revisioned constraints, target, checks, lessons
+interceptor monitor task resume <taskId>                          # Compact state + lessons scoped to this context/origin
+interceptor monitor task verify <taskId>                          # Run the stored checks now; lifecycle unchanged
+interceptor monitor task complete <taskId>                        # Completes only when every fresh check returns true
+```
+
+Checkpoint schema, locking, and verification semantics: `workflows/task-state.md`. Over MCP, `verify` and `complete` are exec tier.
 
 ## Output mode
 

@@ -116,10 +116,12 @@ interceptor macos tree                         # macOS surface (Full pkg only, a
 | `interceptor-bridge.app` | `/Applications/interceptor-bridge.app` |
 | LaunchAgent (auto-start at login) | `/Library/LaunchAgents/com.interceptor.bridge.plist` |
 
-**Chrome/Brave extension load** is the one manual step the core installers cannot do for you, because those browsers do not allow programmatic extension installation outside of the Web Store. After install:
+**Chrome/Brave extension**: install it either way. Both copies share one extension ID and work the same. The installers stage the files and register the native messaging host, but never install into a browser profile without a click from you.
 
-- **Brave:** open `brave://extensions/`, enable Developer Mode, click **Load unpacked**, select `/Library/Application Support/Interceptor/extension/`.
-- **Chrome:** open `chrome://extensions/`, enable Developer Mode, click **Load unpacked**, select `/Library/Application Support/Interceptor/extension/`.
+- **Chrome Web Store** (default): https://chromewebstore.google.com/detail/interceptor/gomcpnagjjlhehnkoobkjgnkbleiooed. One click; new versions arrive when they clear store review.
+- **Unpacked copy** (developer path, always the same version as the installed CLI): open `brave://extensions/` or `chrome://extensions/`, enable Developer Mode, click **Load unpacked**, select `/Library/Application Support/Interceptor/extension/`.
+
+Keep one copy per profile. Loading the unpacked folder over a store install takes over the same extension entry (Chrome prefers the unpacked location), and removing it later does not bring the store copy back; reinstall from the store if you want it again. `interceptor diagnose` names which copy is connected (store or unpacked), its version, and whether the native messaging port is up.
 
 **Safari extension load** uses its signed containing app:
 
@@ -200,7 +202,6 @@ Interceptor ships one CLI binary with two product surfaces. Pick by what you're 
 | Record & replay a human's native-app flow | macOS | `interceptor macos monitor *` |
 | Drive Apple Events to background apps without raising them | macOS | `interceptor macos intent dispatch` |
 | Deliver a 1Password credential by reference into native or web fields | macOS / Browser | `--secret op://<vault>/<item>/<field>` on `type` |
-
 If the task is content **inside** a browser tab, use Browser. If the task is the **shell** the browser runs inside (or any other macOS app), use macOS.
 
 The deep dives live in the per-surface sections below. Skill packages mirror this split: agent operators load `.agents/skills/interceptor-browser/` for web work and `.agents/skills/interceptor-macos/` for native work.
@@ -339,7 +340,7 @@ bash scripts/uninstall.sh --bridge-only     # Remove only the macOS bridge (down
 |---|---|---|
 | `interceptor open <url>` returns `error: timeout: no response for 'tab_create' after 15s` | Browser extension is not loaded — most often because **Developer mode is off** in the target profile. Chromium silently drops `--load-extension` when Dev mode is off. | Open `brave://extensions/` or `chrome://extensions/`, toggle Developer mode ON. Quit the browser fully. Re-run `bash scripts/install.sh` (it will preflight Dev mode and re-launch). |
 | A timeout whose message says `A browser context is connected, so the extension is reachable` | The daemon still holds a live extension connection, so the request itself timed out — usually an oversized or slow response (for `net log`, too many full bodies in one reply). | Narrow the request: `net log --limit 20`, `--since <ts>` to page incrementally, or `--filter <host>`. The extension also budgets `net log` replies to 8 MiB of bodies; entries past the budget come back with `truncated: true` and an empty body. |
-| `interceptor status --verbose` says `extension: not reachable` | Same as above, or extension is registered but the Interceptor extension was disabled in the browser. | Open the extensions page, confirm Interceptor (ID `hkjbaciefhhgekldhncknbjkofbpenng`) is present and enabled. If missing, click **Load unpacked** and select `extension/dist/`. |
+| `interceptor status --verbose` says `extension: not reachable` | Same as above, or extension is registered but the Interceptor extension was disabled in the browser. | Open the extensions page, confirm Interceptor (ID `gomcpnagjjlhehnkoobkjgnkbleiooed`) is present and enabled. If missing, install it from the Chrome Web Store, or click **Load unpacked** and select `/Library/Application Support/Interceptor/extension/` (pkg install) or `extension/dist/` (source build). |
 | Chrome's extension error page shows `A preload for ... is found, but is not used because the request credentials mode does not match` attributed to `inject-net.js` | A page-level Chromium preload warning was attributed to Interceptor because the passive network shim calls through to the page's original `fetch()` there. The warning is not the same as an Interceptor connection failure. | Treat it as a site warning unless commands fail. If Interceptor commands fail, check the `extension: not reachable` row above. |
 | `chrome://extensions/` reports the extension as version `0.10.0` while `interceptor --version` reports a higher version | Extension manifest drift fixed in this release — rebuild from current source: `bash scripts/build.sh` then re-run `scripts/install.sh`. | Restart the browser after re-loading the extension so Chromium picks up the bumped manifest. |
 
@@ -363,7 +364,7 @@ The legacy individual commands (`interceptor tab new`, `interceptor tree`, `inte
 
 **Interceptor Group** — Every `interceptor tab new` adds tabs to a managed Interceptor group. In supported agent shells, bare commands use a soft per-session group so `open` reuses one tab and idle cleanup can reap the session. `INTERCEPTOR_SESSION_ID` is the neutral contract; verified Maestro, Claude Code, and Codex variables are detected automatically and hashed into an opaque `s-<hash16>` label. Use a unique `--group <label>` or neutral session id for each concurrent lane. Explicit groups are hard-scoped by default. `--shared-group` uses the shared default Interceptor group, not unmanaged tabs. Your personal tabs stay outside the managed boundary unless you explicitly authorize `--any-tab`. `tab close <id>` and `tab switch <id>` act on exactly the id you pass; the applicable group check validates that same tab, and an explicit id takes precedence over `--tab`.
 
-**Focus Model (Background-First Contract)** — Interceptor never steals focus from the tab you're working in. `interceptor open <url>` and `interceptor tab new <url>` create their tabs in the **background** by default — the tab you had active stays active. Only four browser verbs intentionally move focus: `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>`. The reuse path preserves the reused tab's existing focus state; add `--activate` to bring it forward. All other operations (`click`, `type`, `read`, `screenshot`, `net`, `scene`, `monitor`, etc.) work against the target tab without touching whichever tab you're looking at. This mirrors the macOS surface's same background-first contract — see `AGENTS.md` "Background First (Browser + macOS)" for the full inventory.
+**Focus Model (Background-First Contract)** — Interceptor never steals focus from the tab you're working in. `interceptor open <url>` and `interceptor tab new <url>` create their tabs in the **background** by default — the tab you had active stays active. When a window already holds Interceptor tab groups, new tabs are created in that window (the caller's own group's window first) rather than in whichever window you are focused on, so agent tabs stay together instead of following you from window to window. Only four browser verbs intentionally move focus: `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>`. The reuse path preserves the reused tab's existing focus state; add `--activate` to bring it forward. All other operations (`click`, `type`, `read`, `screenshot`, `net`, `scene`, `monitor`, etc.) work against the target tab without touching whichever tab you're looking at. This mirrors the macOS surface's same background-first contract — see `AGENTS.md` "Background First (Browser + macOS)" for the full inventory.
 
 **Tab Lifecycle Policy** — Interceptor cleans up after itself. Two behaviors are set from the extension popup. **(1) Named-group reuse (default on):** `interceptor open <url>` in an automatic session group, or `open --group <label>`, navigates that group's most-recent tab instead of opening a new one. Shared-default `open` still creates because the most recent tab could belong to another lane. Explicit `--reuse` opts in anywhere, `--no-reuse` forces a new tab, and `tab new` creates by default while accepting explicit `--reuse`. **(2) Idle group close (default 10 min):** a managed group with no tab activity for the configured minutes is closed automatically (0 disables). Metadata polls such as `status` and `group list` do not reset the timer. Safety guards protect the focused window's active tab, pinned tabs, audible tabs, and each window's last tab. Sweeps are logged and closed tabs are restorable with ⌘⇧T or `interceptor sessions restore`.
 
@@ -445,8 +446,7 @@ interceptor type "textbox:Search" "query"    # Type using semantic selector (rol
 interceptor macos secret status                    # 1Password readiness: op binary, signed-in accounts
 # Storage, listing, deletion, unlock windows and read-back are 1Password's:
 #   op item create | op item list | op item delete | op read op://<vault>/<item>/<field>
-interceptor type e3 --secret op://<vault>/<item>/<field>   # Type a 1Password credential by reference; the value never leaves the daemon
-interceptor select e7 "option-value"         # Select dropdown option
+interceptor type e3 --secret op://<vault>/<item>/<field>   # Type a 1Password credential by reference; the value never leaves the daemoninterceptor select e7 "option-value"         # Select dropdown option
 interceptor hover e5                         # Hover over element
 interceptor keys "Control+A"                 # Keyboard shortcut (synthetic; default)
 interceptor keys "Enter" --os               # FALLBACK — OS-level CGEvent key
@@ -581,6 +581,11 @@ interceptor monitor status --task <taskId>             # Show task envelope stat
 interceptor monitor pause                              # Stop emitting events without ending
 interceptor monitor resume                             # Resume a paused session
 interceptor monitor task attach <taskId> <sessionId>   # Attach an existing source session
+interceptor monitor task create "<objective>"          # Durable agent task; no recording needed
+interceptor monitor task checkpoint <taskId> --file <json>   # Save revisioned constraints, target, checks, lessons
+interceptor monitor task resume <taskId>               # Compact state + scoped lessons for a later session
+interceptor monitor task verify <taskId>               # Run the stored checks now; lifecycle status unchanged
+interceptor monitor task complete <taskId>             # Complete only when every fresh check returns true
 interceptor monitor list                               # All sessions in the event log
 interceptor monitor tail                               # Live tail current session (pretty)
 interceptor monitor tail --raw                         # Live tail (raw JSONL)
@@ -594,6 +599,8 @@ interceptor monitor export <sessionId> --with-bodies   # Include persisted net-b
 Each event line is sparse JSON (short keys: `t`, `s`, `k`, `sid`, `ref`, `r`, `n`, `cause`) so an agent can read a 30-minute session in a few KB. User actions get a session-monotonic `seq`; mutations and network calls fired within 500ms of an action carry `cause: <action_seq>`. Real user events have `tr: true`; interceptor's own synthetic clicks have `tr: false`. The replay-plan generator automatically includes synthetic clicks when no real user events exist in the session (common when an agent drove the browser). Use `--include-synthetic` to force inclusion regardless.
 
 Tasks are task-scoped; monitor sessions are source-scoped. `--task` creates or attaches a durable task envelope under `${INTERCEPTOR_TASKS_DIR:-<platform app support>}/<taskId>/` while preserving the existing browser/macOS source artifacts. `interceptor monitor export <sessionId>` remains a source-session export. `interceptor monitor export --task <taskId> --format timeline|transcript|json` builds a task-level view by deterministically merging attached source logs, then validating semantic transcript entries against source references.
+
+Task checkpoints carry the objective, constraints, owner, browser target (context, group, tab, frame, origin), next action, lessons, and JavaScript predicates. `resume` returns only lessons whose context and origin match. `verify` and `complete` evaluate the predicates fresh in the page's main world without reloading, and `complete` exits nonzero unless every check returns boolean `true`. Writers are serialized by a per-task lock with dead-owner reclaim, and a stale `expectedRevision` is rejected. Schema and workflow: `.agents/skills/interceptor-browser/workflows/task-state.md`.
 
 The rolling live event stream lives in `/tmp/interceptor-events.jsonl`. Export prefers per-session artifacts under `/tmp/interceptor-monitor-sessions/<sessionId>/` (one directory per session containing `events.jsonl`, `session.json`, and `net.jsonl`) and falls back to the rolling event log for legacy sessions. `--with-bodies` uses persisted correlated net-body artifacts when present (body previews are capped at 64 KiB, redact `Authorization` / `Cookie` / token-shaped strings, and only persist JSON / text content types) and otherwise leaves `interceptor net log` hints in the replay output.
 
@@ -657,7 +664,9 @@ interceptor raw '{"type":"any_action","key":"value"}'  # Send any raw action
 interceptor status                           # Daemon status (local check, no connection needed)
 interceptor help                             # Full CLI help
 interceptor contexts                         # List IDs of all connected browser contexts
-interceptor reload                           # Reload extension
+interceptor contexts --verbose               # Also kind, version, store/unpacked, extension ID, transports
+interceptor contexts rename <name>           # Restore a context name after an extension ID change
+interceptor reload                           # Unpacked copy: reload from disk; store copy: ask the store for an update first
 interceptor capabilities                     # Check available input layers
 ```
 
@@ -670,11 +679,13 @@ interceptor capabilities                     # Check available input layers
 | `--any-tab` | Operate outside the interceptor group (also required to `tab close <id>` / `tab switch <id>` an unmanaged tab) |
 | `--context <id>` | Route command to a specific browser context (profile). See `interceptor contexts`. Omitting this flag succeeds only when exactly one context is connected; the daemon errors when zero or multiple contexts are present. |
 | `--os` | FALLBACK: use OS-level CGEvent (macOS) when synthetic input is observed to fail. Default to synthetic — the pre-load `userActivation` override + `__interceptor_trust` event marker satisfy most `isTrusted` checks. |
-| `--frame <id>` | Target specific iframe |
+| `--frame <id>` | Target exactly that iframe on any browser verb, including `eval`. Accepted before or after the command; a missing frame fails instead of silently running in the top frame. |
 | `--changes` | Include DOM diff in response |
 | `--flag=value`, `--` | `--flag=value` is accepted everywhere; `--` ends flag parsing so a positional may begin with `--` |
 
 Flags are order-independent on browser commands, and **unknown flags are rejected** (exit 1, naming the flag and the command) instead of being ignored — a typo such as `screenshot --out shot.png` no longer looks like a success (`screenshot` writes to disk with `--save`). `INTERCEPTOR_LAX_FLAGS=1` downgrades the rejection to a one-line warning for legacy scripts. `interceptor macos *` and `interceptor ios *` keep their verb-first parsing and are not strict. A command whose result is a failure prints `error: …` (or the JSON envelope under `--json`) **and exits non-zero** — since 0.23.40 that covers every browser verb (`back`/`forward` with no history used to print the error and exit 0), so scripts can trust `$?`.
+
+`interceptor eval` reports thrown exceptions, rejected promises, and syntax errors as failures (exit 1) in both the isolated and `--main` worlds, and supports top-level `await`. `--main` on a strict-CSP page may strip the header and reload the tab once; the result discloses the reload.
 
 ## Browser Recipes
 
@@ -1292,8 +1303,7 @@ interceptor type <ref> --secret op://<vault>/<item>/<field>
                                                    # browser field; the monitor records ***SECURE***
 interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-target [--app X]
                                                    # native field (see --op-any-target below)
-  [--op-account <shorthand>]                       # required when >1 account is signed in
-```
+  [--op-account <shorthand>]                       # required when >1 account is signed in```
 
 `op://<vault>/<item>/<field>` — vault and item may each be a **name or a UUID**, which is why one flag covers both ways of addressing an item. 1Password's "Copy Secret Reference" produces exactly this string.
 
@@ -1302,6 +1312,12 @@ interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-tar
 **Requirements.** `op` must be at an absolute path the daemon can see: the daemon's PATH is `/usr/bin:/bin:/usr/sbin:/sbin`, which excludes Homebrew, so `/opt/homebrew/bin/op` and `/usr/local/bin/op` are probed directly and `INTERCEPTOR_OP_BIN` overrides (absolute only). Authorization comes from the 1Password desktop app on your session, so no environment plumbing is needed — and because the daemon is one long-lived process, it authorizes once rather than per command.
 
 The reference is logged; the value is not. It names a location, so logging it is what makes a release auditable. The resolved value never appears on argv, in the daemon log, the events file, monitor artifacts, MCP results, or `interceptor diagnose`. `OP_SERVICE_ACCOUNT_TOKEN` is unsupported on purpose — it bypasses biometrics and recreates the unattended-credential-store property FORK-DELTA §5 removes.
+
+#### Browser saved logins (fill a password you never registered)
+
+When the credential already lives in a Chromium browser's own password manager (Chrome, Brave, Vivaldi, Edge, Chromium, Arc), you do not need to register it in the vault. `type --browser-login <host>` reads the saved login for the current page and fills it, searching whichever browsers are installed (or one you name with `--browser <key>`). The browser does not fire its autofill dropdown for a synthetic click, so Interceptor reads the credential at rest instead: it fetches the `<Brand> Safe Storage` key from the login keychain, decrypts the `Login Data` blob (macOS `v10`, AES-128-CBC) for the matching profile, and hands the value to the same delivery leg as `--secret`. The value never appears on argv, in logs, events, monitor artifacts, or MCP results.
+
+The fill is bound to the page: the requested host must match the live tab's host, and the resolved credential's own origin must match too, so a page can only ever fill its own saved login. Enumeration (`browser creds list`) returns host + username + browser only, never the password, and is refused for model callers (`INTERCEPTOR_MCP`). macOS only; the newer app-bound encryption (`v20`) is refused rather than mis-decrypted. Reading `Login Data` requires the daemon to have Full Disk Access.
 
 #### Personal data (TCC-gated)
 

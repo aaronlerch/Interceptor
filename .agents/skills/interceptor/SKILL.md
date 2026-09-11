@@ -1,6 +1,6 @@
 ---
 name: interceptor
-description: "Choose the right Interceptor surface. Use interceptor-browser for page DOM, network, browser tabs, rich editors, screenshots, and browser automation. Use interceptor-macos for native apps, browser chrome, URL bars, OS dialogs, cross-app routing, AX trees, native screenshots, Apple Events, trusted OS input, macOS Electron CDP/app web-content control, and in-process app runtime control. Background-first by default; focus changes require explicit opt-in."
+description: "Choose the right Interceptor surface. Use interceptor-browser for page DOM, network, browser tabs, rich editors, screenshots, and browser automation. Use interceptor-macos for native apps, browser chrome, URL bars, OS dialogs, cross-app routing, AX trees, native screenshots, Apple Events, trusted OS input, macOS Electron CDP/app web-content control, and in-process app runtime control. Use interceptor-research for deep multi-source web research. Background-first by default; focus changes require explicit opt-in."
 metadata:
   short-description: Choose the right Interceptor surface
 ---
@@ -34,7 +34,7 @@ Use this as the routing skill before loading a surface-specific skill.
 - Prefer compound commands (`open`, `read`, `act`, `inspect`) and structured reads before screenshots.
 - The zero-CDP browser rule governs the user's real Chrome/Brave/Safari web session. For owned Electron apps, `interceptor macos cdp` and `interceptor macos cdp app` are intentional app-control surfaces.
 - For native app runtime internals, use `interceptor macos runtime` after checking `interceptor status`; public Full installs may require operator-supplied runtime agent dylibs/signing identity before `macos runtime enable`.
-- If an already-loaded unpacked extension behaves stale after a package update, reload it from `chrome://extensions` or `brave://extensions`, or run `interceptor reload` once the extension is reachable.
+- If the extension behaves stale after a package update, run `interceptor reload --context <id>`: an unpacked copy picks up the installed files; a Chrome Web Store copy only asks the store for an update and keeps its version until the store publishes the new one. `interceptor contexts --verbose` shows which copy (store or unpacked) and version each context runs.
 - `interceptor daemon stop` and `interceptor skills unadopt` are install/maintenance verbs. The daemon is shared by every agent on the machine — never stop it during normal automation; the next browser command respawns it, but every connected agent's in-flight work is dropped.
 
 ## Load A Surface Skill

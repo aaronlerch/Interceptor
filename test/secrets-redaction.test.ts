@@ -45,10 +45,9 @@ describe("actionLogSummary", () => {
     expect(actionLogSummary({ type: "os_type", text: VALUE, sensitive: true })).toContain("<redacted>")
   })
 
-  // FORK-DELTA §7: a --secret value is now an op:// REFERENCE, which is a
-  // location rather than a credential. It stays readable on purpose — that line
-  // is what makes a release auditable. The value it resolves to still must not
-  // appear anywhere.
+  // FORK-DELTA: a --secret value is now an op:// REFERENCE, which is a location
+  // rather than a credential. It stays readable on purpose — that line is what
+  // makes a release auditable. The value it resolves to still must not appear.
   test("an op:// reference stays readable while the resolved value never appears", () => {
     const REF = "op://Private/Gmail/password"
     const line = actionLogSummary({ type: "input_text", ref: "e3", secret: REF })

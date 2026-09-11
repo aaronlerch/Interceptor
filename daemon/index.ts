@@ -18,10 +18,11 @@ import {
   updateSessionMeta,
 } from "../shared/monitor-artifacts"
 import { chooseOutboundTransport, isRelayPing, relaySlotAfterClose, validateContextRouting } from "./outbound-routing"
-import { claimContextId, describeContexts, type ContextSocket } from "./context-registration"
+import { claimContextId, describeContexts, recordExtensionIdentity, type ContextSocket } from "./context-registration"
+import { extensionIdFromOrigin, installTypeLabel } from "../shared/extension-identity"
 import { failPendingBridgeRequests, formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
 import { socketWriteAll, drainSocketQueue, releaseSocketQueue } from "./socket-write"
-import { spinWatchdogStep, SPIN_EXIT_TICKS, type SpinWatchdogState } from "./spin-watchdog"
+import { captureSpinSample, spinWatchdogStep, SPIN_EXIT_TICKS, type SpinWatchdogState } from "./spin-watchdog"
 import { cleanupOwnedRuntimeFiles, clearDaemonRuntimeFiles, constantTimeTokenEquals, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, generateShutdownToken, parseDaemonPidFile, readLockFile, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
 import { DAEMON_HEALTH_SERVICE, LEGACY_HEALTH_BODY, probeDaemonHealth } from "../shared/daemon-health"
 import { assertNoInstallMaintenance } from "../shared/install-maintenance"
@@ -587,6 +588,18 @@ async function deliverWithSecret(id: string, action: Record<string, unknown>, re
     return
   }
 
+  await deliverResolvedValue(id, action, request, socket, actionType, value, ["secret"])
+}
+
+/**
+ * Hand a resolved credential value to the delivery leg for `actionType`. The
+ * delivered action carries `sensitive:true` (redaction) and never the source
+ * field, so the value only ever appears in-process. `stripFields` names the
+ * source markers to remove from the outgoing action (e.g. "secret",
+ * "browserLogin").
+ */
+async function deliverResolvedValue(id: string, action: Record<string, unknown>, request: CliRequest, socket: Bun.Socket<undefined>, actionType: string, value: string, stripFields: string[]): Promise<void> {
+  const reply = (result: DaemonResult) => socketWriteFramed(socket, JSON.stringify({ id, result }))
   const delivered: Record<string, unknown> = { ...action, sensitive: true }
   delete delivered.secret
   delete delivered.opAccount
@@ -776,6 +789,13 @@ function persistNetArtifactFromEvent(ev: Record<string, unknown>): void {
 const STANDALONE = process.argv.includes("--standalone")
 const NATIVE_STANDALONE_BOOT_TIMEOUT_MS = 5_000
 
+// Chrome passes the caller's origin (chrome-extension://<id>/) as the native
+// host's first argument, so a daemon or relay spawned by native messaging knows
+// which extension copy opened the port.
+function nativeCallerOrigin(): string | undefined {
+  return process.argv.find((arg) => arg.startsWith("chrome-extension://"))
+}
+
 log(`daemon starting (mode: ${STANDALONE ? "standalone" : "native-messaging"})`)
 
 try {
@@ -799,7 +819,7 @@ async function startNativeRelay(existingPid: number | null): Promise<never> {
     const relaySocketHandlers: Bun.SocketHandler<undefined> = {
       open(socket: Bun.Socket<undefined>) {
         // Register as native relay — singleton routes traffic to handleNativeMessage
-        const reg = JSON.stringify({ type: "native-relay" })
+        const reg = JSON.stringify({ type: "native-relay", origin: nativeCallerOrigin() })
         const encoded = Buffer.from(reg, "utf-8")
         const header = Buffer.alloc(4)
         header.writeUInt32LE(encoded.byteLength, 0)
@@ -1043,6 +1063,10 @@ function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: u
   if (msg.type === "event") {
     const eventName = msg.event as string || "extension_event"
     const eventPayload = { ...msg } as Record<string, unknown>
+    if (eventName === "connection_established") {
+      const id = typeof eventPayload.extensionId === "string" ? eventPayload.extensionId : "unknown id"
+      log(`native extension connected: ${installTypeLabel(eventPayload.installType as string | undefined)} ${eventPayload.version ?? ""} (${id})`)
+    }
     if (typeof eventPayload.sid === "string") {
       try { persistNetArtifactFromEvent({ event: eventName, ...eventPayload }) } catch {}
       delete eventPayload.bp
@@ -1117,6 +1141,14 @@ const extensionWsMap = new Map<string, ContextSocket>()
 // only adds the descriptive metadata those paths don't carry.
 const nativeAgentMeta = new Map<string, NativeAgentState>()
 let nativeRelaySocket: Bun.Socket<undefined> | null = null
+// Origin the current relay was spawned for; the daemon's own argv when Chrome
+// spawned this process directly. Drives the per-context `native` flag.
+let nativeRelayOrigin: string | undefined
+function nativeExtensionId(): string | undefined {
+  if (nativeRelaySocket && nativeRelayOrigin) return extensionIdFromOrigin(nativeRelayOrigin)
+  if (!STANDALONE && stdinAlive) return extensionIdFromOrigin(nativeCallerOrigin())
+  return undefined
+}
 const wsOutboundQueues = new Map<string, string[]>()
 const WS_QUEUE_CAP = 50
 
@@ -1602,7 +1634,9 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
               log("native relay superseded — previous registration replaced (reconnect or second browser)")
             }
             nativeRelaySocket = socket
-            log("native relay registered via IPC socket")
+            const origin = (request as { origin?: unknown }).origin
+            nativeRelayOrigin = typeof origin === "string" ? origin : undefined
+            log(`native relay registered via IPC socket${nativeRelayOrigin ? ` (origin ${nativeRelayOrigin})` : ""}`)
             continue
           }
 
@@ -1727,6 +1761,7 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
           const { slot, released } = relaySlotAfterClose(nativeRelaySocket, socket)
           nativeRelaySocket = slot
           if (released) {
+            nativeRelayOrigin = undefined
             log("native relay disconnected")
           } else {
             log("stale native relay closed — current relay registration kept")
@@ -1876,9 +1911,16 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           if (claim.status === "conflict") {
             return
           }
-          const extVersion = (request as { version?: unknown }).version
-          ;(ws as ContextSocket).__version = typeof extVersion === "string" ? extVersion : undefined
-          log(`ws extension registered [context: ${ctxId}]${typeof extVersion === "string" ? ` extension ${extVersion}` : ""}`)
+          // 0.24.x extensions send version only and older ones nothing; every
+          // identity field is optional so they register exactly as before.
+          const sock = ws as ContextSocket
+          recordExtensionIdentity(sock, request as { version?: unknown; extensionId?: unknown; installType?: unknown })
+          const detail = [
+            sock.__version ? `extension ${sock.__version}` : "",
+            sock.__installType ? installTypeLabel(sock.__installType) : "",
+            sock.__extensionId ? `id ${sock.__extensionId}` : "",
+          ].filter(Boolean).join(", ")
+          log(`ws extension registered [context: ${ctxId}]${detail ? ` ${detail}` : ""}`)
           drainWsOutboundQueue(ctxId)
           return
         }
@@ -2085,6 +2127,7 @@ function daemonIsIdle(): boolean {
 let spinState: SpinWatchdogState = { busyIdleTicks: 0 }
 let spinCpu = process.cpuUsage()
 let spinWall = Date.now()
+let spinSampleAttempted = false
 function spinWatchdogTick(): void {
   if (process.env.INTERCEPTOR_SPIN_WATCHDOG === "off") return
   const now = Date.now()
@@ -2099,6 +2142,13 @@ function spinWatchdogTick(): void {
   const rssMb = Math.round(process.memoryUsage().rss / 1048576)
   log(`spin watchdog: ${pct}% CPU over the last ${Math.round(wallMs / 1000)}s with no clients or in-flight requests (tick ${step.state.busyIdleTicks}/${SPIN_EXIT_TICKS}, rss ${rssMb} MiB) — issue #216`)
   emitEvent("daemon_spin_detected", { busyFraction: step.busyFraction, ticks: step.state.busyIdleTicks, rssMb })
+  if (!spinSampleAttempted) {
+    spinSampleAttempted = true
+    void captureSpinSample().then(result => {
+      log(`spin watchdog sample: ${JSON.stringify(result)}`)
+      emitEvent("daemon_spin_sample", result)
+    })
+  }
   if (step.verdict !== "exit") return
   log("spin watchdog: exiting so the next CLI call respawns a fresh daemon (INTERCEPTOR_SPIN_WATCHDOG=off disables this)")
   emitEvent("daemon_spin_exit", { busyFraction: step.busyFraction, ticks: step.state.busyIdleTicks, rssMb })

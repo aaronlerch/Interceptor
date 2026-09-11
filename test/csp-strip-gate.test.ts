@@ -37,15 +37,16 @@ describe("CSP-strip bypass is gated behind an explicit opt-in", () => {
     expect(calls).toEqual(["MAIN"])
   })
 
-  test("refuses by default on a Trusted-Types failure too, after trying ISOLATED", async () => {
+  test("refuses the header strip by default on a Trusted-Types failure too", async () => {
     const { run, calls } = alwaysFails(TT_ERROR)
     const r = await runWithCspStripBypass(1, "MAIN", run)
 
     expect(r.success).toBe(false)
     expect(r.error).toBe(CSP_STRIP_REFUSED)
-    // step 2 (ISOLATED retry) still runs — it works inside the page policy and
-    // takes nothing away from it. Only the header strip is gated.
-    expect(calls).toEqual(["MAIN", "ISOLATED"])
+    // Upstream 0.25.0 removed the ISOLATED retry: eval never silently switches
+    // world (test/eval-contract.test.ts pins this). Exactly one in-page attempt,
+    // then the gate — the header strip stays behind --allow-csp-strip.
+    expect(calls).toEqual(["MAIN"])
   })
 
   test("a non-CSP failure is returned verbatim, not converted into the gate error", async () => {

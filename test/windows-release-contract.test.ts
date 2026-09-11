@@ -37,7 +37,11 @@ describe("Windows production release contract", () => {
     for (const sha of Object.values(lock.actions) as string[]) expect(sha).toMatch(/^[0-9a-f]{40}$/)
   })
 
-  test("derives the development identity and blocks unapproved production identities", () => {
+  test("derives the fork's own extension identity and renders the dev native-host manifest", () => {
+    // FORK-DELTA: the fork ships its own unpacked identity and does not adopt
+    // upstream's published Chrome Web Store id (MERGE-PLAN-v0.25.0 §D3). It
+    // derives its own id, passes non-production validation, and is intentionally
+    // NOT store-approved, so the production gate refuses it.
     const identities = parseStoreIdentities(JSON.parse(read("extension/store-identities.json")))
     const extension = JSON.parse(read("extension/manifest.json"))
     expect(deriveChromiumExtensionId(identities.chrome.publicKey)).toBe("hkjbaciefhhgekldhncknbjkofbpenng")
@@ -107,10 +111,9 @@ describe("Windows production release contract", () => {
     expect(workflow).toContain("attestations: write")
     expect(workflow).toContain("artifact-metadata: write")
     expect(workflow).toContain("INNO_SETUP_LICENSE_ACKNOWLEDGED")
-    // Releases ship the development (Load-unpacked) identity until the store
-    // listings in store-identities.json are approved; production mode still
-    // hard-blocks, so removing this env is the deliberate flip back.
-    expect(workflow).toContain("INTERCEPTOR_WINDOWS_IDENTITY_MODE: development")
+    // The Chrome Web Store identity is approved (store-identities.json), so the
+    // release lane runs the production gate; the development override is gone.
+    expect(workflow).not.toContain("INTERCEPTOR_WINDOWS_IDENTITY_MODE")
     expect(workflow).toContain("gh attestation verify")
     expect(workflow).toContain("Get-AuthenticodeSignature")
     for (const sha of Object.values(lock.actions) as string[]) expect(workflow).toContain(sha)

@@ -121,7 +121,7 @@ const MAP_BROWSER = `BROWSER — a signed-in Chrome/Brave profile, background ta
   Navigate   navigate <url> · back · forward · scroll · wait <ms> · wait-stable
   Tabs       tabs · tab new|close|switch · window · frames · session · group (per-agent isolation) · contexts
   Network    net (passive log → HAR/pcapng) · headers · override (rewrite requests) · sse
-  Capture    screenshot [ref] · canvas · ocr · save --out <path> <expr>  (page bytes straight to disk) · eval <js> (CSP-proof)
+  Capture    screenshot [ref] · canvas · ocr · save --out <path> <expr>  (page bytes straight to disk) · eval <js> [--main]
   Data       cookies · storage · history · bookmarks · downloads · clipboard · clear
   Record     monitor (record → replay) · scene (canvas / rich editors) · batch (many actions, one call) · brand`
 
@@ -303,6 +303,8 @@ Capture:
   interceptor eval <code> --main             Run JS in page context
   interceptor eval <code> --main --allow-csp-strip   Also strip the page's CSP header for this tab
                                              (disables the site's own XSS defenses — opt-in, off by default)
+    --frame <id>                             Target exactly that frame; missing frames fail
+    Isolated eval may require Allow User Scripts. MAIN CSP recovery discloses a tab reload, which can discard unsaved page state.
   interceptor save --out <path> <expr>       Stream page bytes (Blob/ArrayBuffer/blob: URL) to disk; no downloads/CDP — see 'save --help'
 
 Cookies:
@@ -413,6 +415,14 @@ Recording (Session Monitor):
   interceptor monitor resume                    Resume an active paused session
   interceptor monitor status [--all]            Show status of current/all monitor sessions
   interceptor monitor status --task <taskId>    Show task envelope status
+  interceptor monitor task create "<objective>" Create a durable agent task (no recording needed)
+  interceptor monitor task checkpoint <taskId> --file <json> Save revisioned constraints, target and checks
+  interceptor monitor task resume <taskId>       Read compact task state and scoped lessons
+  interceptor monitor task verify <taskId>       Record current predicate results; preserve lifecycle status
+  interceptor monitor task complete <taskId>     Complete an active task only after fresh checks all return true
+    Completed/stopped tasks must be checkpointed before another completion attempt.
+    A completed task may have a newer failed verification; status records completion history.
+    Checkpoint schema: interceptor-browser/workflows/task-state.md. Verification never reloads pages.
   interceptor monitor task attach <taskId> <sid> Attach an existing source session
   interceptor monitor task snapshot <taskId|name>  Snapshot source artifacts under the task root
   interceptor monitor task quality <taskId|name>   Show task capture readiness gates (synthesizes a missing transcript first)
@@ -426,7 +436,8 @@ Recording (Session Monitor):
     --with-bodies                        (P1) Merge cached response bodies
 
 Meta:
-  interceptor contexts                       List IDs of all connected browser contexts (use with --context)
+  interceptor contexts [--verbose]           List connected browser contexts (verbose: version, store/unpacked, id, transports)
+  interceptor contexts rename <name>         Name the targeted context (what the popup does); use --context <id> to pick it
   interceptor init                           First-run preflight: verify daemon, bridge, and extension are reachable
   interceptor init --verbose                 Same as 'init', plus a per-component reachability breakdown
   interceptor status                         Check daemon status (local — no connection needed)

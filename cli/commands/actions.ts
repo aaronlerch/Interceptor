@@ -81,7 +81,7 @@ export function parseActionsCommand(filtered: string[], positionalCount?: number
       const textArgs = positionalCount !== undefined
         ? filtered.slice(2, positionalCount + 1)
         : filtered.slice(2).filter(a => a !== "--append" && !TRUSTED_FLAG_VALUES.includes(a) && a !== "--secret" && a !== "--op-any-target" && a !== "--op-account" && filtered[filtered.indexOf(a) - 1] !== "--secret" && filtered[filtered.indexOf(a) - 1] !== "--op-account")
-      // FORK-DELTA §7: `--secret op://<vault>/<item>/<field>` types a 1Password
+      // FORK-DELTA: `--secret op://<vault>/<item>/<field>` types a 1Password
       // value by reference. The daemon resolves it after logging, and checks the
       // page host against the ITEM's own URLs; the CLI process never holds the
       // value. A reference is a location, not a secret, so it is safe on argv.

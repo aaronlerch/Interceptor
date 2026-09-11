@@ -65,7 +65,9 @@ const STATE = ["--depth", "--filter", "--limit", "--max-chars", "--role"]
 // `click --selector button --nth 4` arrives with selector === "--nth".
 // --secret carries a 1Password reference (op://<vault>/<item>/<field>) for
 // `type` — a location, never a value, so it is safe on argv. --op-account
-// disambiguates when several 1Password accounts are signed in (FORK-DELTA §7).
+// disambiguates when several 1Password accounts are signed in (see FORK-DELTA
+// on the 1Password vault). The upstream saved-login flags (--browser-login,
+// --browser, --user) are intentionally absent: that credential surface is cut.
 const ACTIONS = ["--at", "--duration", "--from", "--nth", "--op-account", "--secret", "--selector", "--steps", "--to"]
 const NAV = ["--amount", "--ms", "--timeout"]
 const NET = ["--filter", "--format", "--limit", "--out", "--since", "--pattern", "--patterns", "--type"]
@@ -74,7 +76,7 @@ const DATA = ["--since"]
 const META = ["--css", "--frame-ids", "--since"]
 const SAVE = ["--out", "--chunk-size"]
 const BATCH = ["--timeout"]
-const MONITOR = ["--capture", "--format", "--guard-policy", "--instruction", "--mode", "--out", "--retention-policy", "--session", "--task", "--verifier-policy", "--persist-bodies"]
+const MONITOR = ["--capture", "--file", "--format", "--guard-policy", "--instruction", "--mode", "--out", "--retention-policy", "--session", "--task", "--verifier-policy", "--persist-bodies"]
 const SCENE = ["--profile", "--slide", "--type"]
 const SSE = ["--filter", "--limit", "--timeout"]
 const RESEARCH = ["--dir", "--effort", "--note", "--slug", "--status"]
@@ -134,7 +136,8 @@ const VALUE_FLAGS_BY_CMD: Record<string, string[]> = {
 // consumption pattern, so keep it in sync when adding a family here.
 const COMPOUND_BOOL = ["--activate", "--append", "--full", "--include-frames", "--include-style", "--markdown", "--net-only", "--no-read", "--no-reuse", "--no-wait", "--os", "--reuse", "--text-only", "--tree-only", "--trusted"]
 const STATE_BOOL = ["--elements-only", "--full", "--include-frames", "--markdown", "--native", "--text-only"]
-// --op-any-target overrides the 1Password item-URL target check (FORK-DELTA §7).
+// --op-any-target overrides the 1Password item-URL target check (see FORK-DELTA
+// on the 1Password vault). --user is omitted: it belonged to the cut saved-login surface.
 const ACTIONS_BOOL = ["--append", "--dropzone", "--op-any-target", "--picker", "--trusted", "--os"]
 const TABS_BOOL = ["--incognito"]
 const TAB_BOOL = ["--activate", "--no-reuse", "--reuse"]
@@ -174,7 +177,7 @@ const BOOLEAN_FLAGS_BY_CMD: Record<string, string[]> = {
   capabilities: META_BOOL, modals: META_BOOL, panels: META_BOOL,
   eval: EVAL_BOOL, save: SAVE_BOOL, brand: [], group: [], batch: BATCH_BOOL, raw: BATCH_BOOL,
   monitor: MONITOR_BOOL, scene: SCENE_BOOL, sse: [], override: [],
-  upgrade: ["--full"], init: ["--explain", "--verbose"], research: RESEARCH_BOOL, extensions: ["--remove"], contexts: [],
+  upgrade: ["--full"], init: ["--explain", "--verbose"], research: RESEARCH_BOOL, extensions: ["--remove"], contexts: ["--verbose"],
   skills: SKILLS_BOOL, daemon: [], manifest: [],
   keepawake: POWER_BOOL, idle: POWER_BOOL,
 }
@@ -208,8 +211,7 @@ function rejectUnknownFlag(cmd: string, tok: string): void {
     }
     return
   }
-  console.error(`error: ${msg}`)
-  process.exit(1)
+  throw new Error(msg)
 }
 
 export type NormalizedArgs = { argv: string[]; positionalCount: number }
@@ -248,8 +250,7 @@ export function normalizeArgsSplit(filtered: string[]): NormalizedArgs {
           // A boolean flag with a value would travel as one raw token no
           // parser recognizes — `net log --redact-auth=true` would export
           // credentials unredacted and exit 0. Never legal, so no lax mode.
-          console.error(`error: flag '${name}' for '${cmd}' does not take a value (use '${name}').`)
-          process.exit(1)
+          throw new Error(`flag '${name}' for '${cmd}' does not take a value (use '${name}').`)
         }
         flags.push(tok)
         continue
@@ -271,8 +272,7 @@ export function normalizeArgsSplit(filtered: string[]): NormalizedArgs {
   if (cmd === "tab" && positionals[0] !== "new") {
     const unsupported = TAB_BOOL.find((flag) => flags.includes(flag))
     if (unsupported) {
-      console.error(`error: flag '${unsupported}' is only valid with 'tab new'.`)
-      process.exit(1)
+      throw new Error(`flag '${unsupported}' is only valid with 'tab new'.`)
     }
   }
 
