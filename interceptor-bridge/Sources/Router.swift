@@ -23,11 +23,40 @@ final class Router: @unchecked Sendable {
         // issue #244: the admin-prompt filler reads and drives SecurityAgent via AX.
     ]
 
+    // FORK-DELTA: per-domain allowlist. "Full" mode is otherwise all-or-nothing
+    // across ~60 domains (arbitrary AppleScript, whole-disk fs, personal data).
+    // This is the AUTHORITATIVE gate: a direct write to the bridge socket and an
+    // App Intents dispatch both reach route() without passing the daemon's
+    // TypeScript gate, so the check has to live here. The provider returns the
+    // allowed domain prefixes, or nil when no allowlist file exists (allow all).
+    // `trust` is always allowed — it is the permission-walkthrough bootstrap.
+    private static let alwaysAllowedDomains: Set<String> = ["trust"]
+    private let allowedDomains: @Sendable () -> Set<String>?
+
     // Injectable so tests can force trusted/untrusted without live TCC state.
     private let axTrustCheck: @Sendable () -> Bool
 
-    init(axTrustCheck: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() }) {
+    init(
+        axTrustCheck: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
+        allowedDomains: @escaping @Sendable () -> Set<String>? = Router.readAllowlistFromFile,
+    ) {
         self.axTrustCheck = axTrustCheck
+        self.allowedDomains = allowedDomains
+    }
+
+    /// Read ~/.interceptor/macos-allow. nil when the file is absent (allow all);
+    /// a set (possibly empty → deny all) when present. Mirrors the TypeScript
+    /// reader in shared/surface-mode.ts so the two enforcers agree.
+    static func readAllowlistFromFile() -> Set<String>? {
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent(".interceptor/macos-allow")
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        var set = Set<String>()
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+            let s = line.trimmingCharacters(in: .whitespaces)
+            if s.isEmpty || s.hasPrefix("#") { continue }
+            set.insert(s.lowercased())
+        }
+        return set
     }
 
     func register(_ prefix: String, handler: DomainHandler) {
@@ -87,6 +116,11 @@ final class Router: @unchecked Sendable {
             command = domainKey
         }
 
+        if !Self.alwaysAllowedDomains.contains(domainKey), let allow = allowedDomains(), !allow.contains(domainKey) {
+            completion(Self.domainNotAllowedError(domain: domainKey))
+            return
+        }
+
         if Self.axGatedDomains.contains(domainKey), !axTrustCheck() {
             completion(Self.accessibilityGateError(
                 verb: domainKey,
@@ -122,6 +156,18 @@ final class Router: @unchecked Sendable {
     /// error code for this exact condition (kAXErrorAPIDisabled →
     /// "accessibility_unusable") plus the `remediation` field convention
     /// MonitorDomain's TCC preflight established.
+    /// Returned when a domain is not in the configured allowlist. Pure so it is
+    /// unit-testable; names the exact command to permit it.
+    static func domainNotAllowedError(domain: String) -> [String: Any] {
+        var err = WireFormat.error(
+            "the '\(domain)' macOS domain is not in this install's allowlist. "
+            + "Run 'interceptor surface allow \(domain)' to permit it, or "
+            + "'interceptor surface allow all' to permit every domain."
+        )
+        err["code"] = "domain_not_allowed"
+        return err
+    }
+
     static func accessibilityGateError(verb: String, adhocSigned: Bool) -> [String: Any] {
         var message = "macos \(verb) needs Accessibility, which is not granted to interceptor-bridge. "
             + "Run 'interceptor macos trust --walkthrough' to fix."

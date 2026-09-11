@@ -37,3 +37,34 @@ describe("marker IO", () => {
     expect(readSurfaceMarker(env)).toBeNull()
   })
 })
+
+import { macosDomainAllowed, macosDomainOf, ALWAYS_ALLOWED_DOMAINS } from "../shared/surface-mode"
+
+describe("per-domain allowlist", () => {
+  test("null allowlist (no file) allows everything", () => {
+    expect(macosDomainAllowed("intent", null)).toBe(true)
+    expect(macosDomainAllowed("screenshot", null)).toBe(true)
+  })
+  test("a present allowlist denies unlisted domains", () => {
+    const allow = new Set(["screenshot", "tree"])
+    expect(macosDomainAllowed("screenshot", allow)).toBe(true)
+    expect(macosDomainAllowed("tree", allow)).toBe(true)
+    expect(macosDomainAllowed("intent", allow)).toBe(false)
+    expect(macosDomainAllowed("fs", allow)).toBe(false)
+  })
+  test("an empty allowlist denies all (except always-allowed)", () => {
+    expect(macosDomainAllowed("screenshot", new Set())).toBe(false)
+    expect(macosDomainAllowed("trust", new Set())).toBe(true)
+  })
+  test("'trust' is always allowed, even when not listed", () => {
+    expect(ALWAYS_ALLOWED_DOMAINS.has("trust")).toBe(true)
+    expect(macosDomainAllowed("trust", new Set(["screenshot"]))).toBe(true)
+  })
+  test("macosDomainOf extracts the domain from an action type", () => {
+    expect(macosDomainOf("macos_tree")).toBe("tree")
+    expect(macosDomainOf("macos_app_activate")).toBe("app")
+    expect(macosDomainOf("macos_intent_dispatch")).toBe("intent")
+    expect(macosDomainOf("input_text")).toBeNull()
+    expect(macosDomainOf("macos")).toBeNull()
+  })
+})

@@ -32,7 +32,7 @@ final class RouterTrustGateTests: XCTestCase {
 
     func testUntrustedRouterBlocksEveryAxGatedVerb() {
         let handler = RecordingHandler()
-        let router = Router(axTrustCheck: { false })
+        let router = Router(axTrustCheck: { false }, allowedDomains: { nil })
         for key in gatedKeys { router.register(key, handler: handler) }
 
         for key in gatedKeys {
@@ -52,7 +52,7 @@ final class RouterTrustGateTests: XCTestCase {
     }
 
     func testUntrustedGateErrorCarriesApiDisabledDetails() {
-        let router = Router(axTrustCheck: { false })
+        let router = Router(axTrustCheck: { false }, allowedDomains: { nil })
         router.register("tree", handler: RecordingHandler())
 
         let exp = expectation(description: "typed details")
@@ -68,7 +68,7 @@ final class RouterTrustGateTests: XCTestCase {
 
     func testTrustedRouterDispatchesGatedVerbs() {
         let handler = RecordingHandler()
-        let router = Router(axTrustCheck: { true })
+        let router = Router(axTrustCheck: { true }, allowedDomains: { nil })
         router.register("tree", handler: handler)
 
         let exp = expectation(description: "dispatch")
@@ -82,7 +82,7 @@ final class RouterTrustGateTests: XCTestCase {
 
     func testUntrustedRouterStillDispatchesNonGatedVerbs() {
         let handler = RecordingHandler()
-        let router = Router(axTrustCheck: { false })
+        let router = Router(axTrustCheck: { false }, allowedDomains: { nil })
         router.register("apps", handler: handler)
 
         let exp = expectation(description: "non-gated dispatch")

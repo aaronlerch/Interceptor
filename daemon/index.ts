@@ -29,7 +29,7 @@ import { assertNoInstallMaintenance } from "../shared/install-maintenance"
 import { VERSION } from "../cli/version"
 import { actionLogSummary, inboundLogSummary, outboundLogSummary } from "./redact"
 import { wsUpgradeAllowed } from "./ws-guard"
-import { macosEnabledFromEnv } from "../shared/surface-mode"
+import { macosEnabledFromEnv, readMacosAllowlist, macosDomainAllowed, macosDomainOf } from "../shared/surface-mode"
 import * as op from "./op"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
@@ -241,14 +241,23 @@ function processBridgeBuffer(): void {
 // on this box) must not be able to route macos_* around a browser-only choice.
 // null = allowed; a string = the refusal to return. Read per-call (marker/env);
 // macos calls are not hot, so a stale-cache bug is worse than a cheap re-read.
-function macosSurfaceBlocked(): string | null {
-  if (macosEnabledFromEnv(true)) return null
-  return "interceptor is in browser-only mode; the macOS surface is disabled. Run 'interceptor surface full' to enable it (or unset INTERCEPTOR_BROWSER_ONLY)."
+function macosSurfaceBlocked(actionType: string): string | null {
+  if (!macosEnabledFromEnv(true)) {
+    return "interceptor is in browser-only mode; the macOS surface is disabled. Run 'interceptor surface full' to enable it (or unset INTERCEPTOR_BROWSER_ONLY)."
+  }
+  // Per-domain allowlist (defense in depth with the Swift Router). Early refusal
+  // for the CLI/WS paths; the Router is the authoritative backstop for a direct
+  // socket write or an App Intents dispatch.
+  const domain = macosDomainOf(actionType)
+  if (domain && !macosDomainAllowed(domain, readMacosAllowlist())) {
+    return `the '${domain}' macOS domain is not in this install's allowlist. Run 'interceptor surface allow ${domain}' to permit it, or 'interceptor surface allow all' to permit every domain.`
+  }
+  return null
 }
 
 function sendToBridge(id: string, action: Record<string, unknown>, cliSocket: { write: (data: Buffer | string) => number }, actionType: string): void {
   if (actionType.startsWith("macos_")) {
-    const blocked = macosSurfaceBlocked()
+    const blocked = macosSurfaceBlocked(actionType)
     if (blocked) { socketWriteFramed(cliSocket, JSON.stringify({ id, result: { success: false, error: blocked } })); return }
   }
   const payload = JSON.stringify({ id, action })
@@ -299,8 +308,9 @@ function forwardDelegateToBridge(
     try { agentWs.send(JSON.stringify({ id, result: { success: false, error } })) } catch {}
   }
   // FORK-DELTA: delegate frames always target the macOS bridge, so browser-only
-  // mode blocks them here too (defense in depth with the sendToBridge guard).
-  const blocked = macosSurfaceBlocked()
+  // mode and the per-domain allowlist block them here too (defense in depth with
+  // the sendToBridge guard and the Swift Router).
+  const blocked = macosSurfaceBlocked(actionType)
   if (blocked) { fail(blocked); return }
   const dispatch = () => {
     const payload = JSON.stringify({ id, action })

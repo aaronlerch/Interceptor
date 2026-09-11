@@ -19,7 +19,7 @@
  * The "full" marker value is deliberately the same as no marker (fall through
  * to detection): you cannot conjure a bridge that is not installed.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs"
 import { dirname } from "node:path"
 
 export type SurfaceMode = "browser-only" | "full"
@@ -80,4 +80,70 @@ export function macosEnabledFromEnv(
     marker: readSurfaceMarker(env),
     detected,
   })
+}
+
+// ── Per-domain allowlist ─────────────────────────────────────────────────────
+//
+// Even in full mode the ~60 bridge domains are all-or-nothing without this:
+// screenshots come with arbitrary AppleScript (`intent`), whole-disk `fs`, and
+// the personal-data stores. The allowlist narrows "full" to a chosen subset.
+// It is file-driven so the risk-tier knowledge lives in ONE place (the CLI that
+// writes the file); both enforcers — the Swift Router (authoritative: a direct
+// socket write and App Intents bypass the daemon) and the daemon (early refusal
+// for the CLI/WS paths) — only check set membership, so they cannot drift.
+//
+//   file absent          → allow every domain (full mode's default)
+//   file present, listed → allow only the listed domain prefixes
+//   file present, empty  → allow none (macos effectively off)
+//
+// `trust` is always allowed: it is the permission-walkthrough bootstrap, and the
+// browser-only switch (above) is the real global off-switch.
+
+export const ALWAYS_ALLOWED_DOMAINS: ReadonlySet<string> = new Set(["trust"])
+
+export function macosAllowlistPath(env: Record<string, string | undefined> = process.env): string {
+  return `${env.HOME || ""}/.interceptor/macos-allow`
+}
+
+/** Parsed allowlist, or null when no file exists (= allow all). */
+export function readMacosAllowlist(env: Record<string, string | undefined> = process.env): Set<string> | null {
+  let raw: string
+  try { raw = readFileSync(macosAllowlistPath(env), "utf-8") } catch { return null }
+  const set = new Set<string>()
+  for (const line of raw.split("\n")) {
+    const s = line.trim()
+    if (!s || s.startsWith("#")) continue
+    set.add(s.toLowerCase())
+  }
+  return set
+}
+
+/** Persist the allowlist (0600). Returns the path written. */
+export function writeMacosAllowlist(domains: string[], env: Record<string, string | undefined> = process.env): string {
+  const path = macosAllowlistPath(env)
+  mkdirSync(dirname(path), { recursive: true })
+  const body = domains.length
+    ? `# interceptor macOS domain allowlist — one prefix per line. 'trust' is always allowed.\n${domains.join("\n")}\n`
+    : "# interceptor macOS domain allowlist — EMPTY: every domain is denied.\n"
+  writeFileSync(path, body, { mode: 0o600 })
+  return path
+}
+
+/** Remove the allowlist file (→ allow all). Returns true if a file was removed. */
+export function clearMacosAllowlist(env: Record<string, string | undefined> = process.env): boolean {
+  try { rmSync(macosAllowlistPath(env)); return true } catch { return false }
+}
+
+/** Is one domain permitted under an allowlist? null allowlist = allow all. */
+export function macosDomainAllowed(domain: string, allowlist: Set<string> | null): boolean {
+  if (ALWAYS_ALLOWED_DOMAINS.has(domain)) return true
+  if (allowlist === null) return true
+  return allowlist.has(domain.toLowerCase())
+}
+
+/** Extract the domain prefix from a `macos_<domain>[_<cmd>]` action type. */
+export function macosDomainOf(actionType: string): string | null {
+  const parts = actionType.split("_")
+  if (parts.length < 2 || parts[0] !== "macos") return null
+  return parts[1].toLowerCase()
 }
