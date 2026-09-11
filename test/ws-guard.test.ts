@@ -27,8 +27,8 @@ describe("wsUpgradeAllowed", () => {
 
   test("REFUSES any non-loopback peer regardless of Origin (the LAN vector)", () => {
     for (const o of ["", "chrome-extension://abc", "https://evil.example"]) {
-      expect(wsUpgradeAllowed("::ffff:192.168.1.210", o)).toBe(false)
-      expect(wsUpgradeAllowed("192.168.1.210", o)).toBe(false)
+      expect(wsUpgradeAllowed("::ffff:192.168.1.50", o)).toBe(false)
+      expect(wsUpgradeAllowed("192.168.1.50", o)).toBe(false)
       expect(wsUpgradeAllowed("10.0.0.5", o)).toBe(false)
       expect(wsUpgradeAllowed("::ffff:10.0.0.5", o)).toBe(false)
     }
