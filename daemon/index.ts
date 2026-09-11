@@ -27,6 +27,7 @@ import { DAEMON_HEALTH_SERVICE, LEGACY_HEALTH_BODY, probeDaemonHealth } from "..
 import { assertNoInstallMaintenance } from "../shared/install-maintenance"
 import { VERSION } from "../cli/version"
 import { actionLogSummary, inboundLogSummary, outboundLogSummary } from "./redact"
+import { wsUpgradeAllowed } from "./ws-guard"
 import * as op from "./op"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
@@ -1819,6 +1820,20 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
   return Bun.serve<undefined>({
     port: WS_PORT,
     fetch(req, server) {
+      // SECURITY (FORK-DELTA): this WebSocket honors `delegate` frames that route
+      // arbitrary macos_* actions to the bridge, so the upgrade is locked to
+      // local, non-web callers before it is accepted. Two checks the daemon must
+      // make itself: a WebSocket is exempt from same-origin policy, so the server
+      // — not the browser — has to reject a page Origin; and the port has no
+      // hostname bind (it is the daemon's singleton token, so a failed bind must
+      // exit rather than silently narrow), so the server has to reject a
+      // non-loopback peer. Without these, any web page the browser loads and any
+      // host on the LAN can reach the delegate path. Verified: a page WS carries
+      // an http(s) Origin; the CLI and the injected native agent carry none; the
+      // extension carries chrome-/moz-/safari-web-extension.
+      if (!wsUpgradeAllowed(server.requestIP(req)?.address ?? "", req.headers.get("origin") ?? "")) {
+        return new Response("forbidden", { status: 403 })
+      }
       if (server.upgrade(req, {})) return
       if (new URL(req.url).pathname === "/health") {
         return Response.json({ service: DAEMON_HEALTH_SERVICE, pid: process.pid, version: VERSION, wsPort: WS_PORT, healed: healRuntimeFiles("health probe") })
