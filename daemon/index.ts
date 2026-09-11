@@ -29,6 +29,7 @@ import { assertNoInstallMaintenance } from "../shared/install-maintenance"
 import { VERSION } from "../cli/version"
 import { actionLogSummary, inboundLogSummary, outboundLogSummary } from "./redact"
 import { wsUpgradeAllowed } from "./ws-guard"
+import { macosEnabledFromEnv } from "../shared/surface-mode"
 import * as op from "./op"
 import { CdpManager, CDP_ACTION_TYPES } from "./cdp/manager"
 import { CDP_CONTEXT_PREFIX } from "../shared/cdp-app"
@@ -235,7 +236,21 @@ function processBridgeBuffer(): void {
   }
 }
 
+// FORK-DELTA: browser-only mode disables the macOS surface at the daemon too,
+// not just at the CLI gate — a direct daemon-socket caller (every coding agent
+// on this box) must not be able to route macos_* around a browser-only choice.
+// null = allowed; a string = the refusal to return. Read per-call (marker/env);
+// macos calls are not hot, so a stale-cache bug is worse than a cheap re-read.
+function macosSurfaceBlocked(): string | null {
+  if (macosEnabledFromEnv(true)) return null
+  return "interceptor is in browser-only mode; the macOS surface is disabled. Run 'interceptor surface full' to enable it (or unset INTERCEPTOR_BROWSER_ONLY)."
+}
+
 function sendToBridge(id: string, action: Record<string, unknown>, cliSocket: { write: (data: Buffer | string) => number }, actionType: string): void {
+  if (actionType.startsWith("macos_")) {
+    const blocked = macosSurfaceBlocked()
+    if (blocked) { socketWriteFramed(cliSocket, JSON.stringify({ id, result: { success: false, error: blocked } })); return }
+  }
   const payload = JSON.stringify({ id, action })
   const encoded = Buffer.from(payload, "utf-8")
   const header = Buffer.alloc(4)
@@ -283,6 +298,10 @@ function forwardDelegateToBridge(
   const fail = (error: string) => {
     try { agentWs.send(JSON.stringify({ id, result: { success: false, error } })) } catch {}
   }
+  // FORK-DELTA: delegate frames always target the macOS bridge, so browser-only
+  // mode blocks them here too (defense in depth with the sendToBridge guard).
+  const blocked = macosSurfaceBlocked()
+  if (blocked) { fail(blocked); return }
   const dispatch = () => {
     const payload = JSON.stringify({ id, action })
     const encoded = Buffer.from(payload, "utf-8")

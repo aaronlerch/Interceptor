@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { IS_WIN, SOCKET_PATH, PID_PATH, transportLabel } from "../../shared/platform"
 import { skillsStatusSummary } from "../commands/skills"
+import { macosEnabled, readSurfaceMarker, isTruthyEnv } from "../../shared/surface-mode"
 
 export type StatusSnapshot = {
   mode: "browser-only" | "full" | "unknown"
@@ -123,15 +124,21 @@ export function readStatusSnapshot(): StatusSnapshot {
     } catch {}
   }
 
+  // mode now reflects the EFFECTIVE surface choice (shared/surface-mode.ts),
+  // not just plist presence — so a dev bridge running from the source tree
+  // reads "full" (accurate) rather than the old "unknown", and a browser-only
+  // marker reads "browser-only" even with a bridge present.
   let mode: "browser-only" | "full" | "unknown"
   if (IS_WIN) {
     mode = "browser-only"
-  } else if (launchAgentInstalled) {
-    mode = "full"
-  } else if (bridgeAlive) {
-    mode = "unknown"
   } else {
-    mode = "browser-only"
+    const detected = launchAgentInstalled || bridgeAlive || bridgeSockExists
+    mode = macosEnabled({
+      forceOff: isTruthyEnv(process.env.INTERCEPTOR_BROWSER_ONLY),
+      forceOn: !!process.env.INTERCEPTOR_ALL_SURFACES,
+      marker: readSurfaceMarker(),
+      detected,
+    }) ? "full" : "browser-only"
   }
 
   let skills: StatusSnapshot["skills"]

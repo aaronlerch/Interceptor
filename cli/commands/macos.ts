@@ -6,6 +6,7 @@
  */
 
 import { existsSync } from "node:fs"
+import { macosEnabledFromEnv } from "../../shared/surface-mode"
 import { sendCommand, sendCommandWs, type DaemonResponse } from "../transport"
 import {
   attachMonitorTaskSource,
@@ -66,7 +67,19 @@ function bridgePreflightFailure(): string | null {
   const bridgePid = "/tmp/interceptor-bridge.pid"
   const launchAgentInstalled = existsSync(launchAgentUser) || existsSync(launchAgentSystem)
   const bridgeReachable = existsSync(bridgeSock) || existsSync(bridgePid)
-  if (!launchAgentInstalled && !bridgeReachable) {
+  // A bridge may be present but the surface deliberately switched off
+  // (~/.interceptor/mode or INTERCEPTOR_BROWSER_ONLY). Distinguish that from
+  // "no bridge installed" so the fix points the right way.
+  if (!macosEnabledFromEnv(launchAgentInstalled || bridgeReachable)) {
+    if (launchAgentInstalled || bridgeReachable) {
+      return [
+        "'interceptor macos *' is disabled: interceptor is in browser-only mode.",
+        "A bridge is installed but the macOS surface is switched off by choice.",
+        "",
+        "To enable:",
+        "  interceptor surface full",
+      ].join("\n")
+    }
     return [
       "'interceptor macos *' requires full computer-use mode.",
       "You're currently running in browser-only mode (no bridge installed).",

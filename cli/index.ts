@@ -37,6 +37,7 @@ import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
+import { runSurfaceCommand } from "./commands/surface"
 import { runResearchCommand } from "./commands/research"
 import { runDiagnoseCommand, staleExtensionHint } from "./commands/diagnose"
 import { installTypeLabel } from "../shared/extension-identity"
@@ -81,6 +82,7 @@ const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
 const UPDATE_CMDS = new Set(["update"])
 const UPGRADE_CMDS = new Set(["upgrade"])
+const SURFACE_CMDS = new Set(["surface"])
 const INIT_CMDS = new Set(["init"])
 const RESEARCH_CMDS = new Set(["research"])
 const DIAGNOSE_CMDS = new Set(["diagnose"])
@@ -94,7 +96,7 @@ const MCP_CMDS = new Set(["mcp"])
 // bootstrap it themselves rather than relying on the pre-dispatch auto-spawn).
 // `research` prints guidance / manages an on-disk ledger — no browser, no daemon.
 // `diagnose` reads local state + optionally probes the daemon — never auto-spawns.
-const NO_DAEMON = new Set(["status", "help", "events", "delegate", "session", "upgrade", "init", "research", "extensions", "skills", "manifest", "diagnose", "mcp", "daemon"])
+const NO_DAEMON = new Set(["status", "help", "events", "delegate", "session", "upgrade", "surface", "init", "research", "extensions", "skills", "manifest", "diagnose", "mcp", "daemon"])
 
 // Every command the CLI dispatches. Used to reject unknown commands
 // before any daemon-spawning side effect runs.
@@ -103,7 +105,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
   ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
-  ...UPDATE_CMDS, ...UPGRADE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
+  ...UPDATE_CMDS, ...UPGRADE_CMDS, ...SURFACE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...MCP_CMDS, ...DAEMON_CMDS,
   ...POWER_CMDS, ...DELEGATE_CMDS,
   "help", "contexts",
@@ -316,6 +318,11 @@ async function main() {
 
   if (UPGRADE_CMDS.has(cmd)) {
     await runUpgradeCommand(filtered)
+    return
+  }
+
+  if (SURFACE_CMDS.has(cmd)) {
+    await runSurfaceCommand(filtered)
     return
   }
 
