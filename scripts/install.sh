@@ -473,32 +473,101 @@ done
 # Takes one arg: "chrome" | "brave" | "edge" | "vivaldi". Reads $SKIP_EXTENSION,
 # $PROFILE, $DRY_RUN, $EXTENSION_DIR from the surrounding scope.
 
-# Read extensions.ui.developer_mode from a profile's Preferences JSON.
-# Echoes "true" / "false" / "unknown" (file missing, malformed, or key absent).
+# Map a browser target to its extensions page URL.
+#
+# This is a function and not an inline `$(case ...)` because a case statement
+# inside a command substitution inside a double-quoted string is a bash parse
+# error: the `)` closing the first case pattern closes the substitution, and
+# bash dies with "syntax error near unexpected token `newline'" — while printing
+# the raw shell source into the very message that was supposed to tell the user
+# which URL to open.
+extensions_url_for() {
+  case "$1" in
+    brave)                                                          echo "brave://extensions/" ;;
+    chrome|chrome-beta|chrome-canary|chrome-dev|chrome-for-testing) echo "chrome://extensions/" ;;
+    edge)                                                           echo "edge://extensions/"  ;;
+    vivaldi)                                                        echo "vivaldi://extensions/" ;;
+    *)                                                              echo "chrome://extensions/" ;;
+  esac
+}
+
+# Read extensions.ui.developer_mode for a profile. Takes the PROFILE DIRECTORY,
+# not a file. Echoes "true" / "false" / "unknown" (nothing readable, malformed,
+# or key absent in both files).
+#
+# Chromium keeps this pref in "Secure Preferences", not "Preferences", and that
+# copy is MAC-protected. Verified 2026-09-11 on Chrome/macOS: plain Preferences
+# carried no extensions.ui key at all, while Secure Preferences held
+# developer_mode=true alongside a MAC at
+# protection.macs.extensions.ui.developer_mode. Reading only Preferences
+# therefore returns "unknown" for a profile that has Developer mode ON, and the
+# preflight below hard-fails an install that would have worked — the false
+# negative this file already warns about, in a second place.
 read_developer_mode() {
-  local prefs="$1"
-  if [[ ! -f "$prefs" ]]; then echo "unknown"; return 0; fi
-  python3 - "$prefs" <<'PY' 2>/dev/null || echo "unknown"
-import json, sys
-try:
-    with open(sys.argv[1]) as f:
-        d = json.load(f)
+  local profile_path="$1"
+  python3 - "$profile_path" <<'PY' 2>/dev/null || echo "unknown"
+import json, os, sys
+
+profile = sys.argv[1]
+
+def load(name):
+    try:
+        with open(os.path.join(profile, name)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def devmode(d):
+    if not isinstance(d, dict):
+        return None
     v = d.get("extensions", {}).get("ui", {}).get("developer_mode")
-    if v is True: print("true")
-    elif v is False: print("false")
-    else: print("unknown")
-except Exception:
+    return v if isinstance(v, bool) else None
+
+# Secure Preferences first: it is the copy Chromium validates and the one the
+# in-browser toggle writes. Preferences is the fallback for older profiles.
+for name in ("Secure Preferences", "Preferences"):
+    v = devmode(load(name))
+    if v is not None:
+        print("true" if v else "false")
+        break
+else:
     print("unknown")
 PY
 }
 
+# Is extensions.ui.developer_mode governed by the MAC-protected copy?
+# Returns 0 when Secure Preferences carries a MAC for the key. Chromium
+# revalidates that MAC on load, so writing the pref without recomputing it has
+# the value discarded on next launch — a silent revert that looks exactly like
+# a successful auto-enable.
+developer_mode_is_protected() {
+  local profile_path="$1"
+  python3 - "$profile_path" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(os.path.join(sys.argv[1], "Secure Preferences")) as f:
+        d = json.load(f)
+except Exception:
+    raise SystemExit(1)
+ext = d.get("protection", {}).get("macs", {}).get("extensions")
+ui = ext.get("ui") if isinstance(ext, dict) else None
+raise SystemExit(0 if isinstance(ui, dict) and "developer_mode" in ui else 1)
+PY
+}
+
 # Toggle extensions.ui.developer_mode = true in a profile's Preferences JSON.
+# Takes the PROFILE DIRECTORY, not a file.
 # Must NOT run while the browser owns the file — the browser overwrites on shutdown.
-# Returns 0 on success, non-zero on failure (file missing, malformed, browser running).
+# Returns 0 on success; 1 no Preferences file, 2 browser running, 3 write failed,
+# 4 the pref is MAC-protected and cannot be written from outside the browser.
 write_developer_mode_true() {
-  local prefs="$1" browser_bin="$2"
+  local profile_path="$1" browser_bin="$2"
+  local prefs="$profile_path/Preferences"
   if [[ ! -f "$prefs" ]]; then return 1; fi
   if browser_running "$browser_bin"; then return 2; fi
+  # Never write the MAC-protected copy: Chromium rejects an unsigned edit and
+  # silently reverts it, which is worse than refusing outright.
+  if developer_mode_is_protected "$profile_path"; then return 4; fi
   python3 - "$prefs" <<'PY' 2>/dev/null || return 3
 import json, sys, os, tempfile
 path = sys.argv[1]
@@ -610,7 +679,7 @@ load_extension() {
   PROFILE_PATH="$(profile_root_for "$target")/$PROFILE_DIR_NAME"
   local PREFS_PATH="$PROFILE_PATH/Preferences"
   local DEVMODE_STATE
-  DEVMODE_STATE="$(read_developer_mode "$PREFS_PATH")"
+  DEVMODE_STATE="$(read_developer_mode "$PROFILE_PATH")"
 
   if [[ "$DEVMODE_STATE" == "false" || "$DEVMODE_STATE" == "unknown" ]]; then
     echo ""
@@ -623,15 +692,18 @@ load_extension() {
     echo ""
     echo "    Manual remediation:"
     echo "      1. Quit $BROWSER_NAME entirely."
-    echo "      2. Re-launch $BROWSER_NAME, open $(case "$target" in brave) echo brave://extensions/ ;; chrome|chrome-beta|chrome-canary|chrome-dev|chrome-for-testing) echo chrome://extensions/ ;; edge) echo edge://extensions/ ;; vivaldi) echo vivaldi://extensions/ ;; esac), toggle Developer mode ON."
+    echo "      2. Re-launch $BROWSER_NAME, open $(extensions_url_for "$target"), toggle Developer mode ON."
     echo "      3. Quit $BROWSER_NAME again."
     echo "      4. Re-run: bash scripts/install.sh ${MODE:+--$MODE} --$target${PROFILE:+ --profile \"$PROFILE\"}"
 
     # Offer auto-remediation if and only if the browser is currently closed
     # AND we have a Preferences file to write to. Editing while the browser
     # runs is unsafe — the browser overwrites on shutdown.
+    # A MAC-protected pref is off the table regardless: see
+    # developer_mode_is_protected above.
     local CAN_AUTO=0
-    if [[ -f "$PREFS_PATH" ]] && ! browser_running "$BROWSER_BIN"; then
+    if [[ -f "$PREFS_PATH" ]] && ! browser_running "$BROWSER_BIN" \
+       && ! developer_mode_is_protected "$PROFILE_PATH"; then
       CAN_AUTO=1
     fi
 
@@ -639,7 +711,7 @@ load_extension() {
       echo ""
       read -r -p "    Or: enable Developer mode now (writes Preferences while $BROWSER_NAME is closed)? [y/N] " ANSWER
       if [[ "${ANSWER:-n}" == "y" || "${ANSWER:-n}" == "Y" ]]; then
-        if write_developer_mode_true "$PREFS_PATH" "$BROWSER_BIN"; then
+        if write_developer_mode_true "$PROFILE_PATH" "$BROWSER_BIN"; then
           echo "    Developer mode enabled in $PREFS_PATH."
         else
           echo "    Failed to write Preferences (browser may have launched, file missing, or JSON malformed)."
@@ -652,8 +724,10 @@ load_extension() {
       fi
     elif [[ -t 0 ]]; then
       echo ""
-      echo "    Auto-enable is unavailable (no Preferences file at '$PREFS_PATH'"
-      echo "    or $BROWSER_NAME is still running). Use the manual path."
+      echo "    Auto-enable is unavailable: no Preferences file at '$PREFS_PATH',"
+      echo "    $BROWSER_NAME is still running, or the pref is MAC-protected in"
+      echo "    '$PROFILE_PATH/Secure Preferences' (Chromium discards an unsigned"
+      echo "    edit on next launch). Use the manual path."
       exit 1
     else
       # Non-interactive: hard-fail loudly so a wrapper doesn't ship a dormant install.
