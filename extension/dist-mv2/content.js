@@ -14,6 +14,24 @@ var __export = (target, all) => {
 };
 var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
 
+// extension/src/content/sensitive.ts
+function markSensitive(el) {
+  sensitiveElements.add(el);
+}
+function isSensitive(el) {
+  return sensitiveElements.has(el);
+}
+function isValueSecret(el) {
+  if (isSensitive(el))
+    return true;
+  const type = el.type;
+  return typeof type === "string" && type.toLowerCase() === "password";
+}
+var sensitiveElements, SECURE_MASK = "***SECURE***";
+var init_sensitive = __esm(() => {
+  sensitiveElements = new WeakSet;
+});
+
 // extension/src/content/element-tree.ts
 function buildSelector(el) {
   if (el.id)
@@ -60,7 +78,7 @@ function getRelevantAttrs(el) {
       attrs.push(`placeholder="${placeholder}"`);
     const value = el.value;
     if (value)
-      attrs.push(`value="${value.slice(0, 40)}"`);
+      attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`);
     if (el.checked)
       attrs.push("checked");
     if (el.disabled)
@@ -69,7 +87,7 @@ function getRelevantAttrs(el) {
   if (tag === "select" || tag === "textarea") {
     const value = el.value;
     if (value)
-      attrs.push(`value="${value.slice(0, 40)}"`);
+      attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`);
   }
   if (tag === "img") {
     const src = el.getAttribute("src");
@@ -132,6 +150,7 @@ function buildElementTree(elements) {
 var STYLE_BUNDLE_PROPS;
 var init_element_tree = __esm(() => {
   init_a11y_tree();
+  init_sensitive();
   STYLE_BUNDLE_PROPS = [
     "display",
     "visibility",
@@ -453,7 +472,7 @@ function getInteractiveElements() {
       const tag = el.tagName.toLowerCase();
       const text = getAccessibleName(el);
       const attrs = getRelevantAttrs(el);
-      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: (el.value || "").slice(0, 40) });
+      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40) });
       results.push({ index: idx, refId, element: el, selector, tag, text, attrs });
     }
   });
@@ -463,6 +482,7 @@ var selectorMap, nextIndex = 0, INTERACTIVE_TAGS, INTERACTIVE_ROLES;
 var init_element_discovery = __esm(() => {
   init_ref_registry();
   init_a11y_tree();
+  init_sensitive();
   init_element_tree();
   selectorMap = new Map;
   INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "DETAILS", "SUMMARY"]);
@@ -594,7 +614,7 @@ function cacheSnapshot() {
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: (el.value || "").slice(0, 40),
+      value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40),
       states: getRelevantAttrs(el)
     });
   }
@@ -614,7 +634,7 @@ function computeSnapshotDiff() {
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: (el.value || "").slice(0, 40),
+      value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40),
       states: getRelevantAttrs(el)
     });
   }
@@ -645,6 +665,7 @@ var lastSnapshot;
 var init_snapshot_diff = __esm(() => {
   init_ref_registry();
   init_a11y_tree();
+  init_sensitive();
   init_element_tree();
   lastSnapshot = [];
 });
@@ -1206,17 +1227,8 @@ chrome.runtime.onMessage.addListener((msg) => {
   } catch {}
 });
 
-// extension/src/content/sensitive.ts
-var sensitiveElements = new WeakSet;
-function markSensitive(el) {
-  sensitiveElements.add(el);
-}
-function isSensitive(el) {
-  return sensitiveElements.has(el);
-}
-var SECURE_MASK = "***SECURE***";
-
 // extension/src/content/monitor.ts
+init_sensitive();
 init_ref_registry();
 init_a11y_tree();
 var armed = false;
@@ -1977,6 +1989,7 @@ async function handleWhatAt(action) {
 init_input_simulation();
 init_element_discovery();
 init_ref_registry();
+init_sensitive();
 async function handleInputText(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
@@ -2853,6 +2866,7 @@ async function handleStyleGet(action) {
 }
 
 // extension/src/content/data/forms.ts
+init_sensitive();
 async function handleForms(_action) {
   const forms = document.querySelectorAll("form");
   return {
@@ -2866,7 +2880,7 @@ async function handleForms(_action) {
         tag: el.tagName.toLowerCase(),
         type: el.type,
         name: el.name,
-        value: el.value?.slice(0, 40),
+        value: isValueSecret(el) ? SECURE_MASK : el.value?.slice(0, 40),
         placeholder: el.placeholder
       }))
     }))
