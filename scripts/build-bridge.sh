@@ -24,6 +24,17 @@ INTERCEPTOR_BRIDGE_IDENTIFIER="com.interceptor.bridge"
 INTERCEPTOR_BRIDGE_VERSION="${INTERCEPTOR_BRIDGE_VERSION:-$(grep '"version"' "$PROJECT_DIR/package.json" | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')}"
 INTERCEPTOR_SPARKLE_FEED_URL="${INTERCEPTOR_SPARKLE_FEED_URL:-https://updates.hackervalley.media/appcast.xml}"
 INTERCEPTOR_SPARKLE_PUBLIC_KEY="${INTERCEPTOR_SPARKLE_PUBLIC_KEY:-dnUnuHGCO4obHb44Khlf2TZQFUMmFGGpm2c6j+EqmdU=}"
+## my-install fork: this branch permanently runs its own hardened build
+## (credential masking, loopback WS gate, CSP fix, per-domain allowlist)
+## that upstream does not have. An accepted Sparkle update installs the
+## vendor .pkg over it and silently reverts all of that, so scheduled
+## checks and their prompts are off by default here. Set
+## INTERCEPTOR_SPARKLE_AUTO_CHECK=true to build an auto-updating bundle.
+INTERCEPTOR_SPARKLE_AUTO_CHECK="${INTERCEPTOR_SPARKLE_AUTO_CHECK:-false}"
+case "$INTERCEPTOR_SPARKLE_AUTO_CHECK" in
+  true|false) ;;
+  *) echo "ERROR: INTERCEPTOR_SPARKLE_AUTO_CHECK must be 'true' or 'false' (got: $INTERCEPTOR_SPARKLE_AUTO_CHECK)" >&2; exit 1 ;;
+esac
 ## Bridge carries Virtualization framework capabilities (VM lifecycle)
 ## that the CLI and daemon don't need; entitlements-bridge.plist is the
 ## superset, entitlements.plist is the slim CLI/daemon set.
@@ -232,7 +243,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>SUEnableInstallerLauncherService</key>
     <true/>
     <key>SUEnableAutomaticChecks</key>
-    <true/>
+    <$INTERCEPTOR_SPARKLE_AUTO_CHECK/>
     <key>SUScheduledCheckInterval</key>
     <integer>86400</integer>
     <key>SUAllowsAutomaticUpdates</key>
