@@ -22,6 +22,8 @@ final class Router: @unchecked Sendable {
         // The daemon's window-addressed browser input (click / type / keys).
         "bginput",
         "menu", "text",
+        // FORK-LOCAL: posting HID mouseMoved needs the Accessibility grant.
+        "mouse",
     ]
 
     // FORK-DELTA: per-domain allowlist. "Full" mode is otherwise all-or-nothing
@@ -230,6 +232,13 @@ final class Router: @unchecked Sendable {
         }
         if !Self.alwaysAllowedDomains.contains(domainKey), let allow = allowedDomains(), !allow.contains(domainKey) {
             completion(Self.domainNotAllowedError(domain: domainKey))
+            return
+        }
+        // FORK-LOCAL: `glide` on click/drag moves the user's real cursor, which
+        // is the `mouse` domain's capability — require it too, so the glide
+        // cannot ride in under `click` alone.
+        if action["glide"] != nil, domainKey != "mouse", let allow = allowedDomains(), !allow.contains("mouse") {
+            completion(Self.domainNotAllowedError(domain: "mouse"))
             return
         }
 

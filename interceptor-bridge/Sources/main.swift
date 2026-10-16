@@ -112,6 +112,8 @@ router.register("type", handler: inputDomain)
 router.register("keys", handler: inputDomain)
 router.register("scroll", handler: inputDomain)
 router.register("drag", handler: inputDomain)
+// FORK-LOCAL: visible cursor glide (move / position / hide / show) for demo recordings.
+router.register("mouse", handler: inputDomain)
 router.register(InputDomain.browserDomainKey, handler: inputDomain)
 router.register("screenshot", handler: captureDomain)
 router.register("capture", handler: captureDomain)

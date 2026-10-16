@@ -27,6 +27,11 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             completion(WireFormat.error("the daemon named no window to address (nothing was delivered)"))
             return
         }
+        // FORK-LOCAL: the `mouse` domain (cursor glide for demo recordings).
+        if (action["type"] as? String)?.hasPrefix("macos_mouse") == true {
+            handleMouse(command, action: action, completion: completion)
+            return
+        }
         switch command {
         case "click":
             handleClick(action, completion: completion)
@@ -215,7 +220,67 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
 
     // MARK: - Click
 
+    // MARK: - Mouse (FORK-LOCAL: visible cursor glide)
+
+    private func handleMouse(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        switch command {
+        case "move":
+            if let problem = explicitTargetProblem(action) { completion(WireFormat.error(problem)); return }
+            guard let opts = GlidePlan.options(action) else {
+                completion(WireFormat.failure("invalid_request", "ease must be in-out or linear")); return
+            }
+            let target: CGPoint
+            switch resolvePoint(action) {
+            case .success(let p): target = p
+            case .failure(.message(let msg)): completion(WireFormat.error(msg)); return
+            }
+            DispatchQueue.global().async {
+                let from = CursorGlide.currentPosition()
+                let end = CursorGlide.glide(to: target, ms: opts.ms, ease: opts.ease)
+                completion(WireFormat.success([
+                    "x": Int(end.x.rounded()), "y": Int(end.y.rounded()),
+                    "from": ["x": Int(from.x.rounded()), "y": Int(from.y.rounded())],
+                    "target": ["x": Int(target.x.rounded()), "y": Int(target.y.rounded())],
+                    "reached": hypot(end.x - target.x, end.y - target.y) <= 0.5,
+                    "ms": opts.ms, "ease": opts.ease.rawValue,
+                ]))
+            }
+        case "position", "mouse":
+            let p = CursorGlide.currentPosition()
+            completion(WireFormat.success(["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]))
+        case "hide", "show":
+            let err = command == "hide" ? CGDisplayHideCursor(CGMainDisplayID()) : CGDisplayShowCursor(CGMainDisplayID())
+            completion(err == .success
+                ? WireFormat.success(["cursor": command == "hide" ? "hidden" : "shown",
+                                      "note": "macOS honors cursor hiding only while the requesting app is frontmost; verify on screen"])
+                : WireFormat.error("cursor \(command) failed (CGError \(err.rawValue))"))
+        default:
+            notImplemented("mouse \(command)", completion: completion)
+        }
+    }
+
+    /// Glide the visible cursor to `point` first when the action asks for it
+    /// (`glide`), then run `then`. The Router has already required the `mouse`
+    /// domain for any action that carries `glide`.
+    private func glideFirst(_ action: [String: Any], to point: CGPoint?, completion: @escaping @Sendable ([String: Any]) -> Void, then: @escaping @Sendable () -> Void) {
+        guard action["glide"] != nil else { then(); return }
+        guard let opts = GlidePlan.options(action) else {
+            completion(WireFormat.failure("invalid_request", "ease must be in-out or linear")); return
+        }
+        guard let point else { completion(WireFormat.error("glide needs a point or a ref to travel to")); return }
+        DispatchQueue.global().async {
+            CursorGlide.glide(to: point, ms: opts.ms, ease: opts.ease)
+            then()
+        }
+    }
+
     private func handleClick(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        let point: CGPoint? = action["glide"] != nil ? (try? resolvePoint(action).get()) : nil
+        let box = ActionBox(action)
+        glideFirst(action, to: point, completion: completion) { [self] in clickNow(box.value, completion: completion) }
+    }
+
+    private func clickNow(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         let double = action["double"] as? Bool ?? false
         let right = action["right"] as? Bool ?? false
         let clickCount = double ? 2 : 1
@@ -701,6 +766,19 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
     // MARK: - Drag
 
     private func handleDrag(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        var start: CGPoint? = nil
+        if action["glide"] != nil {
+            if let fromRef = action["from"] as? String, let el = refRegistry.resolve(fromRef) { start = centerPoint(of: el) }
+            else {
+                let parts = (action["fromCoords"] as? String ?? "").split(separator: ",").compactMap { Double($0) }
+                if parts.count == 2 { start = CGPoint(x: parts[0], y: parts[1]) }
+            }
+        }
+        let box = ActionBox(action)
+        glideFirst(action, to: start, completion: completion) { [self] in dragNow(box.value, completion: completion) }
+    }
+
+    private func dragNow(_ action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
         if let problem = explicitTargetProblem(action) {
             completion(WireFormat.error(problem))
             return
@@ -870,4 +948,11 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
         }
         return CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
     }
+}
+
+/// Carries a (non-Sendable) action dictionary across the glide's thread hop.
+/// The dictionary is a value copy and is never mutated after capture.
+private final class ActionBox: @unchecked Sendable {
+    let value: [String: Any]
+    init(_ value: [String: Any]) { self.value = value }
 }

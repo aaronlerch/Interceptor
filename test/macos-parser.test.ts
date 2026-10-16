@@ -421,3 +421,20 @@ describe("macos parser", () => {
     expect(action.size).toBe(512)
   })
 })
+
+// FORK-LOCAL: visible cursor glide (`mouse` domain).
+describe("macos mouse + --glide", () => {
+  test("mouse move parses coords, ref, --ms and --ease", () => {
+    expect(parseMacosCommand(["macos", "mouse", "move", "640,400", "--ms", "900", "--ease", "linear"]))
+      .toEqual({ type: "macos_mouse_move", coords: "640,400", ms: 900, ease: "linear" })
+    expect(parseMacosCommand(["macos", "mouse", "move", "e12"])).toEqual({ type: "macos_mouse_move", ref: "e12" })
+    expect(parseMacosCommand(["macos", "mouse", "position"])).toEqual({ type: "macos_mouse_position" })
+    expect(parseMacosCommand(["macos", "mouse", "hide"])).toEqual({ type: "macos_mouse_hide" })
+  })
+  test("--glide rides on click and drag; absent means no glide field", () => {
+    expect(parseMacosCommand(["macos", "click", "10,20", "--glide"])).toMatchObject({ type: "macos_click", coords: "10,20", glide: true })
+    expect(parseMacosCommand(["macos", "click", "10,20", "--glide", "--ms", "500", "--ease", "in-out"])).toMatchObject({ glide: { ms: 500, ease: "in-out" } })
+    expect(parseMacosCommand(["macos", "drag", "1,2", "3,4", "--glide"])).toMatchObject({ type: "macos_drag", glide: true })
+    expect((parseMacosCommand(["macos", "click", "10,20"]) as Record<string, unknown>).glide).toBeUndefined()
+  })
+})

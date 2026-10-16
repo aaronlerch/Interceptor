@@ -675,7 +675,25 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       if (clickApp) action.app = clickApp
       if (clickPid !== undefined) action.pid = clickPid
       withWindow(action, filtered, desktop)
+      withGlide(action, filtered)
       return action
+    }
+
+    // FORK-LOCAL: visible cursor glide for demo recordings (`mouse` domain).
+    case "mouse": {
+      const sub = filtered[2]
+      if (sub === "position") return { type: "macos_mouse_position" }
+      if (sub === "hide" || sub === "show") return { type: `macos_mouse_${sub}` }
+      if (sub === "move") {
+        const target = filtered[3]
+        if (!target || target.startsWith("--")) { console.error("error: interceptor macos mouse move requires <x>,<y> or a ref"); process.exit(1) }
+        const action: Action = { type: "macos_mouse_move", ...(target.includes(",") ? { coords: target } : { ref: target }) }
+        const ms = flagInt(filtered, "--ms", true); if (ms !== undefined) action.ms = ms
+        const ease = flagVal(filtered, "--ease"); if (ease) action.ease = ease
+        return action
+      }
+      console.error("error: interceptor macos mouse requires move <x>,<y>|<ref> [--ms N] [--ease in-out|linear] | position | hide | show")
+      process.exit(1)
     }
 
     case "type": {
@@ -816,6 +834,7 @@ export function parseMacosCommand(filtered: string[], extensionPrefixes?: Set<st
       if (dragApp) action.app = dragApp
       if (dragPid !== undefined) action.pid = dragPid
       withWindow(action, filtered, desktop)
+      withGlide(action, filtered)
       return action
     }
 
@@ -2657,6 +2676,16 @@ function optionalFlagVal(args: string[], flag: string, defaultValue: string): st
   const next = args[idx + 1]
   if (!next || next.startsWith("--")) return defaultValue
   return next
+}
+
+/** FORK-LOCAL: `--glide [--ms N] [--ease in-out|linear]` on click/drag. The
+ *  bridge Router requires the `mouse` domain for any action carrying `glide`. */
+function withGlide(action: Action, filtered: string[]): void {
+  if (!filtered.includes("--glide")) return
+  const glide: Record<string, unknown> = {}
+  const ms = flagInt(filtered, "--ms", true); if (ms !== undefined) glide.ms = ms
+  const ease = flagVal(filtered, "--ease"); if (ease) glide.ease = ease
+  action.glide = Object.keys(glide).length ? glide : true
 }
 
 function flagInt(args: string[], flag: string, strict = false): number | undefined {
