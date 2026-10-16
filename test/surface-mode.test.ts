@@ -81,3 +81,20 @@ describe("per-domain allowlist", () => {
     expect(macosDomainOf("desktop_")).toBeNull()
   })
 })
+
+// FORK-DELTA: `surface allow add|remove` edit the list instead of replacing it,
+// and names may be comma-separated, so enabling input never drops the reads.
+import { parseDomainList, applyAllowlistEdit } from "../cli/commands/surface"
+describe("surface allow editing", () => {
+  test("comma- and space-separated names parse the same", () => {
+    expect(parseDomainList(["click,type", "Keys", " ,"])).toEqual(["click", "type", "keys"])
+  })
+  test("add keeps the existing domains; remove drops only the named ones", () => {
+    const current = new Set(["tree", "screenshot"])
+    expect(applyAllowlistEdit("add", current, ["click", "type"])).toEqual(["click", "screenshot", "tree", "type"])
+    expect(applyAllowlistEdit("remove", new Set(["click", "tree"]), ["click"])).toEqual(["tree"])
+  })
+  test("set replaces the list", () => {
+    expect(applyAllowlistEdit("set", new Set(["tree"]), ["click"])).toEqual(["click"])
+  })
+})

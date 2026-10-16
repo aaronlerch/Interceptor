@@ -552,6 +552,7 @@ Meta:
   interceptor surface status                 Browser-only vs full (macOS control) and the macOS domain allowlist
   interceptor surface browser-only|full      Switch macOS control off/on (enforced by the CLI, daemon, and bridge)
   interceptor surface allow <domains>|recommended|all|none   Limit which macOS bridge domains may run
+  interceptor surface allow add|remove <domains>   Edit the current allowlist (space- or comma-separated)
   interceptor diagnose                       Post-failure snapshot: daemon binary, all contexts, tabs, elements, monitor
   interceptor diagnose --context <id>        Probe a specific browser context only
   interceptor diagnose --json                Same snapshot as JSON

@@ -95,17 +95,43 @@ function runAllow(args: string[], json: boolean): void {
   if (sub === "none") { const p = writeMacosAllowlist([]); console.log(`allowlist set to none (${p}) — every macOS domain is denied.`); return }
   if (sub === "recommended") { const p = writeMacosAllowlist(RECOMMENDED_DOMAINS); console.log(`allowlist set to the recommended safe set (${p}):`); console.log(`  ${RECOMMENDED_DOMAINS.join(", ")}`); return }
 
+  // `add` / `remove` edit the current list instead of replacing it, so turning
+  // on input does not silently drop the read domains already allowed. Names may
+  // be space- or comma-separated.
+  const mode = sub === "add" || sub === "remove" ? sub : "set"
+  const names = (mode === "set" ? args : args.slice(1))
+  const domains = parseDomainList(names)
+  if (!domains.length) {
+    console.error(`error: surface allow ${mode === "set" ? "" : `${mode} `}needs at least one domain`)
+    process.exit(1)
+  }
   // explicit list: validate every name against the known domain universe so a
   // typo fails loudly instead of silently denying a domain you wanted.
-  const domains = args.map(d => d.toLowerCase())
   const unknown = domains.filter(d => !BUILTIN_BRIDGE_PREFIXES.has(d) && d !== "trust")
   if (unknown.length) {
     console.error(`error: unknown macOS domain(s): ${unknown.join(", ")}`)
     console.error(`       known domains: ${[...BUILTIN_BRIDGE_PREFIXES].sort().join(", ")}`)
     process.exit(1)
   }
-  const p = writeMacosAllowlist([...new Set(domains)].sort())
-  console.log(`allowlist set (${p}): ${[...new Set(domains)].sort().join(", ")}`)
+  if (mode !== "set" && readMacosAllowlist() === null) {
+    console.error(`error: no allowlist file exists, so every domain is already permitted. Run 'interceptor surface allow recommended' first, then '${mode}'.`)
+    process.exit(1)
+  }
+  const next = applyAllowlistEdit(mode, readMacosAllowlist(), domains)
+  const p = writeMacosAllowlist(next)
+  console.log(`allowlist ${mode === "set" ? "set" : mode === "add" ? "updated (+" + domains.join(", +") + ")" : "updated (-" + domains.join(", -") + ")"} (${p}): ${next.join(", ") || "none"}`)
+}
+
+/** Split space- and comma-separated domain names; lowercase; drop blanks. */
+export function parseDomainList(args: string[]): string[] {
+  return [...new Set(args.flatMap(a => a.split(",")).map(d => d.trim().toLowerCase()).filter(Boolean))]
+}
+
+/** The allowlist after a set / add / remove, sorted. */
+export function applyAllowlistEdit(mode: "set" | "add" | "remove", current: Set<string> | null, domains: string[]): string[] {
+  const base = mode === "set" ? new Set<string>() : new Set(current ?? [])
+  for (const d of domains) mode === "remove" ? base.delete(d) : base.add(d)
+  return [...base].sort()
 }
 
 export async function runSurfaceCommand(filtered: string[]): Promise<void> {

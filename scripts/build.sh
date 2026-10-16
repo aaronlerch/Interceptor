@@ -246,6 +246,15 @@ build_host() {
   bun build cli/index.ts --compile --outfile=dist/interceptor
   echo "Building daemon (host)..."
   bun build daemon/index.ts --compile --outfile=daemon/interceptor-daemon
+  # FORK-DELTA: a source install's skill links resolve to dist/skills (the CLI
+  # checks beside its own binary before the raw .agents/skills sources). The
+  # sources carry Windows/Linux lines and OS markers that only gen-skills
+  # strips, so generate this host's copy on every build.
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "Generating macOS agent skills (dist/skills)..."
+    rm -rf dist/skills
+    bun scripts/gen-skills.ts darwin dist/skills interceptor interceptor-browser interceptor-research interceptor-macos
+  fi
 }
 
 build_macos() {
