@@ -21,6 +21,15 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BRIDGE_DIR="$PROJECT_DIR/interceptor-bridge"
 DIST_DIR="$PROJECT_DIR/dist"
 
+# FORK-DELTA: prefer a local self-signed identity when one exists, so every
+# rebuild carries the same designated requirement and macOS privacy (TCC)
+# grants survive it. Ad-hoc signing changes the cdhash on every build and voids
+# them. Create it once in Keychain Access → Certificate Assistant → Create a
+# Certificate: Name "Interceptor Local Signing", Self Signed Root, Code Signing.
+INTERCEPTOR_LOCAL_SIGNING_NAME="${INTERCEPTOR_LOCAL_SIGNING_NAME:-Interceptor Local Signing}"
+if [[ -z "${INTERCEPTOR_SIGNING_IDENTITY:-}" ]] && security find-identity -p codesigning 2>/dev/null | grep -qF "\"$INTERCEPTOR_LOCAL_SIGNING_NAME\""; then
+  INTERCEPTOR_SIGNING_IDENTITY="$INTERCEPTOR_LOCAL_SIGNING_NAME"
+fi
 INTERCEPTOR_SIGNING_IDENTITY="${INTERCEPTOR_SIGNING_IDENTITY:-Developer ID Application: HACKER VALLEY MEDIA, LLC (TPWBZD35WW)}"
 INTERCEPTOR_BRIDGE_IDENTIFIER="com.interceptor.bridge"
 INTERCEPTOR_BRIDGE_VERSION="${INTERCEPTOR_BRIDGE_VERSION:-$(grep '"version"' "$PROJECT_DIR/package.json" | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')}"
@@ -268,8 +277,19 @@ PLIST
 if [[ "${INTERCEPTOR_SKIP_SIGNING:-0}" == "1" ]]; then
   echo "==> INTERCEPTOR_SKIP_SIGNING=1 — skipping codesign (development build)"
 else
-  if security find-identity -p codesigning -v 2>/dev/null | grep -q "$INTERCEPTOR_SIGNING_IDENTITY"; then
-    echo "==> Codesigning bundle with: $INTERCEPTOR_SIGNING_IDENTITY"
+  # A self-signed identity is listed by find-identity but not as "valid" (its
+  # root is not a trusted CA), and Apple's timestamp service is for Apple-issued
+  # certificates — so a local identity signs with --timestamp=none.
+  TS_FLAG="--timestamp"
+  SIGN_OK=0
+  if security find-identity -p codesigning -v 2>/dev/null | grep -qF "$INTERCEPTOR_SIGNING_IDENTITY"; then
+    SIGN_OK=1
+  elif [[ "$INTERCEPTOR_SIGNING_IDENTITY" == "$INTERCEPTOR_LOCAL_SIGNING_NAME" ]] && security find-identity -p codesigning 2>/dev/null | grep -qF "\"$INTERCEPTOR_SIGNING_IDENTITY\""; then
+    SIGN_OK=1
+    TS_FLAG="--timestamp=none"
+  fi
+  if [[ "$SIGN_OK" == "1" ]]; then
+    echo "==> Codesigning bundle with: $INTERCEPTOR_SIGNING_IDENTITY${TS_FLAG:+ ($TS_FLAG)}"
 
     # issue #244: the secret vault stores items in the data protection
     # keychain, which needs an application-identifier + keychain-access-groups
@@ -316,25 +336,25 @@ else
         "$SPARKLE_BUNDLE/Versions/B/Sparkle"
       do
         if [ -e "$comp" ]; then
-          codesign --force --options runtime --timestamp \
+          codesign --force --options runtime "$TS_FLAG" \
             --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
             "$comp"
         fi
       done
       # Versioned framework bundle wrap.
-      codesign --force --options runtime --timestamp \
+      codesign --force --options runtime "$TS_FLAG" \
         --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
         "$SPARKLE_BUNDLE"
     fi
 
     # Sign the inner binary first, then the bundle, with the same entitlements.
-    codesign --force --options runtime --timestamp \
+    codesign --force --options runtime "$TS_FLAG" \
       --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
       --identifier "$INTERCEPTOR_BRIDGE_IDENTIFIER" \
       --entitlements "$SIGN_ENTITLEMENTS" \
       "$APP_DIR/Contents/MacOS/interceptor-bridge"
 
-    codesign --force --options runtime --timestamp \
+    codesign --force --options runtime "$TS_FLAG" \
       --sign "$INTERCEPTOR_SIGNING_IDENTITY" \
       --identifier "$INTERCEPTOR_BRIDGE_IDENTIFIER" \
       --entitlements "$SIGN_ENTITLEMENTS" \
