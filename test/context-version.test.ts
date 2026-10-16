@@ -84,11 +84,10 @@ describe("context descriptions carry the extension copy identity", () => {
     expect(extensionVersionMismatchLine("main", "0.25.0", "0.25.1")).not.toContain("predates")
   })
 
-  test("the pre-store development copy is named, the store ID is not", () => {
+  test("no ID is flagged as a pre-store copy in this fork", () => {
     expect(legacyDevelopmentCopyLine("x", STORE_ID)).toBeNull()
     expect(legacyDevelopmentCopyLine("x", undefined)).toBeNull()
-    const line = legacyDevelopmentCopyLine("legacy", "hkjbaciefhhgekldhncknbjkofbpenng")!
-    expect(line).toContain("pre-store development copy")
-    expect(line).toContain("interceptor contexts rename legacy")
+    // FORK-DELTA: hkjb… is this fork's own extension identity, so it is never flagged.
+    expect(legacyDevelopmentCopyLine("legacy", "hkjbaciefhhgekldhncknbjkofbpenng")).toBeNull()
   })
 })

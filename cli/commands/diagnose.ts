@@ -98,8 +98,14 @@ export function extensionVersionMismatchLine(
 
 /** The pre-store development ID still connects (its origin stays allowed through
  *  0.25.x) but it is a second copy next to the store-ID one; name it. */
+const FORK_OWNS_LEGACY_ID = true
+
 export function legacyDevelopmentCopyLine(contextId: string, extensionId: string | undefined): string | null {
   if (extensionId !== LEGACY_DEVELOPMENT_EXTENSION_ID) return null
+  // FORK-DELTA (merge plan D3): this fork's own key IS this ID — it loads
+  // unpacked and rejects the store identity, so the "migrate to the store copy"
+  // nudge is wrong here. The native-host manifest still allows this origin.
+  if (FORK_OWNS_LEGACY_ID) return null
   return `⚠ context ${contextId} is the pre-store development copy (id ${extensionId}); it keeps working through 0.25.x. Remove it on chrome://extensions, then load ${UNPACKED_EXTENSION_DIR} again or install ${STORE_LISTING_URL}, and restore its name with 'interceptor contexts rename ${contextId} --context <new id>'.`
 }
 
