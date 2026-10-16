@@ -300,7 +300,7 @@ final class Router: @unchecked Sendable {
             + "Run 'interceptor macos trust --walkthrough' to fix."
         if adhocSigned {
             message += " Note: this bridge binary is ad-hoc signed; an existing 'interceptor-bridge' row in "
-                + "System Settings → Privacy & Security → Accessibility may no longer match it. "
+                + "System Settings → Privacy & Security → \(TrustDomain.accessibilityPaneName) may no longer match it. "
                 + "Remove the row (−), re-grant, or install the signed build."
         }
         var err = AXTypedError.errorDict(message, code: "accessibility_unusable", axError: .apiDisabled)

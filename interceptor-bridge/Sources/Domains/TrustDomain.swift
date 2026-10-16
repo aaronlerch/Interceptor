@@ -45,6 +45,13 @@ struct Permission {
 }
 
 final class TrustDomain: DomainHandler, @unchecked Sendable {
+    /// macOS 27 renamed the Privacy & Security "Accessibility" pane to
+    /// "Device Control and Data Access" (same TCC service, new label).
+    static var accessibilityPaneName: String {
+        ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
+            ? "Device Control and Data Access" : "Accessibility"
+    }
+
     private let microphoneProvider: MicrophoneAuthorizationProvider
     // Signing-status seam (issue #163 follow-up): ad-hoc-signed bridges
     // lose their TCC grants on every rebuild while the System Settings row
@@ -113,7 +120,7 @@ final class TrustDomain: DomainHandler, @unchecked Sendable {
                 name: "Accessibility",
                 status: accessibilityStatus,
                 required: true,
-                path: "System Settings → Privacy & Security → Accessibility → Enable \(displayName)",
+                path: "System Settings → Privacy & Security → \(Self.accessibilityPaneName) → Enable \(displayName)",
                 reason: "Required for UI element inspection, clicking, typing, and window management",
                 limitation: "Apple's AXIsProcessTrusted returns Bool only; cannot distinguish denied from not_determined"
             ),
