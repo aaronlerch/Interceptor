@@ -145,6 +145,15 @@ async function waitForBridgeSocket(timeoutMs: number): Promise<boolean> {
 
 async function spawnBridge(): Promise<boolean> {
   if (bridgeSpawnAttempted) return false
+  // FORK-DELTA §10: browser-only means no bridge process at all. Without this,
+  // a daemon started next to any built dist/interceptor-bridge.app (a repo
+  // checkout, a merge worktree) launched it on startup with no LaunchAgent and
+  // no allowlist — observed 2026-10-16. The Router would refuse its calls, but
+  // an unasked-for TCC-capable process should not exist in the first place.
+  if (!macosEnabledFromEnv(true)) {
+    log("bridge not started: browser-only mode (interceptor surface full to enable)")
+    return false
+  }
   bridgeSpawnAttempted = true
   try {
     const layout = readBridgeRecoveryLayout()

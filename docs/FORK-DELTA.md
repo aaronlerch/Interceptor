@@ -302,6 +302,12 @@ that keeps adding them; the bridge is the one place every route must pass.
 `bginput` is full input (any window, any app), not a browser-only domain —
 allowlist it only alongside `click`/`type`/`keys`.
 
+The daemon's `spawnBridge` also refuses in browser-only mode. Upstream's
+recovery path launches any `dist/interceptor-bridge.app` it can find (repo
+checkout, worktree) on daemon startup, with no LaunchAgent and no allowlist;
+on 2026-10-16 a merge-worktree build was launched that way by a daemon started
+from the worktree.
+
 **Regression guard.** `RouterAllowlistTests` (browser-only denial, desktop_*
 spelling) — **needs full Xcode to run; this machine has only the Command Line
 Tools, so verify live**: with the marker set to browser-only, a direct socket
