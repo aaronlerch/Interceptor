@@ -249,11 +249,12 @@ final class InputDomain: DomainHandler, @unchecked Sendable {
             let p = CursorGlide.currentPosition()
             completion(WireFormat.success(["x": Int(p.x.rounded()), "y": Int(p.y.rounded())]))
         case "hide", "show":
-            let err = command == "hide" ? CGDisplayHideCursor(CGMainDisplayID()) : CGDisplayShowCursor(CGMainDisplayID())
-            completion(err == .success
-                ? WireFormat.success(["cursor": command == "hide" ? "hidden" : "shown",
-                                      "note": "macOS honors cursor hiding only while the requesting app is frontmost; verify on screen"])
-                : WireFormat.error("cursor \(command) failed (CGError \(err.rawValue))"))
+            // Verified 2026-10-16 on macOS 27: CGDisplayHideCursor returns success
+            // from the (background, LSUIElement) bridge and the pointer stays
+            // visible — macOS honors hiding only for the frontmost app. Refuse
+            // rather than report a hide that did not happen.
+            completion(WireFormat.failure("unsupported_operation",
+                "mouse \(command) is not supported: macOS only lets the frontmost app hide the pointer, and the bridge runs in the background"))
         default:
             notImplemented("mouse \(command)", completion: completion)
         }

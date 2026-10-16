@@ -648,7 +648,7 @@ macOS Bridge (full install only):
   interceptor macos drag <fromRef> <toRef> [--app <name>]
   interceptor macos drag X1,Y1 X2,Y2 [--app <name>] [--window <id>]
   interceptor macos mouse move X,Y|<ref> [--ms 700] [--ease in-out|linear]   Glide the visible cursor (needs the 'mouse' domain)
-  interceptor macos mouse position | hide | show   Read the cursor point; hide/show it
+  interceptor macos mouse position          Read the cursor point (hide/show are refused: background apps cannot hide the pointer)
   interceptor macos click X,Y --glide [--ms N] [--ease E]   Glide there, then click (needs 'mouse' + 'click'); drag takes --glide too
 
   Apps & Windows:
