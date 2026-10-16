@@ -2,6 +2,51 @@ import { describe, expect, test } from "bun:test"
 import { parseMacosCommand } from "../cli/commands/macos"
 
 describe("macos parser", () => {
+  test("desktop detect stdin carries piped text as data, even when it starts with --", () => {
+    expect(parseMacosCommand(["macos", "detect", "stdin", "--types", "link"], undefined, true, "---\ntitle: https://example.com\n---\n"))
+      .toMatchObject({type: "macos_detect", sub: "stdin", input: "---\ntitle: https://example.com\n---\n", types: "link"})
+  })
+  test("notification flags do not overwrite nested verbs or identifiers", () => {
+    expect(parseMacosCommand(["macos", "notifications", "tail", "--name", "com.interceptor.owned"]))
+      .toMatchObject({type: "macos_notifications", sub: "tail", name: "com.interceptor.owned"})
+    expect(parseMacosCommand(["macos", "notifications", "categories", "--json"]))
+      .toMatchObject({type: "macos_notifications", sub: "categories", verb: "list"})
+    expect(parseMacosCommand(["macos", "notifications", "badge", "--count", "3", "--json"]))
+      .toMatchObject({sub: "badge", count: 3})
+    for (const sub of ["cancel", "dismiss"]) {
+      expect(parseMacosCommand(["macos", "notifications", sub, "--id", "owned", "--json"]))
+        .toMatchObject({sub, id: "owned"})
+      expect(parseMacosCommand(["macos", "notifications", sub, "owned", "--json"]))
+        .toMatchObject({sub, id: "owned"})
+    }
+    expect(parseMacosCommand(["macos", "notifications", "badge", "clear", "--json"]))
+      .toMatchObject({sub: "badge", clear: true})
+    expect(parseMacosCommand(["macos", "notifications", "badge", "5", "--json"]))
+      .toMatchObject({sub: "badge", count: 5})
+  })
+  test("physical US-key typing preserves 1Password references and exact window targets", () => {
+    expect(parseMacosCommand(["macos", "type", "--secret", "op://Private/owned-vm/password", "--app", "UTM", "--window", "241", "--keycodes-us"]))
+      .toMatchObject({type:"macos_type",secret:"op://Private/owned-vm/password",app:"UTM",window:241,keycodesUS:true})
+    expect(parseMacosCommand(["macos", "type", "Aa9!", "--app", "UTM", "--keycodes-us"]))
+      .toMatchObject({type:"macos_type",text:"Aa9!",app:"UTM",keycodesUS:true})
+    expect(parseMacosCommand(["macos", "type", "--keycodes-us", "--window", "241", "Aa9!", "--app", "UTM"]))
+      .toMatchObject({type:"macos_type",text:"Aa9!",app:"UTM",window:241,keycodesUS:true})
+    for (const args of [["--keycodes-us","--keycodes-us"],["--keycodes-us","--unknown"],["--keycodes-us","extra"]]) {
+      expect(() => parseMacosCommand(["macos","type","owned",...args])).toThrow()
+    }
+    expect(() => parseMacosCommand(["macos", "type", "a", "--keycodes-us"],undefined,true)).toThrow("macos type")
+    expect(parseMacosCommand(["macos", "type", "Unicode 文件"])).not.toHaveProperty("keycodesUS")
+  })
+  test("tree preserves the selected window through legacy and desktop parsing", () => {
+    for (const desktop of [false, true]) {
+      expect(parseMacosCommand(["macos", "tree", "--pid", "42", "--window", "1362"], undefined, desktop))
+        .toMatchObject({type: "macos_tree", pid: 42, window: 1362})
+    }
+    for (const bad of ["0", "1junk", "1.5", "-1", "9007199254740992", ""]) {
+      expect(() => parseMacosCommand(["macos", "tree", "--window", bad], undefined, true)).toThrow("window id")
+    }
+    expect(() => parseMacosCommand(["macos", "tree", "--window"], undefined, true)).toThrow("window id")
+  })
   test("menu --app keeps the app name out of the menu path", () => {
     const action = parseMacosCommand(["macos", "menu", "--app", "TextEdit"]) as Record<string, unknown>
     expect(action.type).toBe("macos_menu")
@@ -54,6 +99,46 @@ describe("macos parser", () => {
     expect(action.type).toBe("macos_click")
     expect(action.coords).toBe("100,200")
     expect(action.app).toBe("TextEdit")
+  })
+
+  test("--window names the delivery window on every input verb", () => {
+    const cases: string[][] = [
+      ["macos", "click", "100,200", "--app", "TextEdit", "--window", "4242"],
+      ["macos", "type", "hello", "--app", "TextEdit", "--window", "4242"],
+      ["macos", "type", "--secret", "op://Private/admin/password", "--app", "TextEdit", "--window", "4242"],
+      ["macos", "keys", "Meta+A", "--pid", "1234", "--window", "4242"],
+      ["macos", "scroll", "down", "300", "--app", "TextEdit", "--window", "4242"],
+      ["macos", "drag", "10,20", "30,40", "--app", "TextEdit", "--window", "4242"],
+    ]
+    for (const argv of cases) {
+      const action = parseMacosCommand(argv) as Record<string, unknown>
+      expect(action.window).toBe(4242)
+    }
+    // No flag, no field: the bridge then picks the window itself.
+    expect((parseMacosCommand(["macos", "click", "100,200", "--app", "TextEdit"]) as Record<string, unknown>).window).toBeUndefined()
+    // The id is not swallowed as typed text or as a secret positional.
+    expect((parseMacosCommand(["macos", "type", "hello", "--window", "4242"]) as Record<string, unknown>).text).toBe("hello")
+  })
+
+  test("--window refuses anything but a numeric id instead of dropping it", () => {
+    // A dropped id would send the input to the frontmost window. 'e5' is the
+    // ref 'macos windows' prints beside the windowId.
+    const realExit = process.exit
+    const realError = console.error
+    const errors: string[] = []
+    process.exit = ((code?: number) => { throw new Error(`__exit_${code}`) }) as never
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")) }
+    try {
+      for (const bad of ["e5", "12abc", "0", "-3", "4.2", "4294967296"]) {
+        expect(() => parseMacosCommand(["macos", "click", "100,200", "--window", bad])).toThrow("__exit_1")
+      }
+      expect(() => parseMacosCommand(["macos", "keys", "Meta+A", "--app", "TextEdit", "--window"])).toThrow("__exit_1")
+    } finally {
+      process.exit = realExit
+      console.error = realError
+    }
+    expect(errors).toHaveLength(7)
+    expect(errors[0]).toContain("--window takes a numeric window id")
   })
 
   test("type --app carries the app target through to the bridge", () => {

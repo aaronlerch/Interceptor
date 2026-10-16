@@ -8,8 +8,10 @@ import Sparkle
 // Sparkle's automatic scheduled-check cadence, which for an LSUIElement
 // app means the update prompt frequently never surfaces visibly.
 //
-// The `check` verb calls SPUUpdater.checkForUpdates() and waits briefly for
+// The `check` verb starts a background-style check and waits briefly for
 // Sparkle's delegate to report the selected item, no-update result, or error.
+// The user-initiated API is intentionally avoided because its no-update path
+// runs an NSAlert modal loop that blocks this bridge from answering `status`.
 // If the feed takes longer, the command returns a truthful in-progress result
 // and `status` exposes the later callback state.
 final class UpdateDomain: DomainHandler, @unchecked Sendable {
@@ -22,7 +24,10 @@ final class UpdateDomain: DomainHandler, @unchecked Sendable {
     }
 
     func handle(_ command: String, action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
-        let sub = action["sub"] as? String ?? command
+        var canonical=action;canonical["type"]="desktop_update";canonical["sub"]=action["sub"] as? String ?? "status"
+        if let error=DesktopUpdateShape.validationError(canonical){completion(WireFormat.failure("invalid_request",error));return}
+        for key in ["group","groupColor"]{if let text=canonical[key] as? String,text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty||text.utf8.count>256||text.contains("\0"){completion(WireFormat.failure("invalid_request","invalid update group metadata"));return}}
+        let sub = canonical["sub"] as! String
         switch sub {
         case "check":
             handleCheck(completion: completion)
@@ -43,9 +48,6 @@ final class UpdateDomain: DomainHandler, @unchecked Sendable {
                 var payload = Self.statusPayload(updater: updater, snapshot: updateState.snapshot())
                 payload["started"] = false
                 payload["message"] = "an update session is already in progress"
-                if updater.canCheckForUpdates {
-                    updaterController.checkForUpdates(nil)
-                }
                 completion(WireFormat.success(payload))
                 return
             }
@@ -63,7 +65,7 @@ final class UpdateDomain: DomainHandler, @unchecked Sendable {
                     completion(WireFormat.success(payload))
                 }
             }
-            updaterController.checkForUpdates(nil)
+            updater.checkForUpdatesInBackground()
         }
     }
 
@@ -77,12 +79,16 @@ final class UpdateDomain: DomainHandler, @unchecked Sendable {
 
     @MainActor
     private static func statusPayload(updater: SPUUpdater, snapshot: SparkleUpdateSnapshot) -> [String: Any] {
-        var payload = snapshot.payload()
+        var payload = snapshot.payload(
+            sessionInProgress: updater.sessionInProgress,
+            sessionStartDate: updater.lastUpdateCheckDate
+        )
         payload["feed"] = updater.feedURL?.absoluteString ?? "unset"
         payload["automaticChecks"] = updater.automaticallyChecksForUpdates
         payload["checkInterval"] = updater.updateCheckInterval
         payload["canCheckForUpdates"] = updater.canCheckForUpdates
         payload["sessionInProgress"] = updater.sessionInProgress
+        if let version=Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String{payload["currentVersion"]=version}
         if let last = updater.lastUpdateCheckDate {
             payload["lastCheck"] = ISO8601DateFormatter().string(from: last)
         }

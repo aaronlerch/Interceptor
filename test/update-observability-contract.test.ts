@@ -17,18 +17,25 @@ describe("Sparkle update observability contract", () => {
   test("waits for a real conclusion and reports existing sessions truthfully", () => {
     const domain = read("interceptor-bridge/Sources/Domains/UpdateDomain.swift")
     expect(domain).toContain("updateState.beginCheck(timeout: 10)")
+    expect(domain).toContain("updater.checkForUpdatesInBackground()")
+    expect(domain).not.toContain("updaterController.checkForUpdates(nil)")
     expect(domain).toContain("if updater.sessionInProgress")
     expect(domain).toContain('payload["started"] = false')
-    expect(domain).toContain("if updater.canCheckForUpdates")
+    expect(domain).toContain("guard updater.canCheckForUpdates else")
     expect(domain).toContain("selectedDisplayVersion")
     expect(domain).toContain("use `interceptor update status` for the result")
     expect(domain).not.toContain("Sparkle will now show the alert")
+    const activeSessionBranch = domain.slice(
+      domain.indexOf("if updater.sessionInProgress"),
+      domain.indexOf("guard updater.canCheckForUpdates"),
+    )
+    expect(activeSessionBranch).not.toContain("checkForUpdates(nil)")
     expect(domain.indexOf("if updater.sessionInProgress")).toBeLessThan(
       domain.indexOf("guard updater.canCheckForUpdates"),
     )
   })
 
-  test("observes Sparkle results without changing channel or relaunch policy", () => {
+  test("observes Sparkle results and preserves the channel without vetoing installation", () => {
     const delegate = read("interceptor-bridge/Sources/SparkleUserDriverDelegate.swift")
     for (const callback of [
       "didFindValidUpdate",
@@ -43,8 +50,7 @@ describe("Sparkle update observability contract", () => {
       "didFinishUpdateCycleFor",
     ]) expect(delegate).toContain(callback)
     expect(delegate).toContain('return ["full"]')
-    expect(delegate).toContain("func updaterShouldRelaunchApplication")
-    expect(delegate).toContain("return false")
+    expect(delegate).not.toContain("func updaterShouldRelaunchApplication")
     expect(delegate).not.toContain("shouldProceedWithUpdate")
     expect(delegate).not.toContain("willInstallUpdateOnQuit")
   })

@@ -65,18 +65,17 @@ enum MonitorReplayPlanner {
         for event in events {
             let kind = (event["event"] as? String) ?? ""
             let app = (event["app"] as? String) ?? ""
-            let bundleId = (event["bundleId"] as? String) ?? ""
             let role = (event["r"] as? String) ?? ""
             let name = (event["n"] as? String) ?? ""
 
-            // Activate the target app whenever frontmost changes, preferring
-            // bundle id when present (more stable than localized app name).
+            // The recording changed apps here. A replay must not ask for the
+            // user's focus the way the recorded user did: `open` is a no-op on
+            // a running app and a background launch otherwise, and every verb
+            // below is pinned to its app with --app. A cold launch is the one
+            // case macOS can still bring forward: an app may activate itself
+            // while it starts, whatever the launch asked for.
             if !app.isEmpty && app != lastApp {
-                if !bundleId.isEmpty {
-                    lines.append("interceptor macos app launch \(escapeArg(bundleId))")
-                } else {
-                    lines.append("interceptor macos app activate \(escapeArg(app))")
-                }
+                lines.append("interceptor macos open \(escapeArg(app))")
                 lastApp = app
             }
 
@@ -100,7 +99,9 @@ enum MonitorReplayPlanner {
                 if let v = event["v"] as? String,
                    !(v.hasPrefix("***") && v.hasSuffix("***")),
                    (!role.isEmpty && !name.isEmpty) {
-                    lines.append("interceptor macos type \(quote("\(role):\(name)")) \(quote(v))")
+                    var cmd = "interceptor macos type \(quote("\(role):\(name)")) \(quote(v))"
+                    if !app.isEmpty { cmd += " --app \(quote(app))" }
+                    lines.append(cmd)
                 } else if let v = event["v"] as? String, v.hasPrefix("***") {
                     lines.append("# masked secure input on \(role):\(name) (length \(max(0, v.count - 6)))")
                 }
@@ -138,7 +139,7 @@ enum MonitorReplayPlanner {
                 lines.append("# unhandled event: \(kind)")
             }
         }
-        return lines.joined(separator: "\n")
+        return lines.map { $0.hasPrefix("#") ? $0.components(separatedBy: .newlines).joined(separator: " ") : $0 }.joined(separator: "\n")
     }
 
     // MARK: - helpers
@@ -163,7 +164,10 @@ enum MonitorReplayPlanner {
     }
 
     private static func escapeArg(_ s: String) -> String {
-        return "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        return "\"" + s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "`", with: "\\`") + "\""
     }
 
     private static func quote(_ s: String) -> String { escapeArg(s) }

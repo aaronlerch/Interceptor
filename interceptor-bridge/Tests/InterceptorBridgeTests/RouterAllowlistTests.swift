@@ -67,6 +67,35 @@ final class RouterAllowlistTests: XCTestCase {
         assertRoute(router, "macos_tree") { XCTAssertEqual($0["code"] as? String, "domain_not_allowed", "allowlist denial wins over the AX gate") }
     }
 
+    // FORK-DELTA: the browser-only switch is enforced here too, so upstream's
+    // routes that skip the TypeScript gates (WS desktop_* branch, background
+    // input, a direct socket write) still stop at the bridge.
+    func testBrowserOnlyMarkerDeniesEverythingButTrust() {
+        let handler = RecordingHandler()
+        let router = Router(axTrustCheck: { true }, allowedDomains: { nil }, surfaceDisabled: { true })
+        for key in ["screenshot", "click", "bginput", "trust"] { router.register(key, handler: handler) }
+        for type in ["macos_screenshot", "macos_bginput_click", "desktop_click"] {
+            assertRoute(router, type) { result in
+                XCTAssertEqual(result["success"] as? Bool, false, "\(type) refused in browser-only mode")
+                XCTAssertEqual(result["code"] as? String, "surface_disabled")
+            }
+        }
+        assertRoute(router, "macos_trust") { XCTAssertEqual($0["success"] as? Bool, true, "trust stays available") }
+        XCTAssertEqual(handler.invocations, ["trust"], "no refused domain reaches its handler")
+    }
+
+    // FORK-DELTA: the allowlist is checked after the desktop_* → macos_* rewrite,
+    // so the neutral spelling cannot reach a domain the macos_* one is refused.
+    func testDesktopSpellingIsAllowlistedLikeMacos() {
+        let handler = RecordingHandler()
+        let router = Router(axTrustCheck: { true }, allowedDomains: { ["screenshot"] }, surfaceDisabled: { false })
+        router.register("click", handler: handler)
+        router.register("desktop", handler: handler)
+        assertRoute(router, "desktop_click") { XCTAssertEqual($0["code"] as? String, "domain_not_allowed") }
+        assertRoute(router, "desktop_hello") { XCTAssertEqual($0["code"] as? String, "domain_not_allowed") }
+        XCTAssertTrue(handler.invocations.isEmpty, "neither desktop_* call reaches a handler")
+    }
+
     func testDomainNotAllowedErrorIsPureAndActionable() {
         let err = Router.domainNotAllowedError(domain: "fs")
         XCTAssertEqual(err["success"] as? Bool, false)

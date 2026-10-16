@@ -1,42 +1,174 @@
-/// <reference lib="dom" />
-
-import { describe, expect, test, afterEach } from "bun:test"
+import { afterEach, expect, test } from "bun:test"
 import { GlobalRegistrator } from "@happy-dom/global-registrator"
-
-try { GlobalRegistrator.register() } catch { /* already registered by another test file */ }
-
-import { isValueSecret, isSensitive, markSensitive, SECURE_MASK } from "./sensitive"
+try { GlobalRegistrator.register() } catch {}
+import { markSensitive, isSensitive, safeValue, safeText, safeHtml, SECURE_MASK } from "./sensitive"
+import { getRelevantAttrs } from "./element-tree"
+import { getAccessibleName } from "./a11y-tree"
+import { getOrAssignRef, refRegistry } from "./ref-registry"
+import { cacheSnapshot, computeSnapshotDiff, lastSnapshot } from "./snapshot-diff"
 import { handleForms } from "./data/forms"
+import { handleAttrGet, handleQuery, handleQueryOne } from "./data/query"
+import { handleExtractHtml, handleExtractMarkdown, handleExtractText } from "./data/extract"
+import { handleInputText } from "./actions/type"
+import { handleFocus } from "./actions/focus"
 
-afterEach(() => { document.body.innerHTML = "" })
+afterEach(() => { document.body.innerHTML = ""; refRegistry.clear() })
+const canary = 'CANARY<&"-0123456789'.repeat(4)
+function fixture() {
+  document.body.innerHTML = '<form><label for="pw">Password</label><input id="pw" type="password"><input id="plain" value="ordinary"><textarea id="area"></textarea><div id="editor" contenteditable="true"></div></form>'
+  const password = document.querySelector<HTMLInputElement>("#pw")!
+  password.setAttribute("value", canary)
+  // Happy DOM has no layout; give the existing visibility checks rendered boxes.
+  for (const el of Array.from(document.body.querySelectorAll("*"))) {
+    Object.defineProperty(el, "offsetParent", { get: () => document.body })
+    el.getBoundingClientRect = () => ({ x: 0, y: 0, width: 100, height: 20, top: 0, left: 0, right: 100, bottom: 20, toJSON() {} })
+  }
+  return { password, ref: getOrAssignRef(password) }
+}
+function masked(value: unknown) {
+  const output = JSON.stringify(value)
+  expect(output).not.toContain("CANARY")
+  expect(output).toContain(SECURE_MASK)
+}
 
-describe("isValueSecret — value read masking", () => {
-  test("a password input is secret; a text input is not", () => {
-    const pw = document.createElement("input"); pw.type = "password"
-    const text = document.createElement("input"); text.type = "text"
-    expect(isValueSecret(pw)).toBe(true)
-    expect(isValueSecret(text)).toBe(false)
-  })
+test("values, attributes, forms, and both diff snapshots mask before truncation", async () => {
+  const { password, ref } = fixture()
+  masked(getRelevantAttrs(password))
+  masked(await handleForms({ type: "forms" }))
+  masked(await handleAttrGet({ type: "attr_get", ref, name: "value" }))
+  cacheSnapshot()
+  masked(lastSnapshot)
+  password.value = "CHANGED-CANARY"
+  expect(JSON.stringify(computeSnapshotDiff())).not.toContain("CANARY")
+  password.value = ""
+  masked(computeSnapshotDiff())
+  expect(safeValue(document.querySelector("#plain")!)).toBe("ordinary")
+})
 
-  test("an explicitly marked field is secret regardless of type (vault delivery target)", () => {
-    const el = document.createElement("input"); el.type = "text"
-    expect(isValueSecret(el)).toBe(false)
+test("HTML, query-one, and attribute reads mask prefilled credentials without changing the page", async () => {
+  const { password, ref } = fixture()
+  masked(safeHtml(document.body))
+  masked(await handleExtractHtml({ type: "extract_html", ref }))
+  masked(await handleQueryOne({ type: "query_one", selector: "#pw" }))
+  expect(password.value).toBe(canary)
+  expect(password.getAttribute("value")).toBe(canary)
+  expect(safeHtml(document.querySelector("#plain")!)).toContain('value="ordinary"')
+  expect((await handleAttrGet({ type: "attr_get", ref, name: "type" })).data).toBe("password")
+})
+
+test("vault text, textarea, contenteditable and descendant text are masked", async () => {
+  fixture()
+  for (const id of ["plain", "area", "editor"]) {
+    const el = document.getElementById(id)!
     markSensitive(el)
-    expect(isSensitive(el)).toBe(true)
-    expect(isValueSecret(el)).toBe(true)
-  })
+    if (id === "editor") el.innerHTML = `<span>${canary.replaceAll("&", "&amp;").replaceAll("<", "&lt;")}</span>`
+    else { (el as HTMLInputElement).value = canary; if (id === "area") el.textContent = canary }
+    masked(safeHtml(el))
+    if (id !== "plain") { masked(safeText(el)); masked(getAccessibleName(el)) }
+  }
+  masked(await handleExtractText({ type: "extract_text" }))
+  masked(await handleExtractMarkdown({ type: "extract_markdown" }))
+  masked(await handleQuery({ type: "query", selector: "#editor span" }))
+  expect(safeText(document.body)).toContain("Password")
+  const editor = document.getElementById("editor")!
+  for (const markup of ['<table><tr><td contenteditable="true"></td><td>ordinary-cell</td></tr></table>', '<ul><li contenteditable="true"></li></ul>']) {
+    editor.insertAdjacentHTML("afterend", markup)
+    for (const el of [editor.nextElementSibling!, ...Array.from(editor.nextElementSibling!.querySelectorAll("*"))]) {
+      Object.defineProperty(el, "offsetParent", { get: () => document.body })
+      el.getBoundingClientRect = editor.getBoundingClientRect
+    }
+    const field = editor.nextElementSibling!.querySelector("[contenteditable]")!
+    field.textContent = canary
+    markSensitive(field)
+    masked(await handleExtractMarkdown({ type: "extract_markdown" }))
+  }
+  expect((await handleExtractMarkdown({ type: "extract_markdown" })).data).toContain("ordinary-cell")
+})
 
-  test("forms never report a password field's value in plaintext", async () => {
-    document.body.innerHTML = `
-      <form>
-        <input type="text" name="user" value="alice">
-        <input type="password" name="pass" value="SENT1NEL-should-not-appear">
-      </form>`
-    const res = await handleForms({ type: "forms" })
-    const json = JSON.stringify(res.data)
-    expect(json).not.toContain("SENT1NEL-should-not-appear")
-    expect(json).toContain(SECURE_MASK)
-    // non-secret fields still readable
-    expect(json).toContain("alice")
-  })
+test("typed and empty passwords remain sensitive after reveal-type changes", async () => {
+  const { password, ref } = fixture()
+  password.value = ""
+  expect(safeValue(password)).toBe("")
+  password.type = "text"
+  await handleInputText({ type: "input_text", ref, text: canary, clear: true })
+  expect(isSensitive(password)).toBe(true)
+  expect(safeValue(password)).toBe(SECURE_MASK)
+  const plain = document.querySelector<HTMLInputElement>("#plain")!
+  await handleInputText({ type: "input_text", ref: getOrAssignRef(plain), text: canary, clear: true, sensitive: true })
+  expect(safeValue(plain)).toBe(SECURE_MASK)
+})
+
+test("trusted credential focus marks its actual target and fails on a stale ref", async () => {
+  fixture()
+  const plain = document.querySelector<HTMLInputElement>("#plain")!
+  const ref = getOrAssignRef(plain)
+  expect((await handleFocus({ type: "focus", ref, sensitive: true })).success).toBe(true)
+  plain.value = canary
+  expect(safeValue(plain)).toBe(SECURE_MASK)
+  plain.blur()
+  plain.disabled = true
+  expect((await handleFocus({ type: "focus", ref, sensitive: true })).success).toBe(false)
+  plain.remove()
+  expect((await handleFocus({ type: "focus", ref, sensitive: true })).success).toBe(false)
+  expect((await handleFocus({ type: "focus", focused: true, sensitive: true })).success).toBe(false)
+})
+
+test("failed credential focus leaves an ordinary field unmarked", async () => {
+  fixture()
+  const plain = document.querySelector<HTMLInputElement>("#plain")!
+  plain.disabled = true
+  expect((await handleFocus({ type: "focus", ref: getOrAssignRef(plain), sensitive: true })).success).toBe(false)
+  expect(isSensitive(plain)).toBe(false)
+  expect(safeValue(plain)).toBe("ordinary")
+})
+
+test("focused credential delivery preserves the deepest shadow input and marks only it", async () => {
+  // Other suites mock getShadowRoot as null; use real shadow behavior in isolation.
+  const child = Bun.spawn([process.execPath, "-e", `
+    import assert from "node:assert/strict";
+    import { GlobalRegistrator } from "@happy-dom/global-registrator";
+    GlobalRegistrator.register();
+    const { handleFocus } = await import("./extension/src/content/actions/focus.ts");
+    const { isSensitive, safeValue, SECURE_MASK } = await import("./extension/src/content/sensitive.ts");
+    const host = document.createElement("div");
+    host.tabIndex = 0;
+    document.body.append(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = '<div tabindex="0"></div><input value="ordinary-sibling">';
+    const nested = shadow.querySelector("div").attachShadow({ mode: "open" });
+    nested.innerHTML = '<input value="credential-canary">';
+    const input = nested.querySelector("input");
+    input.focus();
+    assert.equal(document.activeElement, host);
+    assert.equal((await handleFocus({ type: "focus", focused: true, sensitive: true })).success, true);
+    assert.equal(nested.activeElement, input);
+    assert.equal(safeValue(input), SECURE_MASK);
+    assert.equal(isSensitive(host), false);
+    assert.equal(safeValue(shadow.querySelector("input")), "ordinary-sibling");
+  `], { cwd: new URL("../../..", import.meta.url).pathname, stdout: "pipe", stderr: "pipe" })
+  const error = await new Response(child.stderr).text()
+  expect(await child.exited, error).toBe(0)
+})
+
+// FORK-DELTA: payment and one-time-code fields mask like passwords.
+test("card, CVV, and one-time-code inputs are masked; ordinary fields stay readable", () => {
+  document.body.innerHTML = `
+    <input id="cc" autocomplete="cc-number" value="4111111111111111">
+    <input id="cvv" name="cvv" value="123">
+    <input id="otp" autocomplete="one-time-code" value="654321">
+    <input id="ccname" autocomplete="cc-name" value="Ada Lovelace">
+    <input id="email" name="email" value="ada@example.com">`
+  for (const id of ["cc", "cvv", "otp"]) {
+    expect(safeValue(document.getElementById(id)!)).toBe(SECURE_MASK)
+  }
+  expect(safeValue(document.getElementById("ccname")!)).toBe("Ada Lovelace")
+  expect(safeValue(document.getElementById("email")!)).toBe("ada@example.com")
+})
+
+test("a password input stays masked after a show-password toggle", () => {
+  document.body.innerHTML = `<input id="pw" type="password" value="SENT1NEL">`
+  const pw = document.getElementById("pw") as HTMLInputElement
+  expect(safeValue(pw)).toBe(SECURE_MASK)
+  pw.type = "text"
+  expect(safeValue(pw)).toBe(SECURE_MASK)
 })

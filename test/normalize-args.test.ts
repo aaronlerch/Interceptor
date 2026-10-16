@@ -3,6 +3,15 @@ import { describe, expect, test } from "bun:test"
 import { normalizeArgs } from "../cli/normalize"
 
 describe("normalizeArgs", () => {
+  test("tab keepalive takes --off; other tab subverbs refuse it", () => {
+    expect(normalizeArgs(["tab", "keepalive", "12", "--off"])).toEqual(["tab", "keepalive", "12", "--off"])
+    expect(normalizeArgs(["tab", "keepalive", "--off", "12"])).toEqual(["tab", "keepalive", "12", "--off"])
+    expect(() => normalizeArgs(["tab", "close", "12", "--off"])).toThrow("only valid with 'tab keepalive'")
+    expect(() => normalizeArgs(["tab", "keepalive", "12", "--activate"])).toThrow("only valid with 'tab new'")
+    expect(() => normalizeArgs(["tab", "new", "https://example.com", "--off"])).toThrow("only valid with 'tab keepalive'")
+    expect(normalizeArgs(["tab", "new", "https://example.com", "--activate"])).toEqual(["tab", "new", "https://example.com", "--activate"])
+  })
+
   test("the original repro: open --text-only <url> puts the URL back at filtered[1]", () => {
     expect(normalizeArgs(["open", "--text-only", "https://example.com"]))
       .toEqual(["open", "https://example.com", "--text-only"])
@@ -104,4 +113,13 @@ describe("normalizeArgs", () => {
     expect(normalizeArgs(["click", "--nth", "4", "--selector", "button span"]))
       .toEqual(["click", "--nth", "4", "--selector", "button span"])
   })
+  test("--selector is a click flag: dblclick rejects it with a query hint instead of taking it as the target", () => {
+    // Agent session log, 2026-09-09: `dblclick --selector '[data-test-id=…]'`
+    // parsed the literal `--selector` as the element and failed as stale.
+    expect(() => normalizeArgs(["dblclick", "--selector", "[data-test-id=canvas-node]"]))
+      .toThrow(/unknown flag '--selector' for 'dblclick'.*query "<css>"/)
+    expect(normalizeArgs(["click", "--selector", "button span", "--nth", "1"]))
+      .toEqual(["click", "--selector", "button span", "--nth", "1"])
+  })
+
 })

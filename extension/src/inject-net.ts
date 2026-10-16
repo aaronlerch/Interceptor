@@ -1,4 +1,5 @@
-import { K_BEACON, K_BROADCAST, K_NET, K_TT_POLICY, K_WS, TT_NET_POLICY_NAME, TT_POLICY_NAME } from "./inject-keys"
+import { K_BEACON, K_BROADCAST, K_KEEPALIVE, K_NET, K_TT_POLICY, K_WS, TT_NET_POLICY_NAME, TT_POLICY_NAME } from "./inject-keys"
+import { installRenderKeepalive } from "./inject-keepalive"
 
 if ((window as any)[K_NET]) {
   // already patched — skip
@@ -60,6 +61,11 @@ if ((window as any)[K_NET]) {
     }
   } catch {}
 
+  // Render keep-alive hooks: inert until `tab keepalive <id>` flips
+  // the symbol-keyed state from the background. Installed here, before page
+  // bundles capture the native rAF / visibility getters.
+  try { installRenderKeepalive(window, K_KEEPALIVE) } catch {}
+
   if ((window as any).trustedTypes?.createPolicy) {
     try {
       (window as any).trustedTypes.createPolicy(TT_NET_POLICY_NAME, {
@@ -83,7 +89,16 @@ if ((window as any)[K_NET]) {
     }
   }
 
-  type OverrideRule = { urlPattern: string; queryAddOrReplace?: Record<string, string | number | boolean>; queryRemove?: string[] }
+  type OverrideRule = {
+    urlPattern: string
+    queryAddOrReplace?: Record<string, string | number | boolean>
+    queryRemove?: string[]
+    // Response override: answer locally instead of sending, and/or hold the request.
+    status?: number
+    body?: string
+    contentType?: string
+    delayMs?: number
+  }
   // NB: kept as a closure-local. The window property (`__interceptor_override_rules`)
   // this used to publish was vestigial — every read below goes through this const —
   // and it was a page-visible tell, so it is no longer assigned to `window`.
@@ -216,6 +231,7 @@ if ((window as any)[K_NET]) {
   function applyOverrides(rawUrl: string): string {
     if (!overrideRules.length) return rawUrl
     for (const rule of overrideRules) {
+      if (!Object.keys(rule.queryAddOrReplace ?? {}).length && !rule.queryRemove?.length) continue
       if (!matchesPattern(rawUrl, rule.urlPattern)) continue
       try {
         const base = rawUrl.startsWith("/") ? window.location.origin + rawUrl : rawUrl
@@ -239,6 +255,32 @@ if ((window as any)[K_NET]) {
     const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*")
     return new RegExp(escaped, "i").test(url)
   }
+
+  function responseOverride(url: string): OverrideRule | undefined {
+    return overrideRules.find((rule) =>
+      (rule.status !== undefined || rule.body !== undefined || rule.delayMs !== undefined) &&
+      matchesPattern(url, rule.urlPattern))
+  }
+
+  const answersLocally = (rule: OverrideRule | undefined): boolean =>
+    rule !== undefined && (rule.status !== undefined || rule.body !== undefined)
+
+  // Statuses the Response constructor refuses a body for.
+  const NULL_BODY_STATUS = new Set([204, 205, 304])
+
+  function overrideParts(rule: OverrideRule): { status: number; text: string; contentType: string } {
+    const status = rule.status ?? 200
+    const text = NULL_BODY_STATUS.has(status) ? "" : (rule.body ?? "")
+    let json = false
+    try { json = text !== "" && (JSON.parse(text), true) } catch {}
+    return { status, text, contentType: rule.contentType ?? (json ? "application/json" : "text/plain;charset=utf-8") }
+  }
+
+  const holdFor = (ms: number | undefined): Promise<void> =>
+    ms ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve()
+
+  const errorText = (err: unknown): string =>
+    err instanceof Error ? `${err.name}: ${err.message}` : String(err)
 
   const PAGE_COMM_PREVIEW_CAP = 4096
 
@@ -427,10 +469,21 @@ if ((window as any)[K_NET]) {
       }
     } catch {}
 
-    return originalFetch.call(this, input, init).then((response) => {
-      // Dormant path: record metadata only, never touch the body. This avoids
-      // the clone()+text() read and the SSE stream tee on every idle request.
-      if (!netActive) {
+    const mock = responseOverride(url)
+    const local = answersLocally(mock)
+    const sent: Promise<Response> = !mock
+      ? originalFetch.call(this, input, init)
+      : holdFor(mock.delayMs).then(() => {
+        if (!local) return originalFetch.call(this, input, init)
+        const { status, text, contentType } = overrideParts(mock)
+        return new Response(NULL_BODY_STATUS.has(status) ? null : text, { status, headers: { "content-type": contentType } })
+      })
+
+    return sent.then((response) => {
+      // Dormant path (fork-local): record metadata only, never touch the body.
+      // This avoids the clone()+text() read and the SSE stream tee on every idle
+      // request. A mocked response always takes the full path below.
+      if (!netActive && !mock) {
         try {
           document.dispatchEvent(new CustomEvent("__interceptor_net", {
             detail: {
@@ -499,7 +552,8 @@ if ((window as any)[K_NET]) {
                           truncated,
                           contentType,
                           requestHeaders: reqHeaders || {},
-                          responseHeaders
+                          responseHeaders,
+                          ...(local ? { mocked: true } : {})
                         }
                       }))
                       document.dispatchEvent(new CustomEvent("__interceptor_sse_done", {
@@ -567,7 +621,8 @@ if ((window as any)[K_NET]) {
               truncated: false,
               contentType,
               requestHeaders: reqHeaders || {},
-              responseHeaders
+              responseHeaders,
+              ...(local ? { mocked: true } : {})
             }
           }))
         }).catch(() => {})
@@ -575,11 +630,29 @@ if ((window as any)[K_NET]) {
 
       return response
     }).catch((err) => {
+      try {
+        document.dispatchEvent(new CustomEvent("__interceptor_net", {
+          detail: {
+            url, method, status: 0, body: "", type: "fetch", timestamp: Date.now(), truncated: false,
+            contentType: "", requestHeaders: reqHeaders || {}, responseHeaders: {}, error: errorText(err)
+          }
+        }))
+      } catch {}
       throw err
     })
   }, originalFetch)
 
-  window.fetch = patchedFetch
+  // Pages can check that fetch is still native with Function.prototype.toString
+  // (Upwork's sign-in bootstrap does, and otherwise falls back to an iframe fetch
+  // inside requestAnimationFrame, which never runs in a hidden tab). A Proxy has
+  // no source text, so it prints as native code, and it keeps fetch's name,
+  // length, and missing prototype; capture runs inside the apply trap.
+  // ponytail: V8 prints a Proxy without its name, so an exact
+  // "function fetch() { [native code] }" comparison still tells; faking
+  // Function.prototype.toString would be the next step and a bigger tell.
+  window.fetch = new Proxy(originalFetch, {
+    apply: (_target, self, args) => Reflect.apply(patchedFetch, self, args),
+  })
 
   const XHR = XMLHttpRequest.prototype
 
@@ -587,6 +660,7 @@ if ((window as any)[K_NET]) {
     _interceptor_url?: string
     _interceptor_method?: string
     _interceptor_headers?: Record<string, string>
+    _interceptor_sync?: boolean
   }
 
   const origOpen = XHR.open
@@ -599,6 +673,7 @@ if ((window as any)[K_NET]) {
     this._interceptor_url = overriddenUrl
     this._interceptor_method = method
     this._interceptor_headers = {}
+    this._interceptor_sync = rest[0] === false
     if (overriddenUrl !== rawUrl) {
       return origOpen.apply(this, [method, overriddenUrl, ...rest] as any)
     }
@@ -614,10 +689,13 @@ if ((window as any)[K_NET]) {
     const xhrUrl = this._interceptor_url
     const xhrMethod = this._interceptor_method || "GET"
     const xhrHeaders = this._interceptor_headers
+    const mock = xhrUrl ? responseOverride(xhrUrl) : undefined
+    const local = answersLocally(mock)
 
     this.addEventListener("load", function (this: XHRWithInterceptor) {
-      // Dormant path: metadata only, never read responseText.
-      if (!netActive) {
+      // Dormant path: metadata only, never read responseText. A mocked
+      // response always takes the full path (the agent asked for it).
+      if (!netActive && !mock) {
         try {
           document.dispatchEvent(new CustomEvent("__interceptor_net", {
             detail: {
@@ -664,7 +742,8 @@ if ((window as any)[K_NET]) {
             truncated: false,
             contentType: (this.getResponseHeader("content-type") || "").toLowerCase(),
             requestHeaders: xhrHeaders || {},
-            responseHeaders
+            responseHeaders,
+            ...(local ? { mocked: true } : {})
           }
         }))
       } catch {}
@@ -678,7 +757,47 @@ if ((window as any)[K_NET]) {
       }
     })
 
-    return origSend.apply(this, arguments as any)
+    const failures = { error: "NetworkError", abort: "AbortError", timeout: "TimeoutError" } as const
+    for (const [kind, error] of Object.entries(failures)) {
+      this.addEventListener(kind, () => {
+        try {
+          document.dispatchEvent(new CustomEvent("__interceptor_net", {
+            detail: {
+              url: xhrUrl, method: xhrMethod, status: 0, body: "", type: "xhr", timestamp: Date.now(), truncated: false,
+              contentType: "", requestHeaders: xhrHeaders || {}, responseHeaders: {}, error
+            }
+          }))
+        } catch {}
+      })
+    }
+
+    // A synchronous request has to be finished when send() returns, so it is never held.
+    const sync = this._interceptor_sync === true
+    if (!mock || (sync && !local)) return origSend.apply(this, arguments as any)
+    const args = arguments
+    if (!local) {
+      void holdFor(mock.delayMs).then(() => origSend.apply(this, args as any))
+      return
+    }
+    // ponytail: non-text responseTypes (arraybuffer, blob, document) get the text;
+    // convert if a site needs them.
+    const { status, text, contentType } = overrideParts(mock)
+    const answer = () => {
+      let response: unknown = text
+      if (this.responseType === "json") { try { response = JSON.parse(text) } catch { response = null } }
+      // Instance accessors shadow the XMLHttpRequest.prototype getters.
+      const fields: Record<string, unknown> = {
+        readyState: 4, status, statusText: "", responseText: text, response,
+        responseURL: new URL(xhrUrl ?? "", location.href).href,
+      }
+      for (const [key, value] of Object.entries(fields)) Object.defineProperty(this, key, { configurable: true, get: () => value })
+      const self = this as any
+      self.getResponseHeader = (name: string) => name.toLowerCase() === "content-type" ? contentType : null
+      self.getAllResponseHeaders = () => `content-type: ${contentType}\r\n`
+      for (const type of ["readystatechange", "load", "loadend"]) this.dispatchEvent(new ProgressEvent(type))
+    }
+    if (sync) answer()
+    else void holdFor(mock.delayMs).then(answer)
   }
 
 	  const OriginalEventSource = (window as any).EventSource as typeof EventSource | undefined

@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Interceptor release notes</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0;
+      padding: 18px 20px;
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      color: CanvasText;
+      background: Canvas;
+    }
+    main { max-width: 760px; margin: 0 auto; }
+    section { padding: 0 0 16px; border-bottom: 1px solid color-mix(in srgb, CanvasText 18%, transparent); }
+    section + section { padding-top: 16px; }
+    h2 { margin: 0 0 4px; font-size: 18px; }
+    time { color: color-mix(in srgb, CanvasText 65%, transparent); font-size: 12px; }
+    ul { margin: 9px 0 0; padding-left: 20px; }
+    p { margin: 9px 0 0; }
+    main > section.sparkle-installed-version,
+    main > section.sparkle-installed-version ~ section { display: none; }
+  </style>
+</head>
+<body>
+<main>
+  <section data-sparkle-version="2.1.3">
+    <h2>Interceptor 2.1.3</h2>
+    <time datetime="2026-10-14">October 14, 2026</time>
+    <ul>
+      <li><code>interceptor group prune</code> now deletes groups on a Mac. Brave asks "Delete Tab Group?" before it deletes one, and on a Mac prune did not recognize that question: it reported the group as not deleted and left the question open over the browser window. Prune now answers it on every platform.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="2.1.2">
+    <h2>Interceptor 2.1.2</h2>
+    <time datetime="2026-10-14">October 14, 2026</time>
+    <ul>
+      <li>A background click no longer crashes the page it lands on. On a Mac, a click or drag sent to a named app or window carried a time from just after the computer started. Chrome, Brave, and Electron apps crashed the tab when such a click changed the page's route. Clicks and drags now carry the current time.</li>
+      <li>Closing a tab group no longer leaves a closed saved group behind in Chrome or Brave. <code>group close</code>, <code>tab close</code> on a group's last tab, <code>window close</code>, and the idle cleanup now delete the group. A group that keeps a tab stays, and groups you made yourself are not touched.</li>
+      <li>New <code>interceptor group prune</code> deletes the closed saved groups that earlier versions left on the bookmarks bar. <code>--dry-run</code> lists them first, and <code>interceptor group prune &lt;label&gt;</code> deletes only the groups you name. It needs the Full install and a bookmarks bar that is showing. A delete syncs to every profile on the account and cannot be undone.</li>
+      <li>A web page can no longer connect to Interceptor. The local port the browser extension uses now refuses a connection that comes from a web page.</li>
+      <li>The Mac packages now refuse to install on an Intel Mac, where their programs cannot run. An Intel Mac can still build Interceptor from source.</li>
+      <li>The Mac bridge builds from source against the macOS 27 SDK.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="2.1.1">
+    <h2>Interceptor 2.1.1</h2>
+    <time datetime="2026-10-13">October 13, 2026</time>
+    <ul>
+      <li>Windows and Linux now update the way the Mac does with Sparkle. Once a day Interceptor checks for a new release, and when there is one it opens its update window with the release notes and <strong>Skip This Version</strong>, <strong>Remind Me Later</strong>, and <strong>Install Update</strong>. Nothing downloads or installs until you click. After the download, <strong>Install and Relaunch</strong> installs it and Interceptor restarts.</li>
+      <li>2.1.0 installed updates on its own once Interceptor had been idle for 10 minutes. That is gone, and so is <code>interceptor update install</code>: on every OS you install from the update window, and <code>interceptor update</code> checks now and opens the window when there is an update.</li>
+      <li>The installer is still checked before it runs: its SHA-256 and length must match the signed feed, and on Windows it must carry the Hacker Valley Media signature. The release notes in the window are pinned by the same signed feed.</li>
+      <li>Remind Me Later asks again the next day. Skip This Version stops asking about that release; a newer one is still offered. If an install fails, Interceptor keeps the version you had and tells you the next time it starts.</li>
+      <li>On Linux the update window needs WebKitGTK 4.1, the same library overlays use. Without it, Interceptor posts a notification that links the new release.</li>
+      <li>Computers already on 2.1.0 take this one update on their own, because 2.1.0's updater does that. From 2.1.1 on, every update waits for your click.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="2.1.0">
+    <h2>Interceptor 2.1.0</h2>
+    <time datetime="2026-10-12">October 12, 2026</time>
+    <ul>
+      <li>Windows and Linux Full installs now update themselves, the way Sparkle updates a Mac. The native provider checks the update server every 15 minutes, downloads a newer installer, proves it is the one Hacker Valley Media published (a signed digest, plus the Authenticode signature on Windows), and installs it silently once Interceptor has gone 10 minutes without a request, so it never cuts off an agent in the middle of a command.</li>
+      <li>New <code>interceptor update install</code> on Windows and Linux Full installs a newer release right away. <code>interceptor update status</code> shows the last check and the last install.</li>
+      <li>If the installer fails, it rolls back to the version you had, the provider comes back, and the failed version is not tried again on its own.</li>
+      <li>Set <code>INTERCEPTOR_AUTO_UPDATE=off</code> in the provider's login environment to turn automatic updates off.</li>
+      <li>Windows and Linux computers on 2.0.0 have no updater yet. Install 2.1.0 once by hand; later releases arrive on their own.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="2.0.0">
+    <h2>Interceptor 2.0.0</h2>
+    <time datetime="2026-10-12">October 12, 2026</time>
+    <ul>
+      <li>New <code>interceptor desktop</code> drives native apps on Windows and Linux with the same verbs, flags, and JSON replies as <code>interceptor macos</code>: element trees, background click, type, keys, scroll, and drag, window screenshots and streams, clipboard, files, PDF, OCR and local vision, speech, calendar, reminders, contacts, notifications, monitor and replay, overlays, and vault secrets. On a Mac, <code>interceptor desktop</code> is the same as <code>interceptor macos</code>.</li>
+      <li>New Windows Full installers and Linux Full archives carry the native provider and its bundled engines (OCR, hand, body, and scene vision, sound classification, text embeddings, and speech recognition on Linux). The local AI model behind <code>ai</code>, <code>translate</code>, and <code>detect</code> downloads once, on first use.</li>
+      <li><code>interceptor desktop capabilities</code> lists every operation and says whether it works on this computer and, when it does not, why.</li>
+      <li>Each operating system now ships only its own agent skills, help, and MCP menu. Windows and Linux get a new <code>interceptor-desktop</code> skill, and the Linux archives now install the skills too.</li>
+      <li>MCP tool calls are classified on the arguments the CLI will actually run. A global flag's value can no longer make a destructive or exec verb look like a read.</li>
+      <li>Element refs from <code>interceptor macos</code> reads stay valid after a later <code>find</code> or <code>tree</code>. <code>type</code> into a read-only field refuses instead of typing into another field.</li>
+      <li>Calendar: <code>--span future</code> on a recurring event no longer deletes past occurrences, and one occurrence can be updated or deleted on its own.</li>
+      <li>New on the Mac: <code>stream record --media</code> writes an H.264 MP4, <code>type --keycodes-us</code> types into virtual machines that ignore text events, <code>music now-playing --include-system</code> reads Music.app, and <code>contacts list --keys</code> picks the fields returned. OCR runs in a helper process, so a stuck Vision call no longer hangs the bridge.</li>
+      <li>A notification attachment is copied before it is posted, so your original file stays where it was.</li>
+      <li>The Browser and Full packages find the signed-in user even when the console belongs to the login window, so their post-install steps (native messaging links, and the bridge restart on Full) run for that user.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="1.0.24">
+    <h2>Interceptor 1.0.24</h2>
+    <time datetime="2026-10-02">October 2, 2026</time>
+    <ul>
+      <li><code>interceptor macos click</code>, <code>drag</code>, <code>scroll</code>, <code>type</code>, and <code>keys</code> with <code>--app</code> or <code>--pid</code> now reach a window that is in the background. The frontmost app and the cursor stay where they are. They used to report success while a background app dropped the events.</li>
+      <li>New <code>--window &lt;id&gt;</code> on those verbs names the exact window. <code>interceptor macos windows</code> lists the ids. A click or drag aimed at a minimized window, a hidden app, or a point outside the app's windows is refused and says nothing was delivered.</li>
+      <li><code>--trusted</code> clicks, typing, and keys now work on a browser window that is not focused, on a full install. The tab has to be the one showing in its window. The result says the input was delivered in the background.</li>
+      <li>A <code>--trusted</code> click on an element inside an iframe now lands on that element. It used to click a different element in the top page.</li>
+      <li><code>interceptor window new</code> moves your tab group into the new background window, so the new tab stays there and keeps painting. On the shared default group the result carries a <code>groupWarning</code>.</li>
+      <li>Replay plans from <code>macos monitor export --plan</code> no longer ask apps to come forward. An app change is written as <code>interceptor macos open</code>, and typed text is addressed to its app. An app that is not running is launched in the background, and macOS can still bring it forward while it starts.</li>
+      <li>The bundled agent skills now put background work first: use a background verb, then <code>tab keepalive</code>, then your own window with <code>window new</code>, and take focus only when nothing else works.</li>
+      <li>The native macOS bridge now builds from source on Intel Macs. The macOS packages are still built for Apple silicon. On Intel, the <code>interceptor macos vm</code> commands that need Apple silicon say so, and a paused-state snapshot or restore is refused before a snapshot file is written or the VM's disk is replaced. Thanks to kootik for the fix in #290.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="1.0.21">
+    <h2>Interceptor 1.0.21</h2>
+    <time datetime="2026-09-28">September 28, 2026</time>
+    <ul>
+      <li>Pages that check whether <code>fetch</code> is still the browser's own function now pass that check with Interceptor installed. Upwork's signed-in pages no longer stall on a Loading screen in a background tab, and <code>net log</code> keeps capturing their fetch requests. Thanks to MerryEcho for tracking down the cause in #275.</li>
+      <li><code>interceptor override</code> can now change the response: <code>--status</code>, <code>--body</code>, and <code>--content-type</code> answer a matching fetch or XHR without sending it, and <code>--delay</code> holds the real request. <code>key=value</code> still rewrites query parameters, and <code>status=500</code> now prints a note pointing to <code>--status 500</code>.</li>
+      <li><code>net log</code>, <code>net headers</code>, and <code>sse log</code> include requests made inside iframes. Failed and aborted requests are listed with status 0 and the error.</li>
+      <li><code>--since</code> on <code>net log</code>, <code>net page-comm log</code>, and <code>network log</code> takes a duration such as <code>30s</code> or <code>5m</code>, or an epoch-millisecond timestamp. A bare number like <code>30</code> is refused.</li>
+      <li><code>sse tail</code> waits for a stream to start, prints it through its final chunk, and exits 1 if none starts before <code>--timeout</code>.</li>
+      <li><code>macos cdp app attach</code> refuses, without signaling the app, when another process holds the inspector port, and says how to relaunch on a free port. On attached Electron apps <code>tabs</code>, <code>read</code>, <code>text</code>, <code>find</code>, and <code>click</code> now work; <code>eval</code>, <code>screenshot</code>, and <code>net</code> say to use <code>macos cdp connect</code>.</li>
+      <li><code>macos cdp launch</code> now stops only the app's own process before relaunching it. It used to match the app's path anywhere in a command line, which could end an unrelated shell or script.</li>
+      <li><code>contexts --verbose</code> and <code>diagnose</code> show the Safari extension's version.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="1.0.19">
+    <h2>Interceptor 1.0.19</h2>
+    <time datetime="2026-09-26">September 26, 2026</time>
+    <ul>
+      <li>iOS typing now targets the app on screen after the runner process restarts. The same default applies to <code>ios keys</code>, <code>ios type</code>, and on-device <code>Interceptor.type</code>; explicit app targeting still works.</li>
+      <li>The iOS runner disables two more XCTest idle-wait paths used while reading or acting on active interfaces. <code>ios fgdebug</code> lists the paths patched on the connected device. Run <code>interceptor ios refresh</code> so the phone gets the new runner.</li>
+      <li><code>INTERCEPTOR_WS_URL</code> already pins the runner dial-back URL. The iOS docs now explain that it must be set in the daemon environment before startup, including for an on-device loopback relay.</li>
+      <li>Windows release builds now ignore temporary Bun cross-compile seeds when stamping the commit, so a clean release no longer reports <code>-dirty</code> because of those build files.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="1.0.17">
+    <h2>Interceptor 1.0.17</h2>
+    <time datetime="2026-09-24">September 24, 2026</time>
+    <ul>
+      <li><code>interceptor tab keepalive &lt;id&gt;</code> makes a hidden managed tab read as visible and run its animation frames at frame rate, so a page that stops drawing in the background renders in place and <code>read</code>, <code>text</code>, and <code>eval</code> return its real content. No focus change. <code>--off</code> clears it, the flag survives navigation in that tab, and it ends with the tab. Limits, stated in the result: IntersectionObserver and ResizeObserver callbacks still wait for a real paint, and on a page whose security policy forbids web workers the frames run about once per second.</li>
+      <li><code>interceptor tab switch</code> back to the tab that was showing before Interceptor's own switch now passes the managed-group gate once, so an agent that brought a tab forward for a trusted click can put your tab back. Your tab is never stored as an auto-target.</li>
+      <li><code>interceptor window new</code> opens in the background; <code>--activate</code> is the opt-in that focuses the new window, matching <code>open</code> and <code>tab new</code>.</li>
+      <li>The trusted-input refusal now leads with the background-safe path (drop <code>--trusted</code>) and says that <code>tab switch</code> replaces what you are looking at; the hint prints in plain text, not only with <code>--json</code>. The <code>screenshot --pixel</code> help says the tab's window must be on screen and not covered; the browser does not need to be focused.</li>
+      <li><code>interceptor monitor export --plan</code> records a focus switch as a comment instead of a <code>tab switch</code> command, so a replayed recording never takes over your view.</li>
+      <li><code>interceptor macos cdp launch</code> relaunches the app behind your windows and puts the app you were using back in front if the relaunched app activates itself. It refuses a debug port another process already serves, naming that process, instead of reporting a connection that belonged to the wrong app.</li>
+      <li><code>read</code>, <code>open</code>, <code>act</code>, and <code>inspect</code> honor <code>--any-tab</code> the way single verbs already did.</li>
+    </ul>
+  </section>
+
+  <section data-sparkle-version="1.0.15">
+    <h2>Interceptor 1.0.15</h2>
+    <time datetime="2026-09-22">September 22, 2026</time>
+    <ul>
+      <li><code>interceptor ios click</code>, <code>drag</code>, <code>scroll</code>, and <code>type</code> return in about a second on every app. The runner no longer waits for the app to go idle, so a long press on a Home Screen icon or a tap in an animating browser page reports success instead of timing out after 60 seconds while the press had already landed. Run <code>interceptor ios refresh</code> once so the runner on the phone picks this up; <code>ios fgdebug</code> lists the patched <code>idleWait</code> selectors.</li>
+      <li><code>interceptor ios proc</code>, <code>shot</code>, <code>top</code>, <code>diag</code>, <code>profiles</code>, and <code>ios web targets</code> answer again over Wi-Fi. The lockdown TLS session no longer passes the pairing CA, which made Bun's handshake fail on the device certificate and left every runner-free lane silent until its deadline. A socket that closes mid-handshake now fails at once.</li>
+      <li><code>interceptor ios click --x 10.5 --y 20.25</code> and <code>ios scroll --x/--y</code> keep fractions. A runner built for the iOS Simulator is found under <code>Debug-iphonesimulator/</code> without a symlink.</li>
+      <li><code>interceptor scene list</code>, <code>scene selected</code>, and <code>scene text</code> mask password and credential-marked fields the way <code>read</code> and <code>forms</code> do. <code>interceptor check "checkbox:Remember me"</code> checks a box by role and name, as <code>click</code> already could.</li>
+      <li><code>interceptor ios web read</code>, <code>text</code>, <code>find</code>, <code>inspect</code>, <code>eval</code>, and <code>call</code> answer on iOS 27 Safari. The web-inspector transport now follows every message with an empty frame, the prompt webinspectord needs before it acts on a message larger than about two TCP segments; without it the DOM serializer never answered and every later reply arrived one request late.</li>
+      <li><code>interceptor ios keys Enter</code> (or <code>Return</code>, <code>Tab</code>) presses that key instead of typing the word. A literal newline character already did; the two characters <code>\n</code> are still typed as text.</li>
+      <li><code>interceptor ios web eval</code> and <code>call --timeout &lt;s&gt;</code> take seconds, as the help always said; the value used to reach the session as milliseconds, so <code>--timeout 5</code> gave up after 5 ms. The CLI deadline now stretches to cover a longer timeout.</li>
+    </ul>
+  </section>
+
+  <section data-sparkle-version="1.0.13">
+    <h2>Interceptor 1.0.13</h2>
+    <time datetime="2026-09-22">September 22, 2026</time>
+    <ul>
+      <li><code>interceptor ios stream start</code> has the phone push small JPEG frames continuously over Wi-Fi, no cable and no Screen Mirroring. With <code>--out &lt;path&gt;</code> the newest frame is rewritten atomically in that file, so a loop reads one path whenever it wants a look. <code>ios stream status</code> reports frames received, the age of the newest, and what the phone spent capturing and encoding; <code>ios frame</code> saves the newest frame on demand.</li>
+      <li><code>interceptor ios gesture</code> presses with up to ten fingers at once, each on its own timeline: <code>"380,700@0&gt;380,700@600" "120,650@100&gt;120,650@300"</code> holds one point for 600 ms while another is tapped from 100 to 300 ms. Coordinates are the same screen points <code>click</code> and <code>drag</code> use. Run <code>interceptor ios refresh</code> once so the runner on the phone picks up both verbs.</li>
+    </ul>
+  </section>
+
+  <section data-sparkle-version="1.0.11">
+    <h2>Interceptor 1.0.11</h2>
+    <time datetime="2026-09-22">September 22, 2026</time>
+    <ul>
+      <li>CSS-selector commands now find elements inside web components. <code>query</code>, <code>exists</code>, <code>count</code>, <code>click --selector</code>, <code>wait</code>, <code>table</code>, <code>attr</code>, <code>style</code>, <code>rect</code>, and <code>screenshot --selector</code> reach open and closed shadow roots. Light-DOM matches still come first, so <code>--nth</code> keeps its meaning on ordinary pages.</li>
+      <li>Simulated key presses carry the legacy <code>keyCode</code>, <code>which</code>, and <code>charCode</code> numbers, so a chat composer that sends on <code>keyCode === 13</code> sends when Interceptor presses Enter. <code>keypress</code> fires only for character keys, a cancelled keydown suppresses it, and <code>Shift+a</code> arrives as <code>A</code>.</li>
+      <li>Page text reads (<code>text</code>, <code>find</code>, <code>state</code>) no longer report an empty page in a tab the browser has never rendered. The fallback shows what a reader would see and leaves out stylesheet rules, script source, and hidden text.</li>
+      <li><code>interceptor eval --main --no-reload</code> refuses the reload that recovers from a strict page CSP and returns the CSP error instead, for pages whose state matters. When that reload does happen, <code>eval</code> and <code>save</code> print a warning, on success and on failure.</li>
+    </ul>
+  </section>
+
+  <section data-sparkle-version="1.0.9">
+    <h2>Interceptor 1.0.9</h2>
+    <time datetime="2026-09-21">September 21, 2026</time>
+    <ul>
+      <li>New popup setting under Tab lifecycle: Delete the whole group when idle. It is off by default. When it is on, an Interceptor tab group that no command has touched for the idle window is removed completely, including tabs with unsaved form input and a window's last tab, so finished agent groups stop piling up in the tab strip.</li>
+      <li>The delete waits while you are looking at one of the group's tabs or one of them is playing sound, and it never empties the browser: when the group is everything that is open, a blank tab is created first.</li>
+      <li><code>interceptor status --verbose</code> shows which mode is armed.</li>
+      <li><code>interceptor sessions restore &lt;id&gt;</code> now reopens the closed page as a background tab in your group, so it no longer changes the tab you are looking at. Add <code>--activate</code> for the browser's own restore, which keeps history and brings the tab to the front.</li>
+      <li>The idle sweep finds Interceptor groups again after they are moved to another window or restored by the browser, so they no longer linger until someone runs <code>group list</code>.</li>
+      <li>Administrators can set the tab lifecycle policy and the tab group label through managed browser policy. The popup shows managed values read-only.</li>
+      <li><code>interceptor macos vision</code> can read a saved image with <code>--image &lt;path&gt;</code> instead of a live window, for every vision verb. No app has to be open, a rotated iPhone screenshot is read upright, and a bad path says what is wrong with it.</li>
+      <li><code>interceptor ios drag</code> and <code>ios scroll</code> accept screen coordinates as well as element refs, so games and canvas apps with no element tree can be driven. A drag from a point to the same point with <code>--duration</code> is a long press. A scroll with a ref that no longer resolves now reports an error and no longer swipes from the middle of the screen.</li>
+      <li>Dropdown commands now select an existing enabled option by exact value or unique label, and report an error instead of clearing the current choice.</li>
+      <li>Tree, forms, text, HTML, query, find, and diff reads mask password fields and fields filled from the secret vault. Trusted native typing sets its modifier flags on every key event, so mixed-case text arrives as typed.</li>
+    </ul>
+  </section>
+
+  <section data-sparkle-version="1.0.3">
+    <h2>Interceptor 1.0.3</h2>
+    <time datetime="2026-09-17">September 17, 2026</time>
+    <ul>
+      <li>Each logged-in macOS account now runs its own Interceptor daemon. The socket, pid, lock, log, and event files live in that account's own temporary directory, and each account listens on its own loopback port pair derived from its user id. The primary account keeps ports 19221 and 19222.</li>
+      <li>The browser extension learns its account's port from the native host, so two accounts signed in at once no longer share one daemon.</li>
+      <li>The daemon binds 127.0.0.1 only.</li>
+      <li>When a port is held by another account's daemon, the CLI now says so and names the remedy instead of reporting missing runtime files.</li>
+      <li>Installing an update stops every account's daemon, so one install unblocks the whole Mac.</li>
+      <li>When the CLI runs as an account that is not logged in at the screen (over SSH, for example), Interceptor now says so and names the account that owns the screen, instead of suggesting a LaunchAgent bootstrap that cannot work.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="1.0.1">
+    <h2>Interceptor 1.0.1</h2>
+    <time datetime="2026-09-13">September 13, 2026</time>
+    <ul>
+      <li>The CLI, desktop bridge, browser extensions, Windows, Linux, Safari, and iPhone runner now share version 1.0.1.</li>
+      <li>iPhone launches now validate the signed runner, preserve setup across upgrades, report early xcodebuild exits, and wait ten seconds for a dropped runner to reconnect.</li>
+      <li>Large File System Access uploads now retain the picker route after chunked transfer.</li>
+      <li>Install and Relaunch now lets Sparkle finish installation. A second bridge launch leaves the running service intact.</li>
+      <li>Signed Sparkle notes now publish with the namespace and length metadata Sparkle expects.</li>
+    </ul>
+    <p>If an older version is stuck before installation, install the signed 1.0.1 package directly to receive this updater fix.</p>
+  </section>
+  <section data-sparkle-version="0.26.6">
+    <h2>Interceptor 0.26.6</h2>
+    <time datetime="2026-09-12">September 12, 2026</time>
+    <ul>
+      <li>Asking any iPhone subcommand for --help now prints help instead of running it.</li>
+      <li>An unsigned or stale iPhone runner now fails the launch at once with the signing reason, and an early xcodebuild exit reports its exit code instead of a two-minute registration timeout.</li>
+      <li>A dropped iPhone runner connection now waits ten seconds for the runner to re-dial before the session is torn down.</li>
+      <li>The iOS skill and help now state that the XCTest authorization passcode sheet must be entered on the phone.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.26.4">
+    <h2>Interceptor 0.26.4</h2>
+    <time datetime="2026-09-11">September 11, 2026</time>
+    <ul>
+      <li>Sparkle now shows signed release notes for the target update and every published release since the installed version.</li>
+      <li>The Browser and Full package conclusions now offer Chrome Web Store and unpacked-extension install routes.</li>
+      <li>The extension popup now reports its desktop connection and links to Interceptor downloads when the desktop software is unavailable.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.26.2">
+    <h2>Interceptor 0.26.2</h2>
+    <time datetime="2026-09-11">September 11, 2026</time>
+    <ul>
+      <li>The iPhone runner stays resident, and runner refreshes preserve the selected project and signing identity.</li>
+      <li>Unsupported iOS login attempts now fail before the daemon starts.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.26.1">
+    <h2>Interceptor 0.26.1</h2>
+    <time datetime="2026-09-10">September 10, 2026</time>
+    <ul>
+      <li>One context environment variable now routes a browser lane, with cross-profile status and group commands.</li>
+      <li>Command help, output limits, error wording, and target identity checks were expanded.</li>
+      <li>Bridge runtime files are now isolated per macOS user.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.25.0">
+    <h2>Interceptor 0.25.0</h2>
+    <time datetime="2026-09-09">September 9, 2026</time>
+    <ul>
+      <li>Chrome Web Store and unpacked copies now share the approved extension identity.</li>
+      <li>Context diagnostics identify whether a connected copy came from the store or Developer Mode.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.24.13">
+    <h2>Interceptor 0.24.13</h2>
+    <time datetime="2026-09-09">September 9, 2026</time>
+    <ul><li>New managed tabs now prefer the window that already contains Interceptor groups.</li></ul>
+  </section>
+  <section data-sparkle-version="0.24.11">
+    <h2>Interceptor 0.24.11</h2>
+    <time datetime="2026-09-07">September 7, 2026</time>
+    <ul><li>Saved Chromium logins can be filled by host through the credential-safe browser path.</li></ul>
+  </section>
+  <section data-sparkle-version="0.24.10">
+    <h2>Interceptor 0.24.10</h2>
+    <time datetime="2026-09-07">September 7, 2026</time>
+    <ul><li>Browser actions report target results more accurately, task state is durable, and iPhone dial-back selection is clearer.</li></ul>
+  </section>
+  <section data-sparkle-version="0.24.2">
+    <h2>Interceptor 0.24.2</h2>
+    <time datetime="2026-09-03">September 3, 2026</time>
+    <ul>
+      <li>A keychain-backed secret vault delivers credentials by name to browser, macOS, sudo, administrator-prompt, and iPhone paths.</li>
+      <li>Browser navigation failures now exit nonzero, stale extension snapshots are named, and an idle-spin watchdog can recycle a stuck daemon.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.23.37">
+    <h2>Interceptor 0.23.37</h2>
+    <time datetime="2026-09-02">September 2, 2026</time>
+    <ul><li>Browser work is isolated in session-scoped tab groups with lifecycle-safe reuse and cleanup.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.33">
+    <h2>Interceptor 0.23.33</h2>
+    <time datetime="2026-08-27">August 27, 2026</time>
+    <ul><li>Sparkle update checks now report observed outcomes and retain active-session recovery details.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.32">
+    <h2>Interceptor 0.23.32</h2>
+    <time datetime="2026-08-27">August 27, 2026</time>
+    <ul><li>Release builds remove local source paths, and Windows runtime file access uses pinned system tools.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.30">
+    <h2>Interceptor 0.23.30</h2>
+    <time datetime="2026-08-23">August 23, 2026</time>
+    <ul><li>Partial socket writes are queued correctly on bridge, relay, and usbmux transports.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.29">
+    <h2>Interceptor 0.23.29</h2>
+    <time datetime="2026-08-23">August 23, 2026</time>
+    <ul><li>Daemon startup and cleanup now use port ownership to recover safely from stale runtime files.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.27">
+    <h2>Interceptor 0.23.27</h2>
+    <time datetime="2026-08-22">August 22, 2026</time>
+    <ul><li>The trusted-input flag contract was restored and checked across affected commands.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.25">
+    <h2>Interceptor 0.23.25</h2>
+    <time datetime="2026-08-21">August 21, 2026</time>
+    <ul><li>Native bridge lifecycle ownership and self-targeted Accessibility mutations were fixed.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.23">
+    <h2>Interceptor 0.23.23</h2>
+    <time datetime="2026-08-20">August 20, 2026</time>
+    <ul><li>CLI flag parsing, speech finalization, network-log limits, and export redaction were corrected.</li></ul>
+  </section>
+  <section data-sparkle-version="0.23.20">
+    <h2>Interceptor 0.23.20</h2>
+    <time datetime="2026-08-16">August 16, 2026</time>
+    <ul>
+      <li><code>interceptor websearch</code> now uses the browser's configured search provider in a managed tab.</li>
+      <li><code>interceptor find</code> searches the complete rendered page and returns typed text and element matches.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.23.19">
+    <h2>Interceptor 0.23.19</h2>
+    <time datetime="2026-08-16">August 16, 2026</time>
+    <ul>
+      <li><code>interceptor websearch</code> and complete-page <code>find</code> were introduced.</li>
+      <li>Windows release validation and runner pinning were corrected.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.23.18">
+    <h2>Interceptor 0.23.18</h2>
+    <time datetime="2026-08-11">August 11, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.17">
+    <h2>Interceptor 0.23.17</h2>
+    <time datetime="2026-08-11">August 11, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.16">
+    <h2>Interceptor 0.23.16</h2>
+    <time datetime="2026-08-10">August 10, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.15">
+    <h2>Interceptor 0.23.15</h2>
+    <time datetime="2026-08-10">August 10, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.14">
+    <h2>Interceptor 0.23.14</h2>
+    <time datetime="2026-08-09">August 9, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.13">
+    <h2>Interceptor 0.23.13</h2>
+    <time datetime="2026-08-09">August 9, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.12">
+    <h2>Interceptor 0.23.12</h2>
+    <time datetime="2026-08-09">August 9, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.10">
+    <h2>Interceptor 0.23.10</h2>
+    <time datetime="2026-08-08">August 8, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.6">
+    <h2>Interceptor 0.23.6</h2>
+    <time datetime="2026-08-08">August 8, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.23.3">
+    <h2>Interceptor 0.23.3</h2>
+    <time datetime="2026-08-07">August 7, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.38">
+    <h2>Interceptor 0.22.38</h2>
+    <time datetime="2026-08-07">August 7, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.37">
+    <h2>Interceptor 0.22.37</h2>
+    <time datetime="2026-07-26">July 26, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.35">
+    <h2>Interceptor 0.22.35</h2>
+    <time datetime="2026-07-21">July 21, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.32">
+    <h2>Interceptor 0.22.32</h2>
+    <time datetime="2026-07-20">July 20, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.21">
+    <h2>Interceptor 0.22.21</h2>
+    <time datetime="2026-07-20">July 20, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.19">
+    <h2>Interceptor 0.22.19</h2>
+    <time datetime="2026-07-19">July 19, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.10">
+    <h2>Interceptor 0.22.10</h2>
+    <time datetime="2026-07-17">July 17, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.8">
+    <h2>Interceptor 0.22.8</h2>
+    <time datetime="2026-07-17">July 17, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.6">
+    <h2>Interceptor 0.22.6</h2>
+    <time datetime="2026-07-12">July 12, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.5">
+    <h2>Interceptor 0.22.5</h2>
+    <time datetime="2026-07-05">July 5, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.2">
+    <h2>Interceptor 0.22.2</h2>
+    <time datetime="2026-07-03">July 3, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.22.1">
+    <h2>Interceptor 0.22.1</h2>
+    <time datetime="2026-07-03">July 3, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.21.3">
+    <h2>Interceptor 0.21.3</h2>
+    <time datetime="2026-07-02">July 2, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.20.12">
+    <h2>Interceptor 0.20.12</h2>
+    <time datetime="2026-07-02">July 2, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.19.1">
+    <h2>Interceptor 0.19.1</h2>
+    <time datetime="2026-06-21">June 21, 2026</time>
+    <ul>
+      <li><code>interceptor save</code> captures browser-produced bytes without a download dialog.</li>
+      <li>Runtime tab-group labels and colors can be changed without rebuilding the extension.</li>
+      <li>A dependency-free screenshot renderer and cross-platform OCR were added.</li>
+    </ul>
+  </section>
+  <section data-sparkle-version="0.17.6">
+    <h2>Interceptor 0.17.6</h2>
+    <time datetime="2026-06-18">June 18, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.17.3">
+    <h2>Interceptor 0.17.3</h2>
+    <time datetime="2026-06-17">June 17, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.16.9">
+    <h2>Interceptor 0.16.9</h2>
+    <time datetime="2026-06-07">June 7, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.16.6">
+    <h2>Interceptor 0.16.6</h2>
+    <time datetime="2026-06-04">June 4, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.16.2">
+    <h2>Interceptor 0.16.2</h2>
+    <time datetime="2026-05-31">May 31, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+  <section data-sparkle-version="0.16.1">
+    <h2>Interceptor 0.16.1</h2>
+    <time datetime="2026-05-28">May 28, 2026</time>
+    <p>No separate release notes were published for this historical release.</p>
+  </section>
+</main>
+</body>
+</html>

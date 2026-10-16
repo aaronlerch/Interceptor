@@ -3,7 +3,7 @@ import { HELP, shortHelp, fullHelp, helpForCommand } from "./help"
 import { detectSurfaces, SURFACE_UPGRADE_HINT } from "./lib/surfaces"
 import { runSkillsCommand, maybeEmitSkillsHint } from "./commands/skills"
 import { runManifestCommand } from "./manifest"
-import { parseTabFlag, parseContextFlag, resolveGroupScope, parseGroupColorFlag } from "./parse"
+import { parseTabFlag, resolveContextId, resolveGroupScope, parseGroupColorFlag } from "./parse"
 import { formatState, formatTabs, formatCookies, formatFind, formatResult } from "./format"
 import { sendCommand, sendCommandWs, setGlobalGroup, setGlobalFrame, type DaemonResult, type DaemonResponse, type Action } from "./transport"
 import { UPLOAD_CHUNK_B64_BYTES } from "../shared/platform"
@@ -27,7 +27,8 @@ import { parseMetaCommand } from "./commands/meta"
 import { parseEvalCommand } from "./commands/eval"
 import { parseSaveCommand } from "./commands/save"
 import { parseBrandCommand } from "./commands/brand"
-import { parseGroupCommand } from "./commands/group"
+import { parseGroupCommand, listExtensionContextIds, runGroupAcrossContexts } from "./commands/group"
+import { parseGroupPruneOptions, runGroupPrune } from "./commands/group-prune"
 import { parseBatchCommand } from "./commands/batch"
 import { parseMonitorCommand } from "./commands/monitor"
 import { parseSceneCommand } from "./commands/scene"
@@ -35,6 +36,8 @@ import { parseSseCommand } from "./commands/sse"
 import { runCompoundCommand, webSearchQuery, webSearchTimeout } from "./commands/compound"
 import { runOverride } from "./commands/override"
 import { runMacosCommand } from "./commands/macos"
+import { runDesktopCommand } from "./commands/desktop"
+import { desktopProviderBinary } from "../shared/desktop-provider"
 import { runUpgradeCommand } from "./commands/upgrade"
 import { runInitCommand } from "./commands/init"
 import { runSurfaceCommand } from "./commands/surface"
@@ -80,6 +83,9 @@ const SSE_CMDS = new Set(["sse"])
 const COMPOUND_CMDS = new Set(["open", "read", "act", "inspect", "websearch", "search"])
 const OVERRIDE_CMDS = new Set(["override"])
 const MACOS_CMDS = new Set(["macos"])
+// FORK-DELTA: `desktop` is the neutral spelling of `macos` on this host and
+// reaches the same bridge, so it rides the same surface gate below.
+const DESKTOP_CMDS = new Set(["desktop"])
 const UPDATE_CMDS = new Set(["update"])
 const UPGRADE_CMDS = new Set(["upgrade"])
 const SURFACE_CMDS = new Set(["surface"])
@@ -104,7 +110,7 @@ const ALL_KNOWN_CMDS = new Set<string>([
   ...STATE_CMDS, ...ACTION_CMDS, ...NAV_CMDS, ...TAB_CMDS, ...NET_CMDS,
   ...SS_CMDS, ...DATA_CMDS, ...META_CMDS, ...EVAL_CMDS,
   ...SAVE_CMDS, ...BRAND_CMDS, ...GROUP_CMDS, ...BATCH_CMDS, ...MONITOR_CMDS, ...SCENE_CMDS, ...SSE_CMDS,
-  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS,
+  ...COMPOUND_CMDS, ...OVERRIDE_CMDS, ...MACOS_CMDS, ...DESKTOP_CMDS,
   ...UPDATE_CMDS, ...UPGRADE_CMDS, ...SURFACE_CMDS, ...INIT_CMDS, ...RESEARCH_CMDS, ...EXTENSIONS_CMDS,
   ...SKILLS_CMDS, ...MANIFEST_CMDS, ...DIAGNOSE_CMDS, ...MCP_CMDS, ...DAEMON_CMDS,
   ...POWER_CMDS, ...DELEGATE_CMDS,
@@ -137,11 +143,11 @@ async function main() {
   // error. Screenshot still honors --no-ws as an escape hatch.
   // issue #244: a secret-bearing action resolves inside the daemon's IPC handler,
   // so it never takes the WebSocket lane.
-  const carriesSecret = args.includes("--secret") || (args[0] === "macos" && args[1] === "secret")
+  const carriesSecret = args.includes("--secret") || (["macos", "desktop"].includes(args[0]) && args[1] === "secret")
   const useWs = !carriesSecret && (globalArgs.includes("--ws") || isSaveCmd || (isScreenshotCmd && !globalArgs.includes("--no-ws")))
   const anyTab = globalArgs.includes("--any-tab")
   const globalTabId = parseTabFlag(globalArgs)
-  const globalContextId = parseContextFlag(globalArgs)
+  const globalContextId = resolveContextId(globalArgs)
   // Explicit or automatic session scope is injected into every outgoing
   // action at the transport choke point, covering simple, compound, and loop paths.
   const groupScope = resolveGroupScope(args)
@@ -150,7 +156,7 @@ async function main() {
   // Build filtered args (strip global flags). Native surfaces retain nested
   // command-local JSON payload flags such as `macos translate batch --json`.
   let filtered = buildFilteredArgs(args)
-  if (filtered[0] !== "macos" && filtered[0] !== "ios") setGlobalFrame(parseFrameFlag(globalArgs))
+  if (!["macos", "desktop", "ios"].includes(filtered[0])) setGlobalFrame(parseFrameFlag(globalArgs))
 
   // progressive disclosure. Bare invocation and `help` print the
   // concise tier-0 card; `help <cmd>` prints one command's contract; `help
@@ -158,11 +164,15 @@ async function main() {
   if (filtered.length === 0 || filtered[0] === "help") {
     const helpArg = filtered[1]
     if (helpArg && !helpArg.startsWith("-")) {
-      const sub = helpForCommand(helpArg)
+      // `help macos tree` narrows to one sub-verb; `help <verb>` alone keeps
+      // the whole verb's block.
+      const subArg = filtered[2] && !filtered[2].startsWith("-") ? filtered[2] : undefined
+      const sub = helpForCommand(helpArg, subArg)
       if (sub) {
         console.log(sub)
       } else {
-        console.error(`error: no help for '${helpArg}'. Run 'interceptor help --all' for the full reference.`)
+        const topic = subArg ? `${helpArg} ${subArg}` : helpArg
+        console.error(`error: no help for '${topic}'. Run 'interceptor help' for the command map or 'interceptor help --all' for the full reference.`)
         process.exit(1)
       }
     } else if (filtered.includes("--all")) {
@@ -249,7 +259,10 @@ async function main() {
   // browser-only install gets the upgrade hint instead of a bridge error.
   // On win32 `update` skips the gate — its dispatch branch prints the
   // Windows installer guidance instead of the macOS-only hint.
-  if (MACOS_CMDS.has(cmd) || (UPDATE_CMDS.has(cmd) && process.platform !== "win32")) {
+  // FORK-DELTA: `desktop` and `group prune` drive the same bridge (group prune
+  // clicks through the browser's own UI via accessibility), so both are gated.
+  const nativeGroupVerb = cmd === "group" && filtered[1] === "prune"
+  if (MACOS_CMDS.has(cmd) || DESKTOP_CMDS.has(cmd) || nativeGroupVerb || (UPDATE_CMDS.has(cmd) && process.platform !== "win32")) {
     const surfaces = detectSurfaces(args)
     if (!surfaces.macos) {
       console.error(`error: ${SURFACE_UPGRADE_HINT}`)
@@ -262,9 +275,9 @@ async function main() {
   if (cmd !== "skills" && cmd !== "manifest") maybeEmitSkillsHint(args)
 
   let needsDaemon = !NO_DAEMON.has(cmd)
-  // win32 `update` prints static installer guidance — no daemon involved
-  // (on macOS it routes through the daemon to the bridge's Sparkle updater).
-  if (UPDATE_CMDS.has(cmd) && process.platform === "win32") {
+  // Windows/Linux desktop verbs go straight to the native provider; secret and cdp are served by the daemon.
+  if (cmd === "desktop" && process.platform !== "darwin" && !["secret", "cdp"].includes(filtered[1] ?? "") && !filtered.includes("--secret")) needsDaemon = false
+  if (UPDATE_CMDS.has(cmd) && process.platform !== "darwin") {
     needsDaemon = false
   }
   if (cmd === "monitor" && filtered[1] && MONITOR_LOCAL_SUBCOMMANDS.has(filtered[1])) {
@@ -282,16 +295,10 @@ async function main() {
   let action: { type: string; [key: string]: unknown } | null
 
   if (UPDATE_CMDS.has(cmd)) {
-    // `interceptor update` is the front door for updating Interceptor itself
-    // sugar for the retained-but-hidden
-    // `interceptor macos update check` — a user-initiated Sparkle check via the
-    // bridge that reports Sparkle's selected version, no-update result, or
-    // error. `interceptor update status` passes through to the lifecycle state.
-    //
-    // Windows has no Sparkle: updates ship as a signed installer (see
-    // docs/windows-install.md — run a newer architecture-matched Setup; the
-    // surface gate's macOS-only upgrade hint would be nonsense here).
-    if (process.platform === "win32") {
+    const args=filtered.length>1?filtered.slice(1):["check"]
+    // A Windows browser-only install ships no native provider (only Full has interceptor-desktop.exe),
+    // so it gets the signed-installer guidance instead of a provider error.
+    if (process.platform === "win32" && !desktopProviderBinary()) {
       const msg = {
         message: "Windows updates ship as a signed installer — download the latest Interceptor-Browser-<version>-windows-<arch>.exe and run Setup (upgrades preserve the install directory; downgrades are refused).",
         releases: "https://github.com/Hacker-Valley-Media/Interceptor/releases",
@@ -299,13 +306,18 @@ async function main() {
       console.log(jsonMode ? JSON.stringify({ success: true, data: msg }, null, 2) : `${msg.message}\n${msg.releases}`)
       return
     }
-    const sub = filtered[1] && !filtered[1].startsWith("-") ? filtered[1] : "check"
-    await runMacosCommand(["macos", "update", sub], { jsonMode, useWs, globalTabId, contextId: globalContextId })
+    if(process.platform==='darwin')await runMacosCommand(["macos","update",...args],{jsonMode,useWs,globalTabId,contextId:globalContextId})
+    else await runDesktopCommand(["desktop","update",...args],{jsonMode,useWs,globalTabId,contextId:globalContextId})
     return
   }
 
   if (MACOS_CMDS.has(cmd)) {
     await runMacosCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
+    return
+  }
+
+  if (DESKTOP_CMDS.has(cmd)) {
+    await runDesktopCommand(filtered, { jsonMode, useWs, globalTabId, contextId: globalContextId })
     return
   }
 
@@ -453,12 +465,21 @@ async function main() {
   else if (NAV_CMDS.has(cmd))    action = parseNavigationCommand(filtered)
   else if (TAB_CMDS.has(cmd))    action = await parseTabsCommand(filtered)
   else if (NET_CMDS.has(cmd))    action = parseNetworkCommand(filtered)
-  else if (SS_CMDS.has(cmd))     action = parseScreenshotCommand(filtered)
+  else if (SS_CMDS.has(cmd))     action = parseScreenshotCommand(filtered, normalized.positionalCount)
   else if (DATA_CMDS.has(cmd))   action = parseDataCommand(filtered)
   else if (META_CMDS.has(cmd))   action = await parseMetaCommand(filtered, jsonMode, globalContextId)
   else if (EVAL_CMDS.has(cmd))   action = parseEvalCommand(filtered, normalized.positionalCount)
   else if (SAVE_CMDS.has(cmd))   action = parseSaveCommand(filtered)
   else if (BRAND_CMDS.has(cmd))  action = parseBrandCommand(filtered)
+  else if (GROUP_CMDS.has(cmd) && filtered[1] === "prune") {
+    // Closed saved groups are out of the extension's reach; prune drives the
+    // browser's own UI through the native desktop provider (cli/commands/group-prune.ts).
+    const pruneOpts = parseGroupPruneOptions(filtered)
+    if ("error" in pruneOpts) { console.error(`error: ${pruneOpts.error}`); process.exit(1) }
+    const result = await runGroupPrune(pruneOpts, (a, tabId, ctx) => useWs ? sendCommandWs(a, tabId, ctx) : sendCommand(a, tabId, ctx))
+    console.log(formatResult(result, jsonMode))
+    process.exit(result.success ? 0 : 1)
+  }
   else if (GROUP_CMDS.has(cmd))  action = parseGroupCommand(filtered)
   else if (BATCH_CMDS.has(cmd))  action = parseBatchCommand(filtered)
   else if (POWER_CMDS.has(cmd))   action = parsePowerCommand(filtered)
@@ -499,6 +520,7 @@ async function main() {
       if (action.ref !== undefined) assemble.ref = action.ref
       if (action.index !== undefined) assemble.index = action.index
       if (action.dropzone) assemble.dropzone = true
+      if (action.picker) assemble.picker = true
       const finalResult = unwrapResult(await send(assemble))
       console.log(formatResult(finalResult, jsonMode))
     } catch (err) {
@@ -513,29 +535,36 @@ async function main() {
     const timeout = (action.timeout as number) || 60000
     const startTime = Date.now()
     let offset = 0
-    let lastActive = true
+    let stream: number | undefined
+    let waitingNoted = false
 
     while (Date.now() - startTime < timeout) {
       try {
-        const chunkAction = { type: "sse_chunk", filter, since: offset }
+        const chunkAction = { type: "sse_chunk", filter, since: offset, after: startTime, stream }
         const resp = useWs
           ? await sendCommandWs(chunkAction, globalTabId, globalContextId)
           : await sendCommand(chunkAction, globalTabId, globalContextId)
         const result = unwrapResult(resp)
         if (result?.success && result.data) {
-          const d = result.data as { active: boolean; text?: string; offset?: number }
+          const d = result.data as { active: boolean; text?: string; offset?: number; stream?: number }
+          if (stream === undefined && typeof d.stream === "number") stream = d.stream
           if (d.text) {
             process.stdout.write(d.text)
             offset = d.offset || offset
           }
-          if (!d.active && lastActive) {
-            // stream ended
-            break
+          // The tailed stream ended; its final chunk was printed above.
+          if (!d.active && stream !== undefined) process.exit(0)
+          if (stream === undefined && !waitingNoted) {
+            waitingNoted = true
+            console.error(`waiting for an SSE stream${filter ? ` matching '${filter}'` : ""} (up to ${Math.round(timeout / 1000)}s)…`)
           }
-          lastActive = d.active
         }
       } catch {}
       await new Promise(r => setTimeout(r, 200))
+    }
+    if (stream === undefined) {
+      console.error(`error: no SSE stream${filter ? ` matching '${filter}'` : ""} started within ${Math.round(timeout / 1000)}s`)
+      process.exit(1)
     }
     process.exit(0)
   }
@@ -563,6 +592,20 @@ async function main() {
   // Apply global modifiers
   if (anyTab) action.anyTab = true
   if (filtered.includes("--changes")) action.changes = true
+
+  // Groups are per browser profile: with several extension contexts connected
+  // and no context resolved, list/close across all of them instead of failing
+  // with "multiple extensions connected" (cli/commands/group.ts).
+  if (GROUP_CMDS.has(cmd) && !globalContextId) {
+    const sendFn = (a: Action, tabId?: number, ctx?: string) => useWs ? sendCommandWs(a, tabId, ctx) : sendCommand(a, tabId, ctx)
+    const contextIds = await listExtensionContextIds(sendFn)
+    if (contextIds.length > 1) {
+      const result = await runGroupAcrossContexts(action, contextIds, sendFn)
+      console.log(formatResult(result, jsonMode))
+      if (!result.success) process.exitCode = 1
+      return
+    }
+  }
 
   try {
     const response = useWs

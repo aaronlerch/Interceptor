@@ -16,7 +16,7 @@ async function injectContentScript(
   }
 }
 
-type ContentScriptResult = { success: boolean; error?: string; data?: unknown }
+type ContentScriptResult = { success: boolean; error?: string; data?: unknown; warning?: string }
 
 const NAVIGATION_CAPABLE_ACTIONS = new Set(["click", "click_at", "dblclick", "find_and_click", "click_selector"])
 
@@ -135,22 +135,11 @@ export async function sendToContentScript(
   // sendToContentScriptOnce; this guards the rest (worker death with the
   // reply in flight, same-URL reloads). Delivery failures ("Receiving end
   // does not exist") mean no receiver existed — those stay on the retry path
-  // below for every action type.
-  if (INPUT_ACTIONS.has(action.type) && isResponseLoss(first.error)) {
-    let navigating = false
-    try { navigating = (await chrome.tabs.get(tabId)).status === "loading" } catch {}
-    if (navigating) {
-      return {
-        success: true,
-        data: `${action.type} delivered; the page began navigating before the reply arrived`,
-        warning: "reply channel closed during navigation — re-read page state to confirm the outcome",
-      }
-    }
-    return {
-      success: false,
-      error: `${action.type} was delivered but the reply channel closed (${first.error}) — not auto-retried to avoid firing it twice; re-read page state to confirm the outcome, then retry deliberately`,
-    }
-  }
+  // below for every action type. The guard runs after EVERY attempt: it used
+  // to run only here, so "no receiver, then reply lost on the re-send" went on
+  // to reinject and send a third time (retry probe, review 2026-09-10).
+  const firstGuard = await inputReplayGuard(tabId, action, first)
+  if (firstGuard) return firstGuard
 
   // Before reinjecting via executeScript (which re-evaluates content.js and
   // blows away the in-page refRegistry the consumer has been using), give the
@@ -161,6 +150,10 @@ export async function sendToContentScript(
   await new Promise(resolve => setTimeout(resolve, 250))
   const retryWithoutInject = await sendToContentScriptOnce(tabId, action, frameId)
   if (retryWithoutInject.success) return retryWithoutInject
+  const secondGuard = await inputReplayGuard(tabId, action, retryWithoutInject)
+  if (secondGuard) return secondGuard
+  // Reinjection follows only a recoverable delivery failure.
+  if (!shouldRetryContentScript(retryWithoutInject.error)) return retryWithoutInject
 
   const injected = await injectContentScript(tabId, frameId)
   if (!injected.success) {
@@ -178,10 +171,38 @@ export async function sendToContentScript(
 
   const retried = await sendToContentScriptOnce(tabId, action, frameId)
   if (retried.success) return retried
+  const thirdGuard = await inputReplayGuard(tabId, action, retried)
+  if (thirdGuard) return thirdGuard
 
   return {
     success: false,
     error: `content script re-injected on tab ${tabId} but action still failed: ${retried.error || "unknown error"}`,
+  }
+}
+
+/**
+ * The delivered-but-reply-lost decision for one attempt. Returns the result to
+ * hand back (never a retry) when the action is input-like and the channel died
+ * after delivery; null when the caller may keep going.
+ */
+async function inputReplayGuard(
+  tabId: number,
+  action: { type: string; [key: string]: unknown },
+  attempt: ContentScriptResult
+): Promise<ContentScriptResult | null> {
+  if (attempt.success || !INPUT_ACTIONS.has(action.type) || !isResponseLoss(attempt.error)) return null
+  let navigating = false
+  try { navigating = (await chrome.tabs.get(tabId)).status === "loading" } catch {}
+  if (navigating) {
+    return {
+      success: true,
+      data: `${action.type} delivered; the page began navigating before the reply arrived`,
+      warning: "reply channel closed during navigation — re-read page state to confirm the outcome",
+    }
+  }
+  return {
+    success: false,
+    error: `${action.type} was delivered but the reply channel closed (${attempt.error}) — not auto-retried to avoid firing it twice; re-read page state to confirm the outcome, then retry deliberately`,
   }
 }
 
@@ -219,6 +240,40 @@ export async function sendNetDirect(
   }
 }
 
+/**
+ * sendNetDirect, plus every child frame: each frame keeps its own net buffer and
+ * MAIN-world wrapper. Array replies merge in time order; for writes (clear,
+ * overrides) the top frame's reply stands once every frame has been told.
+ */
+export async function sendNetAllFrames(
+  tabId: number,
+  msg: { type: string; [key: string]: unknown }
+): Promise<unknown> {
+  const top = await sendNetDirect(tabId, msg) as { success: boolean; data?: unknown; error?: string }
+  const nav = (chrome as unknown as { webNavigation?: typeof chrome.webNavigation }).webNavigation
+  if (!top.success || typeof nav?.getAllFrames !== "function") return top
+  let frames: { frameId: number }[] = []
+  try { frames = (await nav.getAllFrames({ tabId })) ?? [] } catch {}
+  const children = frames.filter((f) => f.frameId !== 0)
+  if (!children.length) return top
+  const replies = await Promise.all(children.map((f) => new Promise<{ success?: boolean; data?: unknown } | undefined>((resolve) => {
+    // A frame without a net buffer (about:blank, restricted origin) answers with lastError; one that never answers is capped.
+    const timer = setTimeout(() => resolve(undefined), 1500)
+    chrome.tabs.sendMessage(tabId, msg, { frameId: f.frameId } as chrome.tabs.MessageSendOptions, (reply) => {
+      void chrome.runtime.lastError
+      clearTimeout(timer)
+      resolve(reply)
+    })
+  })))
+  if (!Array.isArray(top.data)) return top
+  const at = (e: unknown) => {
+    const r = e as { timestamp?: number; startTime?: number }
+    return r?.timestamp ?? r?.startTime ?? 0
+  }
+  const merged = [...top.data, ...replies.flatMap((r) => r?.success && Array.isArray(r.data) ? r.data : [])]
+  return { ...top, data: merged.sort((a, b) => at(a) - at(b)) }
+}
+
 export function waitForTabLoad(
   tabId: number,
   timeoutMs = 15000
@@ -236,6 +291,7 @@ export function waitForTabLoad(
     function listener(updatedTabId: number, changeInfo: chrome.tabs.OnUpdatedInfo) {
       if (updatedTabId === tabId && changeInfo.status === "complete") {
         clearTimeout(hardTimer)
+        clearTimeout(stage1Timer)
         chrome.tabs.onUpdated.removeListener(listener)
         const remaining = Math.max(timeoutMs - (Date.now() - start), 2000)
         probeContentReady(tabId, remaining).then((ready) => {
@@ -244,9 +300,9 @@ export function waitForTabLoad(
       }
     }
 
-    chrome.tabs.onUpdated.addListener(listener)
-
-    setTimeout(async () => {
+    // Cleared on the listener path: a stray stage-1 probe would otherwise fire
+    // seconds later against whatever tab state exists by then.
+    const stage1Timer = setTimeout(async () => {
       const tab = await chrome.tabs.get(tabId).catch(() => null)
       if (tab && tab.status === "complete") {
         chrome.tabs.onUpdated.removeListener(listener)
@@ -256,6 +312,8 @@ export function waitForTabLoad(
         resolve({ ready, elapsed: Date.now() - start })
       }
     }, stage1Timeout)
+
+    chrome.tabs.onUpdated.addListener(listener)
   })
 }
 

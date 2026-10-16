@@ -45,3 +45,21 @@ describe("wsUpgradeAllowed", () => {
     expect(wsUpgradeAllowed("::1", "https://evil.example/chrome-extension://x")).toBe(false)
   })
 })
+
+// FORK-DELTA: Host check, so a DNS-rebound page (same-origin GET, no Origin
+// header) cannot read /health or reach the upgrade path.
+describe("wsUpgradeAllowed — Host header", () => {
+  test("loopback Host on the daemon port is allowed", () => {
+    for (const host of ["127.0.0.1:19222", "localhost:19222", "[::1]:19222", "LOCALHOST:19222"]) {
+      expect(wsUpgradeAllowed("127.0.0.1", "", host, 19222)).toBe(true)
+    }
+  })
+  test("a rebound or foreign Host is refused even from loopback with no Origin", () => {
+    for (const host of ["evil.example:19222", "127.0.0.1:19223", "", "127.0.0.1"]) {
+      expect(wsUpgradeAllowed("127.0.0.1", "", host, 19222)).toBe(false)
+    }
+  })
+  test("omitting the port keeps the original two-argument behavior", () => {
+    expect(wsUpgradeAllowed("127.0.0.1", "")).toBe(true)
+  })
+})

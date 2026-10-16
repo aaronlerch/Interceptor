@@ -1,10 +1,13 @@
 import {
   addTabToInterceptorGroup, ensureInterceptorGroup, interceptorGroupId,
   GROUP_LABEL_RE, ensureNamedGroup, addTabToNamedGroup, labelForGroupId,
-  namedGroups, hydrateNamedGroups, groupTitleFor, hasTabGroupApi, managedGroupWindows
+  namedGroups, hydrateNamedGroups, hasTabGroupApi, managedGroupWindows, readoptNamedGroups,
+  removeTabsAndEmptiedGroups
 } from "../tab-group"
 import { resolveTabLifecycle, policyMayDecideReuse } from "../tab-lifecycle"
 import { waitForTabLoad } from "../content-bridge"
+import { rememberPriorActive } from "../switch-back"
+import { setKeepalive } from "../tab-keepalive"
 
 type ActionResult = { success: boolean; error?: string; data?: unknown; tabId?: number }
 
@@ -204,7 +207,8 @@ export async function handleTabActions(
 
     case "tab_close": {
       const closedId = (action.tabId as number) || tabId
-      await chrome.tabs.remove(closedId)
+      // A managed group's last tab takes the group with it (issue #301).
+      await removeTabsAndEmptiedGroups([closedId])
       // If the closed tab was the auto-target, clear it so the next call
       // re-resolves via chrome.tabs.query rather than targeting a dead tab.
       // Checks the caller's per-group key too.
@@ -222,8 +226,17 @@ export async function handleTabActions(
       // stored the switch target under the caller's (per-group or global) key;
       // a handler-side global write would clobber the ungrouped key on
       // grouped switches.
-      await chrome.tabs.update(action.tabId as number, { active: true })
+      const switchId = action.tabId as number
+      // Remember what the window was showing so the caller can put it back
+      // (`tab switch <prior>` passes the group gate once).
+      await rememberPriorActive(switchId, typeof action.group === "string" ? action.group : undefined)
+      await chrome.tabs.update(switchId, { active: true })
       return { success: true }
+    }
+
+    case "tab_keepalive": {
+      // The dispatcher already resolved and gated the explicit target.
+      return setKeepalive(tabId, action.enabled !== false)
     }
 
     case "tab_list": {
@@ -250,17 +263,7 @@ export async function handleTabActions(
       await ensureInterceptorGroup()
       await hydrateNamedGroups()
       const live = await chrome.tabGroups.query({}).catch(() => []) // windowless profile → no groups (issue #162)
-      // Re-adopt named groups the registry lost (e.g. browser restart restored
-      // the window): exact match on the brand-composed `<brand>-<label>` title.
-      // ponytail: current brand prefix only; a pre-rebrand title is re-adopted on the next brand change
-      const prefix = `${groupTitleFor("")}`
-      for (const g of live) {
-        if (typeof g.title !== "string" || !g.title.startsWith(prefix)) continue
-        const label = g.title.slice(prefix.length)
-        if (GROUP_LABEL_RE.test(label) && labelForGroupId(g.id) === null && g.id !== interceptorGroupId) {
-          await ensureNamedGroup(label)
-        }
-      }
+      await readoptNamedGroups(live)
       const data = await Promise.all(live.map(async g => {
         const groupTabs = await chrome.tabs.query({ groupId: g.id })
         return {
@@ -287,11 +290,12 @@ export async function handleTabActions(
       }
       const groupTabs = await chrome.tabs.query({ groupId })
       const ids = groupTabs.map(t => t.id).filter((id): id is number => typeof id === "number")
-      // Atomic: ONE tabs.remove over exactly this group's tab ids — the group
-      // object auto-deletes at zero tabs, and the tabGroups.onRemoved listener
+      // Atomic: ONE tabs.remove over exactly this group's tab ids. The tabs are
+      // ungrouped first so Chrome deletes the group instead of keeping it as a
+      // closed saved group (issue #301), and the tabGroups.onRemoved listener
       // purges the registry entry + per-group auto-target. Nothing outside this
       // id list is touched (issue #124's "3a" isolation guarantee).
-      if (ids.length > 0) await chrome.tabs.remove(ids)
+      if (ids.length > 0) await removeTabsAndEmptiedGroups(ids)
       return { success: true, data: { label, groupId, closedTabs: ids.length } }
     }
 

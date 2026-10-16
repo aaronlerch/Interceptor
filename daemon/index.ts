@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import { dirname } from "node:path"
 import { validateBinarySinkPath, binarySinkIntegrityError } from "./binary-sink"
 import { osClick, osKey, osType, osMove, generateBezierPath, translateCoords } from "./os-input-loader"
+import { BACKGROUND_OS_ACTIONS, deliverInBackground } from "./os-background"
 import { IS_WIN, SOCKET_PATH, IPC_PORT, PID_PATH, LOCK_PATH, LOG_PATH, EVENTS_PATH, WS_PORT, EVENTS_MAX_SIZE, MAX_UPLOAD_FRAME_BYTES, transportLabel } from "../shared/platform"
 import {
   MONITOR_EVENT_NAMES,
@@ -19,15 +20,20 @@ import {
 } from "../shared/monitor-artifacts"
 import { chooseOutboundTransport, isRelayPing, relaySlotAfterClose, validateContextRouting } from "./outbound-routing"
 import { claimContextId, describeContexts, recordExtensionIdentity, type ContextSocket } from "./context-registration"
-import { extensionIdFromOrigin, installTypeLabel } from "../shared/extension-identity"
+import { extensionIdFromOrigin, installTypeLabel, isAllowedWsOrigin } from "../shared/extension-identity"
+import { bridgePidPath, bridgeSocketPath } from "../shared/bridge-paths"
 import { failPendingBridgeRequests, formatBridgeUnavailableError, getBridgeRecoveryActions, getBridgeRecoveryLayout } from "./bridge-recovery"
+import { consoleUser, currentUserName, probeGuiSession, type BridgeLaunchOpts } from "../shared/gui-session"
 import { socketWriteAll, drainSocketQueue, releaseSocketQueue } from "./socket-write"
+import { callDesktopProvider } from "./desktop-provider"
+import {desktopContainerActionError,desktopContainerDeadline} from "../shared/desktop-container-validation"
+import { macosAction, isDesktopActionType } from "../shared/desktop-contract"
 import { captureSpinSample, spinWatchdogStep, SPIN_EXIT_TICKS, type SpinWatchdogState } from "./spin-watchdog"
 import { cleanupOwnedRuntimeFiles, clearDaemonRuntimeFiles, constantTimeTokenEquals, decideDaemonStartupRole, decideSingletonGate, defaultLifecycleDeps, generateShutdownToken, parseDaemonPidFile, readLockFile, readPidState, spawnDetachedStandaloneDaemon, writeLockFile } from "./lifecycle"
 import { DAEMON_HEALTH_SERVICE, LEGACY_HEALTH_BODY, probeDaemonHealth } from "../shared/daemon-health"
 import { assertNoInstallMaintenance } from "../shared/install-maintenance"
 import { VERSION } from "../cli/version"
-import { actionLogSummary, inboundLogSummary, outboundLogSummary } from "./redact"
+import { actionLogSummary, inboundLogSummary, outboundLogSummary, isSecretBearing } from "./redact"
 import { wsUpgradeAllowed } from "./ws-guard"
 import { macosEnabledFromEnv, readMacosAllowlist, macosDomainAllowed, macosDomainOf } from "../shared/surface-mode"
 import * as op from "./op"
@@ -53,8 +59,12 @@ if (process.argv.includes("--ios-tunnel-helper")) {
 }
 
 // ── Native Bridge (interceptor-bridge) connection ────────────────────────────────
-const BRIDGE_SOCKET_PATH = "/tmp/interceptor-bridge.sock"
-const BRIDGE_PID_PATH = "/tmp/interceptor-bridge.pid"
+// Per-user runtime files (shared/bridge-paths.ts mirrors the bridge's
+// Platform.runtimeDir). The daemon and bridge install together, so the daemon
+// looks only at the current layout; user-facing detection (status, diagnose,
+// preflight) is what falls back to the legacy /tmp paths.
+const BRIDGE_SOCKET_PATH = bridgeSocketPath()
+const BRIDGE_PID_PATH = bridgePidPath()
 const BRIDGE_RECONNECT_MS = 2000
 const BRIDGE_CONNECT_TIMEOUT_MS = 5000
 const BRIDGE_RECOVERY_ACTION_TIMEOUT_MS = 1500
@@ -108,6 +118,22 @@ function isLaunchAgentBootstrapped(): boolean {
   }
 }
 
+// What the bridge hint and the recovery ladder need to know about this
+// account's launchd state. An ssh session or a service account has no
+// gui/<uid> domain, so no bootstrap can help; the honest answer names the
+// account and who owns the screen (shared/gui-session.ts).
+function bridgeLaunchState(): BridgeLaunchOpts {
+  const uid = typeof process.getuid === "function" ? process.getuid() : null
+  const guiSession = uid === null ? "unknown" : probeGuiSession(uid)
+  return {
+    launchAgentLoaded: isLaunchAgentBootstrapped(),
+    guiSession,
+    consoleUser: guiSession === "absent" ? consoleUser() : null,
+    user: currentUserName(),
+    uid,
+  }
+}
+
 async function waitForBridgeSocket(timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -122,7 +148,12 @@ async function spawnBridge(): Promise<boolean> {
   bridgeSpawnAttempted = true
   try {
     const layout = readBridgeRecoveryLayout()
-    const actions = getBridgeRecoveryActions(layout, existsSync, { launchAgentLoaded: isLaunchAgentBootstrapped() })
+    const state = bridgeLaunchState()
+    if (state.guiSession === "absent") {
+      log(`bridge not started: ${state.user ?? "this account"} (uid ${state.uid}) has no GUI login on this Mac${state.consoleUser ? ` (the screen belongs to ${state.consoleUser})` : ""}`)
+      return false
+    }
+    const actions = getBridgeRecoveryActions(layout, existsSync, state)
     if (actions.length === 0) {
       log("bridge binary not found — cannot auto-spawn")
       return false
@@ -256,10 +287,10 @@ function macosSurfaceBlocked(actionType: string): string | null {
 }
 
 function sendToBridge(id: string, action: Record<string, unknown>, cliSocket: { write: (data: Buffer | string) => number }, actionType: string): void {
-  if (actionType.startsWith("macos_")) {
-    const blocked = macosSurfaceBlocked(actionType)
-    if (blocked) { socketWriteFramed(cliSocket, JSON.stringify({ id, result: { success: false, error: blocked } })); return }
-  }
+  // Every type routed here reaches the bridge — macos_* and upstream's neutral
+  // desktop_* alike — so every type is checked (macosDomainOf maps both).
+  const blocked = macosSurfaceBlocked(actionType)
+  if (blocked) { socketWriteFramed(cliSocket, JSON.stringify({ id, result: { success: false, error: blocked } })); return }
   const payload = JSON.stringify({ id, action })
   const encoded = Buffer.from(payload, "utf-8")
   const header = Buffer.alloc(4)
@@ -278,7 +309,7 @@ function sendToBridge(id: string, action: Record<string, unknown>, cliSocket: { 
     bridgePending.delete(id)
     log(`bridge request timeout: ${id}`)
     socketWriteFramed(cliSocket, JSON.stringify({ id, result: { success: false, error: "bridge timeout" } }))
-  }, REQUEST_TIMEOUT_MS)
+  }, actionType === 'desktop_container_run' && !desktopContainerActionError(action) ? Math.max(REQUEST_TIMEOUT_MS,desktopContainerDeadline(action)) : REQUEST_TIMEOUT_MS)
   bridgePending.set(id, {
     resolve: (response: string) => {
       clearTimeout(timer)
@@ -341,6 +372,10 @@ function forwardDelegateToBridge(
 
 // Route a macos_ action to the bridge, connecting first when needed.
 function routeToBridge(id: string, action: Record<string, unknown>, socket: { write: (data: Buffer | string) => number }, actionType: string): void {
+  if (process.platform !== "darwin") {
+    callDesktopProvider(action).then(result => socketWriteFramed(socket, JSON.stringify({ id, result })))
+    return
+  }
   if (bridgeSocket) {
     sendToBridge(id, action, socket, actionType)
     return
@@ -351,7 +386,7 @@ function routeToBridge(id: string, action: Record<string, unknown>, socket: { wr
     } else {
       socketWriteFramed(socket, JSON.stringify({
         id,
-        result: { success: false, error: formatBridgeUnavailableError(readBridgeRecoveryLayout(), { launchAgentLoaded: isLaunchAgentBootstrapped() }) },
+        result: { success: false, error: formatBridgeUnavailableError(readBridgeRecoveryLayout(), bridgeLaunchState()) },
       }))
     }
   })
@@ -368,6 +403,12 @@ type CliRequest = { id?: string; action?: unknown; tabId?: number; contextId?: s
 
 /** Ask the bridge and await its result as a promise (same framing as sendToBridge). */
 function bridgeCall(action: Record<string, unknown>, timeoutMs = REQUEST_TIMEOUT_MS): Promise<DaemonResult> {
+  if (process.platform !== "darwin") return callDesktopProvider(action, timeoutMs).then(result => ({ ...result }))
+  // FORK-DELTA: the promise-form bridge path is reached by upstream's WS
+  // desktop_*/macos_* branch and by background trusted input, neither of which
+  // passes sendToBridge — so the browser-only switch and allowlist live here too.
+  const blocked = macosSurfaceBlocked(String(action.type ?? "unknown"))
+  if (blocked) return Promise.resolve({ success: false, code: "surface_disabled", error: blocked })
   return new Promise((resolve) => {
     const id = crypto.randomUUID()
     const actionType = String(action.type ?? "unknown")
@@ -395,7 +436,7 @@ function bridgeCall(action: Record<string, unknown>, timeoutMs = REQUEST_TIMEOUT
     if (bridgeSocket) dispatch()
     else connectBridge().then((ok) => {
       if (ok && bridgeSocket) dispatch()
-      else fail(formatBridgeUnavailableError(readBridgeRecoveryLayout(), { launchAgentLoaded: isLaunchAgentBootstrapped() }))
+      else fail(formatBridgeUnavailableError(readBridgeRecoveryLayout(), bridgeLaunchState()))
     })
   })
 }
@@ -409,7 +450,7 @@ function extensionCall(action: Record<string, unknown>, contextId?: string, tabI
       nativeRelayAvailable: !!nativeRelaySocket,
       cdpContexts: cdpManager.contextIds(),
     })
-    if (!validation.ok) { resolve({ success: false, error: validation.error }); return }
+    if (!validation.ok) { resolve({ success: false, code: validation.code, error: validation.error }); return }
     const id = crypto.randomUUID()
     const timer = setTimeout(() => { pendingRequests.delete(id); resolve({ success: false, error: "timeout" }) }, timeoutMs)
     pendingRequests.set(id, {
@@ -438,7 +479,7 @@ function dispatchToExtension(id: string, request: CliRequest, socket: Bun.Socket
     cdpContexts: cdpManager.contextIds(),
   })
   if (!contextValidation.ok) {
-    socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
+    socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, code: contextValidation.code, error: contextValidation.error } }))
     return
   }
 
@@ -461,6 +502,18 @@ function dispatchToExtension(id: string, request: CliRequest, socket: Bun.Socket
     actionType,
     sensitiveText,
   })
+
+  // Trusted input for an unfocused browser window goes through the bridge,
+  // which addresses the window by id. The extension only relaxes its
+  // foreground gate when told a bridge is here to do that.
+  if (process.platform === "darwin" && BACKGROUND_OS_ACTIONS.has(actionType)
+      && request.action && typeof request.action === "object"
+      && readBridgeRecoveryLayout().mode !== "browser-only"
+      // FORK-DELTA: background delivery is a bridge input domain (`bginput`),
+      // so it follows the browser-only switch and the allowlist too.
+      && macosSurfaceBlocked("macos_bginput_click") === null) {
+    (request.action as Record<string, unknown>).backgroundOk = true
+  }
 
   sendNativeMessage({ id, action: request.action, tabId: request.tabId }, request.contextId)
 }
@@ -530,13 +583,9 @@ async function handleSecretAction(action: Record<string, unknown>, _request: Cli
 }
 
 function parseAppsList(data: unknown): Array<{ pid: number; name: string; bundleId: string }> {
-  if (typeof data !== "string") return []
-  const out: Array<{ pid: number; name: string; bundleId: string }> = []
-  for (const line of data.split("\n")) {
-    const m = /^\[(\d+)\]\s+(.*?)(?: \*)?(?: \(hidden\))?\s+—\s+(\S*)$/.exec(line.trim())
-    if (m) out.push({ pid: parseInt(m[1], 10), name: m[2], bundleId: m[3] })
-  }
-  return out
+  if (!Array.isArray(data)) return []
+  return data.filter(row => typeof row?.pid === "number" && typeof row.name === "string")
+    .map(row => ({ pid: row.pid, name: row.name, bundleId: typeof row.bundleId === "string" ? row.bundleId : "" }))
 }
 
 /** Where a delivery lands, checked against the 1Password item's own URLs. */
@@ -551,6 +600,9 @@ async function targetForAction(action: Record<string, unknown>, actionType: stri
         if (!match || !match.bundleId) throw new Error(`could not resolve the bundle id of ${app ?? `pid ${pid}`} for the target check`)
         return { kind: "macos", bundleId: match.bundleId }
       }
+      // --window alone delivers to that window's app, which is not
+      // necessarily the frontmost one the check below reads.
+      if (action.window !== undefined || action.windowBounds !== undefined) throw new Error("--secret with --window also needs --app or --pid, so the target check names the app that receives the secret")
       const fm = await bridgeCall({ type: "macos_frontmost" }, 10_000)
       const bid = (fm.data as { bundleId?: unknown } | undefined)?.bundleId
       if (!fm.success || typeof bid !== "string" || !bid) throw new Error(`could not read the frontmost app for the target check: ${fm.error ?? "no bundle id"}`)
@@ -634,6 +686,10 @@ async function deliverResolvedValue(id: string, action: Record<string, unknown>,
   delete delivered.opAccount
   delete delivered.opAnyTarget
   switch (actionType) {
+    case 'desktop_type':
+      delivered.text=value
+      routeToBridge(id,delivered,socket,actionType)
+      return
     case "macos_type":
       delivered.text = value
       routeToBridge(id, delivered, socket, actionType)
@@ -655,7 +711,7 @@ async function deliverResolvedValue(id: string, action: Record<string, unknown>,
 }
 
 // Start bridge connection on daemon startup
-setTimeout(() => connectBridge(), 500)
+if (process.platform === "darwin") setTimeout(() => connectBridge(), 500)
 
 function log(msg: string) {
   const mode = process.argv.includes("--standalone") ? "standalone" : "native-messaging"
@@ -972,7 +1028,7 @@ if (singletonGate.action === "exit") {
   log(`ws port ${WS_PORT} already held by another daemon — ${singletonGate.reason}${wsBindError ? ` (${wsBindError.message})` : ""}`)
   process.exit(singletonGate.exitCode)
 }
-log(`ws server listening on port ${WS_PORT}`)
+log(`ws server listening on 127.0.0.1:${WS_PORT}`)
 ownsRuntimeFiles = true
 
 // Write lock file — metadata record of this instance, read by `interceptor
@@ -1084,7 +1140,9 @@ function processStdinBuffer() {
 function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: unknown }) {
   if (msg.type === "ping") {
     log("received ping, sending pong")
-    sendNativeMessage({ type: "pong" })
+    // The native host runs as the browsing user, so its pong is how the
+    // extension learns this user's WebSocket port (shared/platform.ts derivePorts).
+    sendNativeMessage({ type: "pong", wsPort: WS_PORT })
     emitEvent("keepalive_ping")
     return
   }
@@ -1125,6 +1183,7 @@ function handleNativeMessage(msg: { id?: string; type?: string; [key: string]: u
             enrichedAction.windowBounds = data.windowBounds
             enrichedAction.chromeUiHeight = data.chromeUiHeight
           }
+          if (data.background) enrichedAction.background = data.background
           if (pending.actionType === "os_click") {
             enrichedAction.button = data.button || "left"
             enrichedAction.clickCount = data.clickCount || 1
@@ -1207,6 +1266,11 @@ function resolveMv2ExtDir(): string {
 const cdpManager = new CdpManager({
   emit: (event, data) => emitEvent(event, data || {}),
   hasExtensionContext: (ctxId: string) => extensionWsMap.has(ctxId),
+  dropExtensionContext: (ctxId: string) => {
+    const socket = extensionWsMap.get(ctxId)
+    extensionWsMap.delete(ctxId)
+    socket?.close?.(1000, "app context detached")
+  },
   mv2ExtensionDir: resolveMv2ExtDir,
 })
 
@@ -1556,6 +1620,15 @@ async function handleOsAction(
   if (!action) return null
   const startTime = Date.now()
 
+  // The tab is visible in a window that is not OS-focused: the HID tap below
+  // would hit whatever is frontmost, so the bridge delivers to that window.
+  if (action.background) {
+    log(`[${id.slice(0, 8)}] ${action.type} → bridge (window not OS-focused)`)
+    const result = await deliverInBackground(action, (nativeAction) => process.platform === "darwin" ? bridgeCall(nativeAction) : callDesktopProvider(nativeAction), process.platform)
+    emitEvent("os_action", { requestId: id, action: action.type, duration: Date.now() - startTime, success: result.success, background: true })
+    return result
+  }
+
   switch (action.type) {
     case "os_click": {
       const windowBounds = action.windowBounds as { left: number; top: number; width: number; height: number } | undefined
@@ -1648,7 +1721,7 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
           const jsonBuf = buf.subarray(4, 4 + msgLen)
           buf = buf.subarray(4 + msgLen)
 
-          let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string }
+          let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string; vaultToken?: unknown }
           try {
             request = JSON.parse(jsonBuf.toString("utf-8"))
           } catch {
@@ -1676,8 +1749,11 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
             // relay-slot routing state (a superseded slot starved pongs and
             // forced endless 15s-timeout reconnects).
             if (isRelayPing(request)) {
-              log("received ping (relay), sending pong to origin")
-              socketWriteFramed(socket, JSON.stringify({ type: "pong" }))
+              // The pong carries this user's WebSocket port on both paths (the
+              // relay here, the in-process host in handleNativeMessage): it is
+              // how the extension learns which per-user daemon it belongs to.
+              log(`received ping (relay), sending pong to origin (wsPort ${WS_PORT})`)
+              socketWriteFramed(socket, JSON.stringify({ type: "pong", wsPort: WS_PORT }))
               emitEvent("keepalive_ping")
               continue
             }
@@ -1686,7 +1762,36 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
           }
 
           const id = request.id ?? crypto.randomUUID()
-          const action = request.action as { type?: string; [key: string]: unknown } | undefined
+          let action = request.action as { type?: string; [key: string]: unknown } | undefined
+          if (isSecretBearing(action) && !constantTimeTokenEquals(request.vaultToken, daemonIdentity.shutdownToken)) {
+            socketWriteFramed(socket, JSON.stringify({id,result:{success:false,code:"permission_denied",error:"authenticated local vault request required"}}))
+            continue
+          }
+          if (process.platform !== "darwin" && action?.type === "macos_secret") {
+            socketWriteFramed(socket, JSON.stringify({id,result:{success:false,code:"unsupported_operation",error:"Use the authenticated desktop secret surface on this host."}}))
+            continue
+          }
+          // FORK-DELTA §5–§7: the upstream vault store, `sudo`, and admin-prompt
+          // fill are cut on every host. Refuse them at the IPC door so no later
+          // branch (desktop_* rewrite, bridge routing) ever sees one.
+          if (/^(?:macos|desktop)_(?:secrets|sudo|authdialog)(?:_|$)/.test(String(action?.type ?? ""))) {
+            socketWriteFramed(socket, JSON.stringify({id,result:{success:false,code:"unsupported_operation",error:"credential verbs are not part of this fork; deliver with --secret op://<vault>/<item>/<field>"}}))
+            continue
+          }
+          const nativeCredentialDelivery=process.platform!=='darwin'&&action?.type==='desktop_type'&&typeof action.secret==='string'&&typeof action.secretLease==='string'
+          // CDP verbs run in this daemon (its CdpManager has Windows and Linux paths); they carry no
+          // native-provider authority, so the session-authenticated provider rule does not apply.
+          const daemonCdp = !!action?.type && CDP_ACTION_TYPES.has(action.type)
+          if (process.platform !== "darwin" && isDesktopActionType(action?.type) && action?.type !== "desktop_secret"&&!nativeCredentialDelivery&&!daemonCdp) {
+            socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, code: "permission_denied", error: "native desktop control requires direct session-authenticated provider access; daemon IPC cannot proxy native authority" } }))
+            continue
+          }
+          if (action?.type?.startsWith("desktop_") && action.type !== "desktop_secret"&&!nativeCredentialDelivery) {
+            try { action = macosAction(action); request.action = action } catch {
+              socketWriteFramed(socket, JSON.stringify({ id, result: { success: false, code: "invalid_request", error: "invalid desktop action" } }))
+              continue
+            }
+          }
           const actionType = action?.type || "unknown"
           log(`cli request: ${id} ${actionLogSummary(request.action)}`)
           emitEvent("request_received", { requestId: id, action: actionType })
@@ -1734,8 +1839,10 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
           // issue #244: vault verbs and secret-bearing deliveries resolve here,
           // before any surface dispatch. The log line above carried the name
           // only (daemon/redact.ts).
-          if (action?.type === "macos_secret") {
-            handleSecretAction(action, request).then((result) => socketWriteFramed(socket, JSON.stringify({ id, result })))
+          if (action?.type === "macos_secret" || action?.type === "desktop_secret") {
+            handleSecretAction(action, request).then((result) => {
+              socketWriteFramed(socket, JSON.stringify({ id, result }))
+            })
             continue
           }
           if (action && typeof action.secret === "string") {
@@ -1771,8 +1878,8 @@ const socketHandlers: Bun.SocketHandler<undefined> = {
             continue
           }
 
-          // Route macos_ actions to the native bridge
-          if (action?.type?.startsWith("macos_")) {
+          // Route macos_ actions to the native bridge (desktop_stream keeps its type; see macosAction)
+          if (action?.type?.startsWith("macos_") || action?.type === "desktop_stream") {
             routeToBridge(id, action, socket, actionType)
             continue
           }
@@ -1882,20 +1989,22 @@ function healRuntimeFiles(reason: string): string[] {
 
 function startWsServer(): ReturnType<typeof Bun.serve> {
   return Bun.serve<undefined>({
+    // Loopback only: the port pair is per OS user now, and Bun.serve binds
+    // 0.0.0.0 by default (issue #274 reported the LAN exposure).
+    hostname: "127.0.0.1",
     port: WS_PORT,
     fetch(req, server) {
-      // SECURITY (FORK-DELTA): this WebSocket honors `delegate` frames that route
-      // arbitrary macos_* actions to the bridge, so the upgrade is locked to
-      // local, non-web callers before it is accepted. Two checks the daemon must
-      // make itself: a WebSocket is exempt from same-origin policy, so the server
-      // — not the browser — has to reject a page Origin; and the port has no
-      // hostname bind (it is the daemon's singleton token, so a failed bind must
-      // exit rather than silently narrow), so the server has to reject a
-      // non-loopback peer. Without these, any web page the browser loads and any
-      // host on the LAN can reach the delegate path. Verified: a page WS carries
-      // an http(s) Origin; the CLI and the injected native agent carry none; the
-      // extension carries chrome-/moz-/safari-web-extension.
-      if (!wsUpgradeAllowed(server.requestIP(req)?.address ?? "", req.headers.get("origin") ?? "")) {
+      // SECURITY (FORK-DELTA, layered on upstream #274): this WebSocket honors
+      // `delegate` frames that route macos_* actions to the bridge, so the
+      // upgrade — and every plain HTTP request, /health included — is locked to
+      // local, non-web callers. Upstream binds 127.0.0.1 (above); we keep the
+      // peer-address check as a second layer in case a later change drops the
+      // bind, and add a Host check so a DNS-rebound page cannot read /health.
+      // A WebSocket is exempt from same-origin policy, so the server — not the
+      // browser — must reject a page Origin.
+      const origin = req.headers.get("origin") ?? ""
+      if (!wsUpgradeAllowed(server.requestIP(req)?.address ?? "", origin, req.headers.get("host") ?? "", WS_PORT)) {
+        log(`ws request refused: origin ${origin.slice(0, 120)}`)
         return new Response("forbidden", { status: 403 })
       }
       if (server.upgrade(req, {})) return
@@ -1916,16 +2025,31 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
         log(`ws client connected`)
       },
       message(ws, raw) {
-        if (typeof raw !== "string" && handleBinarySinkFrame(ws, Buffer.from(raw))) {
-          return
+        if (typeof raw !== "string") {
+          const bytes = Buffer.from(raw)
+          if (handleBinarySinkFrame(ws, bytes)) return
         }
         const rawStr = typeof raw === "string" ? raw : Buffer.from(raw).toString("utf-8")
-        log(`ws recv: ${rawStr.slice(0, 300)}`)
+        log(`ws recv: ${rawStr.length} bytes`)
         let request: { id?: string; action?: unknown; tabId?: number; contextId?: string; type?: string; result?: unknown }
         try {
           request = JSON.parse(rawStr)
         } catch {
           ws.send(JSON.stringify({ error: "invalid JSON" }))
+          return
+        }
+
+        const credentialAction = request.action as Record<string, unknown> | undefined
+        const credentialType = typeof credentialAction?.type === "string" ? credentialAction.type : ""
+        // Check before delegation, registration and generic command routing.
+        // A delegate envelope must not turn WebSocket access into vault access.
+        if (isSecretBearing(credentialAction) || credentialAction?.secret !== undefined || /^(?:macos|desktop)_(?:secret|secrets|sudo|authdialog)(?:_|$)/.test(credentialType)) {
+          ws.send(JSON.stringify({ id: request.id, result: { success: false, code: "permission_denied", error: "credential actions require local IPC" } }))
+          return
+        }
+
+        if (process.platform !== "darwin" && isDesktopActionType((request.action as { type?: unknown })?.type)) {
+          ws.send(JSON.stringify({ id: request.id, result: { success: false, code: "permission_denied", error: "native desktop control requires authenticated local IPC in the interactive user session" } }))
           return
         }
 
@@ -1935,6 +2059,11 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
 
         if (request.type === "extension") {
           const ctxId = request.contextId ?? "default"
+          if (!cdpManager.acceptsAppRegistration(ctxId)) {
+            ws.send(JSON.stringify({ type: "context_conflict", contextId: ctxId, error: "app context was detached; explicitly attach it before reconnecting" }))
+            ws.close(1000, "app context detached")
+            return
+          }
           const claim = claimContextId(extensionWsMap, ws as ContextSocket, ctxId)
           ws.send(JSON.stringify(claim.message))
           if (claim.status === "conflict") {
@@ -2034,6 +2163,16 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
         log(`ws request: ${id} ${actionLogSummary(request.action)}`)
 
         const actionType = (request.action as { type?: string })?.type || "unknown"
+        if (actionType.startsWith("desktop_") || actionType.startsWith("macos_")) {
+          const action = request.action as Record<string, unknown>
+          let nativeAction: Record<string, unknown>
+          try { nativeAction = macosAction(action) } catch {
+            ws.send(JSON.stringify({ id, result: { success: false, code: "invalid_request", error: "invalid desktop action" } }))
+            return
+          }
+          bridgeCall(nativeAction).then(result => { try { ws.send(JSON.stringify({ id, result })) } catch {} })
+          return
+        }
 
         if (actionType === "daemon_shutdown") {
           ws.send(JSON.stringify({ id, result: { success: false, error: "daemon shutdown is accepted only on the local IPC transport" } }))
@@ -2061,7 +2200,7 @@ function startWsServer(): ReturnType<typeof Bun.serve> {
           cdpContexts: cdpManager.contextIds(),
         })
         if (!contextValidation.ok) {
-          ws.send(JSON.stringify({ id, result: { success: false, error: contextValidation.error } }))
+          ws.send(JSON.stringify({ id, result: { success: false, code: contextValidation.code, error: contextValidation.error } }))
           return
         }
 

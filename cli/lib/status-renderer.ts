@@ -9,8 +9,12 @@
 import { existsSync, readFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { IS_WIN, SOCKET_PATH, PID_PATH, transportLabel } from "../../shared/platform"
+import { bridgePidPathForDetection, bridgeSocketPathForDetection } from "../../shared/bridge-paths"
 import { skillsStatusSummary } from "../commands/skills"
 import { macosEnabled, readSurfaceMarker, isTruthyEnv } from "../../shared/surface-mode"
+import { consoleUser, currentUserName, missingGuiSessionLines, probeGuiSession, type GuiSession } from "../../shared/gui-session"
+import { desktopProviderBinary } from "../../shared/desktop-provider"
+import type { DesktopErrorCode } from "../../shared/desktop-contract"
 
 export type StatusSnapshot = {
   mode: "browser-only" | "full" | "unknown"
@@ -29,6 +33,20 @@ export type StatusSnapshot = {
   // i.e. the plist isn't just on disk, it's actually bootstrapped into the
   // user's GUI domain. Distinguishes "needs kickstart" from "needs bootstrap".
   launchAgentLoaded: boolean
+  // This account's launchd GUI domain (gui/<uid>): "absent" over ssh or for a
+  // service account, which is why the bridge cannot run and why no bootstrap
+  // would help. `consoleUser` then names who owns the screen.
+  guiSession?: GuiSession
+  consoleUser?: string | null
+  nativeDesktop?: {
+    binary: string | null
+    reachable?: boolean
+    version?: string
+    pid?: number
+    session?: string
+    error?: string
+    code?: DesktopErrorCode
+  }
   // #52 browser-config block — populated only on macOS in verbose mode
   browser?: {
     configured: ("chrome" | "brave")[]   // browsers with NMH manifest installed
@@ -41,11 +59,17 @@ export type StatusSnapshot = {
     reachable: boolean
     reason?: string
   }
+  // Per-context view (verbose + daemon alive). `status --verbose` used to probe
+  // one context and fail with "multiple extensions connected" when several
+  // were (144 results, 2026-09-10 review); it now reports each one, with
+  // whether page-world eval (`eval --main`, chrome.userScripts) is available.
+  contexts?: ContextStatus[]
   // tab-lifecycle policy as the extension resolved it — populated only
   // when verbose + extension reachable
   tabLifecycle?: {
     reuse: boolean
     idleCloseMinutes: number
+    closeGroupWhenDone?: boolean
     source: string
   }
   // skills-adoption block — pack presence + per-runtime link counts
@@ -53,6 +77,52 @@ export type StatusSnapshot = {
     packDir: string | null
     targets: Array<{ id: string; linked: number; total: number }>
   }
+}
+
+export type EvalMainState = { available: boolean; hint?: string }
+
+export type ContextStatus = {
+  contextId: string
+  kind: string
+  version?: string
+  installType?: string
+  extensionId?: string
+  reachable: boolean
+  reason?: string
+  evalMain?: EvalMainState
+}
+
+/**
+ * Turn the extension's `capabilities` answer into one line agents can act on.
+ * Chrome 138+ gates chrome.userScripts behind the per-extension "Allow User
+ * Scripts" toggle (older Chrome: Developer mode); when it is off,
+ * `chrome.userScripts` is undefined and every `eval --main` fails with a CSP
+ * or "unavailable" error that never named the toggle (273 + 6 results,
+ * 2026-09-10 review; Chrome userScripts reference, "Allow User Scripts").
+ */
+export function describeEvalMain(
+  caps: unknown,
+  extensionId?: string,
+): EvalMainState {
+  const us = (caps as { userScripts?: { manifest_permission?: boolean; api_present?: boolean; enabled?: boolean; error?: string } } | undefined)?.userScripts
+  if (!us) return { available: false, hint: "the extension did not report userScripts state (older extension copy); run 'interceptor capabilities'" }
+  if (us.enabled) return { available: true }
+  const page = extensionId ? `chrome://extensions/?id=${extensionId}` : "chrome://extensions (Details of the Interceptor extension)"
+  if (!us.manifest_permission) {
+    return { available: false, hint: `this extension copy has no userScripts permission; install the current extension` }
+  }
+  // `api_present: false` is the toggle-off state, not an unsupported browser:
+  // Chrome removes the chrome.userScripts namespace entirely while "Allow User
+  // Scripts" (Developer mode before 138) is off, so the toggle hint applies.
+  return {
+    available: false,
+    hint: `enable "Allow User Scripts" on ${page} (Chrome 138+; on older Chrome turn on Developer mode), then run 'interceptor reload'. Structured reads (read, find, text, html) do not need it.${us.error ? ` Chrome said: ${us.error}` : ""}`,
+  }
+}
+
+export function formatEvalMainLine(state: EvalMainState | undefined): string {
+  if (!state) return "eval --main: unknown"
+  return state.available ? "eval --main: available (userScripts)" : `eval --main: unavailable — ${state.hint ?? "userScripts disabled"}`
 }
 
 const BRIDGE_LABEL = "com.interceptor.bridge"
@@ -97,8 +167,10 @@ export function readStatusSnapshot(): StatusSnapshot {
     } catch {}
   }
 
-  const BRIDGE_PID_PATH = "/tmp/interceptor-bridge.pid"
-  const BRIDGE_SOCK_PATH = "/tmp/interceptor-bridge.sock"
+  // Per-user runtime files, with the legacy /tmp files still detected so an
+  // older running bridge is reported instead of declared missing.
+  const BRIDGE_PID_PATH = bridgePidPathForDetection()
+  const BRIDGE_SOCK_PATH = bridgeSocketPathForDetection()
   const LAUNCH_AGENT_PATH_USER = `${process.env.HOME || ""}/Library/LaunchAgents/com.interceptor.bridge.plist`
   const LAUNCH_AGENT_PATH_SYSTEM = "/Library/LaunchAgents/com.interceptor.bridge.plist"
   const userPlistPresent = !IS_WIN && existsSync(LAUNCH_AGENT_PATH_USER)
@@ -112,6 +184,8 @@ export function readStatusSnapshot(): StatusSnapshot {
   const launchAgentLoaded = launchAgentInstalled && process.getuid
     ? isLaunchAgentLoaded(process.getuid())
     : false
+  const guiSession: GuiSession = !IS_WIN && process.getuid ? probeGuiSession(process.getuid()) : "unknown"
+  const consoleOwner = guiSession === "absent" ? consoleUser() : null
   const bridgeSockExists = !IS_WIN && existsSync(BRIDGE_SOCK_PATH)
   let bridgePid: number | null = null
   let bridgeAlive = false
@@ -128,9 +202,12 @@ export function readStatusSnapshot(): StatusSnapshot {
   // not just plist presence — so a dev bridge running from the source tree
   // reads "full" (accurate) rather than the old "unknown", and a browser-only
   // marker reads "browser-only" even with a bridge present.
+  const nativeDesktop = process.platform === "win32" || process.platform === "linux"
+    ? { binary: desktopProviderBinary() ?? null }
+    : undefined
   let mode: "browser-only" | "full" | "unknown"
-  if (IS_WIN) {
-    mode = "browser-only"
+  if (nativeDesktop) {
+    mode = nativeDesktop.binary ? "full" : "browser-only"
   } else {
     const detected = launchAgentInstalled || bridgeAlive || bridgeSockExists
     mode = macosEnabled({
@@ -166,6 +243,9 @@ export function readStatusSnapshot(): StatusSnapshot {
     launchAgentInstalled,
     launchAgentPath,
     launchAgentLoaded,
+    guiSession,
+    consoleUser: consoleOwner,
+    nativeDesktop,
     skills,
   }
 }
@@ -182,8 +262,16 @@ export function computeBridgeHint(input: {
   launchAgentInstalled: boolean
   launchAgentLoaded: boolean
   launchAgentPath: string | null
+  guiSession?: GuiSession
+  consoleUser?: string | null
+  user?: string | null
+  uid?: number | null
 }): string[] {
   if (input.bridge) return []
+  if (input.guiSession === "absent") {
+    const [cause, remedy] = missingGuiSessionLines(input)
+    return [`  hint: ${cause}`, `        ${remedy}`]
+  }
   if (input.mode === "unknown") {
     // Bridge alive but plist file missing — handled by the caller already
     // (mode === "unknown" implies bridge is alive). Defensive default.
@@ -318,7 +406,20 @@ export function formatStatus(snap: StatusSnapshot, opts: { verbose?: boolean }):
   }
 
   // bridge block (only when in full or unknown mode)
-  if (snap.mode !== "browser-only") {
+  if (snap.nativeDesktop) {
+    const native = snap.nativeDesktop
+    lines.push("")
+    lines.push(`desktop provider: ${native.binary ? "installed" : "not installed"}`)
+    if (native.binary) {
+      lines.push(`  binary: ${native.binary}`)
+      lines.push(`  session provider: ${native.reachable === undefined ? "not probed (run 'interceptor status --verbose')" : native.reachable ? "reachable" : "unavailable"}`)
+      if (native.version) lines.push(`  version: ${native.version}`)
+      if (native.pid) lines.push(`  pid: ${native.pid}`)
+      if (native.session) lines.push(`  session: ${native.session}`)
+      if (native.error) lines.push(`  error${native.code ? ` (${native.code})` : ""}: ${native.error}`)
+      lines.push("  operation support: interceptor desktop capabilities")
+    }
+  } else if (snap.mode !== "browser-only") {
     lines.push("")
     if (v) {
       lines.push(`bridge (separate macOS native automation bridge — only needed for 'interceptor macos *'): ${snap.bridge ? "running" : "not running"}`)
@@ -333,6 +434,10 @@ export function formatStatus(snap: StatusSnapshot, opts: { verbose?: boolean }):
       launchAgentInstalled: snap.launchAgentInstalled,
       launchAgentLoaded: snap.launchAgentLoaded,
       launchAgentPath: snap.launchAgentPath,
+      guiSession: snap.guiSession,
+      consoleUser: snap.consoleUser,
+      user: currentUserName(),
+      uid: typeof process.getuid === "function" ? process.getuid() : null,
     })) {
       lines.push(line)
     }
@@ -363,7 +468,25 @@ export function formatStatus(snap: StatusSnapshot, opts: { verbose?: boolean }):
   }
 
   // extension reachability block (#49) — verbose-only when daemon alive
-  if (snap.extension) {
+  if (snap.contexts && snap.contexts.length > 0) {
+    lines.push("")
+    const multi = snap.contexts.length > 1
+    for (const c of snap.contexts) {
+      const label = multi ? ` [${c.contextId}]` : ""
+      const copy = c.version ? ` (${c.installType === "normal" ? "store" : c.installType === "development" ? "unpacked" : "extension"} ${c.version})` : ""
+      if (c.kind !== "extension") {
+        lines.push(`${c.kind}${label}: connected`)
+        continue
+      }
+      if (c.reachable) {
+        lines.push(`extension${label}: reachable${copy}${v && !multi ? " (a content-script ping succeeded against an interceptor-group tab)" : ""}`)
+      } else {
+        lines.push(`extension${label}: not reachable${copy} — ${c.reason || "no tabs in interceptor group; run 'interceptor open <url>' to verify"}`)
+      }
+      lines.push(`  ${formatEvalMainLine(c.evalMain)}`)
+    }
+    if (multi) lines.push("  several browser contexts are connected: set INTERCEPTOR_CONTEXT=<id> once per lane, or pass --context <id>")
+  } else if (snap.extension) {
     lines.push("")
     if (snap.extension.reachable) {
       lines.push(`extension: reachable${v ? " (a content-script ping succeeded against an interceptor-group tab)" : ""}`)
@@ -377,7 +500,8 @@ export function formatStatus(snap: StatusSnapshot, opts: { verbose?: boolean }):
   // tab-lifecycle policy — verbose-only when extension reachable
   if (snap.tabLifecycle) {
     const lc = snap.tabLifecycle
-    const idle = lc.idleCloseMinutes > 0 ? `close idle groups after ${lc.idleCloseMinutes}m` : "idle-close off"
+    const action = lc.closeGroupWhenDone ? "delete whole groups after" : "close idle groups after"
+    const idle = lc.idleCloseMinutes > 0 ? `${action} ${lc.idleCloseMinutes}m` : "idle-close off"
     lines.push(`tab lifecycle: reuse ${lc.reuse ? "on (named groups)" : "off"} · ${idle} (source: ${lc.source})`)
   }
 
@@ -421,10 +545,14 @@ export function snapshotToJson(snap: StatusSnapshot): Record<string, unknown> {
     launchAgentInstalled: snap.launchAgentInstalled,
     launchAgentPath: snap.launchAgentPath,
     launchAgentLoaded: snap.launchAgentLoaded,
+    guiSession: snap.guiSession,
+    consoleUser: snap.consoleUser,
   }
   if (snap.browser) base.browser = snap.browser
   if (snap.extension) base.extension = snap.extension
+  if (snap.contexts) base.contexts = snap.contexts
   if (snap.tabLifecycle) base.tabLifecycle = snap.tabLifecycle
   if (snap.skills) base.skills = snap.skills
+  if (snap.nativeDesktop) base.nativeDesktop = snap.nativeDesktop
   return base
 }

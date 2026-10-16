@@ -141,9 +141,25 @@ export function macosDomainAllowed(domain: string, allowlist: Set<string> | null
   return allowlist.has(domain.toLowerCase())
 }
 
-/** Extract the domain prefix from a `macos_<domain>[_<cmd>]` action type. */
+/** desktop_* compound operations the Swift Router rewrites to macos_compound_*. */
+const DESKTOP_COMPOUND_OPS: ReadonlySet<string> = new Set(["desktop_read", "desktop_open", "desktop_act", "desktop_inspect_app"])
+
+/**
+ * Extract the bridge domain from an action type. Handles `macos_<domain>[_<cmd>]`
+ * and upstream's neutral `desktop_<domain>[_<cmd>]`, mirroring the rewrite in
+ * Router.route (desktop_hello/capabilities → `desktop`, compound ops →
+ * `compound`). Other types return null: the browser-only switch still applies
+ * to them in the daemon, and the Swift Router stays the authoritative check.
+ */
 export function macosDomainOf(actionType: string): string | null {
-  const parts = actionType.split("_")
+  const t = actionType.toLowerCase()
+  if (t.startsWith("desktop_")) {
+    if (t === "desktop_hello" || t === "desktop_capabilities") return "desktop"
+    if (DESKTOP_COMPOUND_OPS.has(t)) return "compound"
+    const seg = t.slice("desktop_".length).split("_")[0]
+    return seg || null
+  }
+  const parts = t.split("_")
   if (parts.length < 2 || parts[0] !== "macos") return null
-  return parts[1].toLowerCase()
+  return parts[1]
 }

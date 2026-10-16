@@ -11,6 +11,8 @@
 #   INTERCEPTOR_ENABLE_PLATFORM_TARGETS=1
 #                                  compile in research-only platform target support
 #   INTERCEPTOR_SKIP_SIGNING=1    skip codesign + lsregister (dev mode)
+#   INTERCEPTOR_BRIDGE_UNIVERSAL=1
+#                                  build arm64 + x86_64 into one binary (needs Xcode)
 
 set -euo pipefail
 
@@ -58,9 +60,21 @@ if [[ "${INTERCEPTOR_ENABLE_PLATFORM_TARGETS:-0}" == "1" ]]; then
 else
   echo "==> Native platform target support: disabled (public build)"
 fi
+swift package resolve
+VM_PATCH_BUN="${INTERCEPTOR_BUN_BIN:-bun}"
+"$VM_PATCH_BUN" "$SCRIPT_DIR/patch-containerization-vm.ts"
+if [[ "${INTERCEPTOR_BRIDGE_UNIVERSAL:-0}" == "1" ]]; then
+  echo "==> Architectures: arm64 + x86_64 (universal)"
+  SWIFT_FLAGS+=("--arch" "arm64" "--arch" "x86_64")
+  # More than one --arch makes SwiftPM build through Xcode's build system,
+  # which writes its products here rather than behind the .build/release link.
+  PRODUCTS_DIR="$BRIDGE_DIR/.build/apple/Products/Release"
+else
+  PRODUCTS_DIR="$BRIDGE_DIR/.build/release"
+fi
 swift build -c release "${SWIFT_FLAGS[@]}" 2>&1
 
-BINARY="$BRIDGE_DIR/.build/release/interceptor-bridge"
+BINARY="$PRODUCTS_DIR/interceptor-bridge"
 if [ ! -f "$BINARY" ]; then
   echo "ERROR: Build failed — binary not found at $BINARY"
   exit 1
@@ -96,7 +110,7 @@ cp "$BINARY" "$APP_DIR/Contents/MacOS/interceptor-bridge"
 # the rpath to @executable_path/../Frameworks, so this is the only step
 # needed for runtime resolution. Sparkle's own XPCServices/Autoupdate/
 # Updater.app helpers ship inside the framework.
-SPARKLE_FRAMEWORK="$BRIDGE_DIR/.build/arm64-apple-macosx/release/Sparkle.framework"
+SPARKLE_FRAMEWORK="$PRODUCTS_DIR/Sparkle.framework"
 if [ -d "$SPARKLE_FRAMEWORK" ]; then
   echo "==> Copying Sparkle.framework into the .app"
   ditto "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/Sparkle.framework"
@@ -240,8 +254,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>$INTERCEPTOR_SPARKLE_FEED_URL</string>
     <key>SUPublicEDKey</key>
     <string>$INTERCEPTOR_SPARKLE_PUBLIC_KEY</string>
-    <key>SUEnableInstallerLauncherService</key>
-    <true/>
+    <!-- This host is not sandboxed; Sparkle launches its installer directly. -->
     <key>SUEnableAutomaticChecks</key>
     <$INTERCEPTOR_SPARKLE_AUTO_CHECK/>
     <key>SUScheduledCheckInterval</key>

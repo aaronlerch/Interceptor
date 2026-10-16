@@ -67,4 +67,17 @@ describe("per-domain allowlist", () => {
     expect(macosDomainOf("input_text")).toBeNull()
     expect(macosDomainOf("macos")).toBeNull()
   })
+  // FORK-DELTA: upstream 2.x's neutral desktop_* names reach the same bridge
+  // domains; the daemon gate must map them exactly as Router.route does.
+  test("macosDomainOf maps desktop_* types the way the Swift Router does", () => {
+    expect(macosDomainOf("desktop_click")).toBe("click")
+    expect(macosDomainOf("desktop_fs_read")).toBe("fs")
+    expect(macosDomainOf("desktop_stream")).toBe("stream")
+    expect(macosDomainOf("desktop_hello")).toBe("desktop")
+    expect(macosDomainOf("desktop_capabilities")).toBe("desktop")
+    expect(macosDomainOf("desktop_open")).toBe("compound")
+    expect(macosDomainOf("desktop_inspect_app")).toBe("compound")
+    expect(macosDomainOf("macos_bginput_click")).toBe("bginput")
+    expect(macosDomainOf("desktop_")).toBeNull()
+  })
 })

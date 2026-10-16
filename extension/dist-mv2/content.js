@@ -12,24 +12,158 @@ var __export = (target, all) => {
       set: __exportSetter.bind(all, name)
     });
 };
-var __esm = (fn, res) => () => (fn && (res = fn(fn = 0)), res);
+var __esm = (fn, res, err) => () => {
+  if (fn)
+    try {
+      res = fn(fn = 0);
+    } catch (e) {
+      err = [e];
+    }
+  if (err)
+    throw err[0];
+  return res;
+};
 
 // extension/src/content/sensitive.ts
 function markSensitive(el) {
   sensitiveElements.add(el);
 }
 function isSensitive(el) {
-  return sensitiveElements.has(el);
+  for (let node = el;node; node = node.parentElement || node.getRootNode().host || null) {
+    if (node.tagName === "INPUT" && credentialLikeInput(node))
+      markSensitive(node);
+    if (sensitiveElements.has(node))
+      return true;
+  }
+  return false;
 }
-function isValueSecret(el) {
-  if (isSensitive(el))
+function credentialLikeInput(el) {
+  if ((el.type || "").toLowerCase() === "password")
     return true;
-  const type = el.type;
-  return typeof type === "string" && type.toLowerCase() === "password";
+  const autocomplete = (el.autocomplete || el.getAttribute("autocomplete") || "").toLowerCase().trim();
+  for (const token of autocomplete.split(/\s+/)) {
+    if (token.startsWith("cc-") && token !== "cc-name")
+      return true;
+    if (CREDENTIAL_AUTOCOMPLETE.has(token))
+      return true;
+  }
+  return CREDENTIAL_NAME.test(el.name || "") || CREDENTIAL_NAME.test(el.id || "");
 }
-var sensitiveElements, SECURE_MASK = "***SECURE***";
+function safeValue(el) {
+  const value = el.value || "";
+  const sensitive = isSensitive(el);
+  return value && sensitive ? SECURE_MASK : value;
+}
+function redactSensitiveText(text, root) {
+  for (const el of [root, ...Array.from(root.querySelectorAll("*"))]) {
+    if (!isSensitive(el))
+      continue;
+    for (const value of [el.textContent, el.innerText]) {
+      if (value)
+        text = text.replaceAll(value, SECURE_MASK);
+    }
+  }
+  return text;
+}
+function hiddenByStyle(el) {
+  const style = getComputedStyle(el);
+  return style.display === "none" || style.visibility === "hidden";
+}
+function walkRenderedText(root) {
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push(node.textContent ?? "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE)
+      return;
+    const el = node;
+    if (NON_RENDERED_TAGS.has(el.tagName) || hiddenByStyle(el))
+      return;
+    for (const child of Array.from(el.childNodes))
+      walk(child);
+  };
+  walk(root);
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+function renderedText(el) {
+  const rendered = el.innerText;
+  if (rendered && rendered.trim())
+    return rendered;
+  return walkRenderedText(el);
+}
+function safeText(el, rendered = false) {
+  const text = rendered ? renderedText(el) : el.textContent || "";
+  if (isSensitive(el))
+    return text ? SECURE_MASK : "";
+  return redactSensitiveText(text, el);
+}
+function safeHtml(el) {
+  const clone = el.cloneNode(true);
+  const originals = [el, ...Array.from(el.querySelectorAll("*"))];
+  const copies = [clone, ...Array.from(clone.querySelectorAll("*"))];
+  for (let i = 0;i < originals.length; i++) {
+    const original = originals[i], copy = copies[i];
+    if (!isSensitive(original))
+      continue;
+    if (copy.hasAttribute("value"))
+      copy.setAttribute("value", copy.getAttribute("value") ? SECURE_MASK : "");
+    if (original.tagName !== "INPUT" && (original.textContent || original.value))
+      copy.textContent = SECURE_MASK;
+  }
+  return clone.outerHTML;
+}
+var globals, sensitiveElements, CREDENTIAL_AUTOCOMPLETE, CREDENTIAL_NAME, SECURE_MASK = "***SECURE***", NON_RENDERED_TAGS;
 var init_sensitive = __esm(() => {
-  sensitiveElements = new WeakSet;
+  globals = globalThis;
+  sensitiveElements = globals.__interceptor_sensitiveElements ??= new WeakSet;
+  CREDENTIAL_AUTOCOMPLETE = new Set(["one-time-code", "current-password", "new-password"]);
+  CREDENTIAL_NAME = /cvv|cvc|csc|card.?num|cc.?num|cc.?number|security.?code|otp|one.?time|passcode|\bpin\b|ssn/i;
+  NON_RENDERED_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
+});
+
+// extension/src/content/ref-registry.ts
+function getOrAssignRef(el) {
+  const existing = elementToRef.get(el);
+  if (existing) {
+    const ref = refRegistry.get(existing);
+    const live = ref?.deref();
+    if (live === el)
+      return existing;
+    if (!live) {
+      refRegistry.set(existing, new WeakRef(el));
+      return existing;
+    }
+    refRegistry.set(existing, new WeakRef(el));
+    return existing;
+  }
+  const refId = `e${refIdCounter.value++}`;
+  refRegistry.set(refId, new WeakRef(el));
+  elementToRef.set(el, refId);
+  return refId;
+}
+function resolveRef(refId) {
+  const ref = refRegistry.get(refId);
+  if (!ref)
+    return null;
+  const el = ref.deref();
+  return el && el.isConnected ? el : null;
+}
+function pruneStaleRefs() {
+  for (const [id, ref] of refRegistry) {
+    const el = ref.deref();
+    if (!el || !el.isConnected)
+      refRegistry.delete(id);
+  }
+}
+var g, refRegistry, elementToRef, refMetadata, refIdCounter;
+var init_ref_registry = __esm(() => {
+  g = globalThis;
+  refRegistry = g.__interceptor_refRegistry ?? (g.__interceptor_refRegistry = new Map);
+  elementToRef = g.__interceptor_elementToRef ?? (g.__interceptor_elementToRef = new WeakMap);
+  refMetadata = g.__interceptor_refMetadata ?? (g.__interceptor_refMetadata = new Map);
+  refIdCounter = g.__interceptor_nextRefId ?? (g.__interceptor_nextRefId = { value: 1 });
 });
 
 // extension/src/content/element-tree.ts
@@ -76,18 +210,18 @@ function getRelevantAttrs(el) {
     const placeholder = el.getAttribute("placeholder");
     if (placeholder)
       attrs.push(`placeholder="${placeholder}"`);
-    const value = el.value;
+    const value = safeValue(el);
     if (value)
-      attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`);
+      attrs.push(`value="${value.slice(0, 40)}"`);
     if (el.checked)
       attrs.push("checked");
     if (el.disabled)
       attrs.push("disabled");
   }
   if (tag === "select" || tag === "textarea") {
-    const value = el.value;
+    const value = safeValue(el);
     if (value)
-      attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`);
+      attrs.push(`value="${value.slice(0, 40)}"`);
   }
   if (tag === "img") {
     const src = el.getAttribute("src");
@@ -149,8 +283,8 @@ function buildElementTree(elements) {
 }
 var STYLE_BUNDLE_PROPS;
 var init_element_tree = __esm(() => {
-  init_a11y_tree();
   init_sensitive();
+  init_a11y_tree();
   STYLE_BUNDLE_PROPS = [
     "display",
     "visibility",
@@ -161,6 +295,105 @@ var init_element_tree = __esm(() => {
     "cursor",
     "opacity"
   ];
+});
+
+// extension/src/content/element-discovery.ts
+function getShadowRoot(el) {
+  if (el.shadowRoot)
+    return el.shadowRoot;
+  try {
+    if (typeof chrome !== "undefined" && chrome.dom?.openOrClosedShadowRoot) {
+      return chrome.dom.openOrClosedShadowRoot(el);
+    }
+  } catch {}
+  return null;
+}
+function walkWithShadow(root, callback) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+  let node = walker.nextNode();
+  while (node) {
+    const el = node;
+    callback(el);
+    const shadow = getShadowRoot(el);
+    if (shadow)
+      walkWithShadow(shadow, callback);
+    node = walker.nextNode();
+  }
+}
+function isVisible(el, style = getComputedStyle(el)) {
+  if (style.visibility === "hidden" || style.display === "none")
+    return false;
+  const pos = style.position;
+  if (pos !== "fixed" && pos !== "sticky") {
+    if (!el.offsetParent && el.tagName !== "BODY")
+      return false;
+  }
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0)
+    return false;
+  return true;
+}
+function isInteractive(el, tags, roles, style = getComputedStyle(el)) {
+  if (tags.has(el.tagName))
+    return true;
+  const role = el.getAttribute("role");
+  if (role && roles.has(role))
+    return true;
+  if (el.hasAttribute("onclick"))
+    return true;
+  if (el.getAttribute("contenteditable") === "true")
+    return true;
+  if (el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1")
+    return true;
+  if (el.namespaceURI === "http://www.w3.org/2000/svg") {
+    const svgTag = el.tagName.toLowerCase();
+    if (svgTag === "a" && (el.hasAttribute("href") || el.getAttributeNS("http://www.w3.org/1999/xlink", "href")))
+      return true;
+    if (el.hasAttribute("onclick") || el.hasAttribute("tabindex"))
+      return true;
+    if (role && roles.has(role))
+      return true;
+    if (style.cursor === "pointer")
+      return true;
+  }
+  if (style.cursor === "pointer" && el.tagName !== "BODY" && el.tagName !== "HTML") {
+    const parent = el.parentElement;
+    const parentCursor = parent ? getComputedStyle(parent).cursor : null;
+    if (hasOwnPointerCursor(style.cursor, parentCursor))
+      return true;
+  }
+  return false;
+}
+function getInteractiveElements() {
+  selectorMap.clear();
+  nextIndex = 0;
+  pruneStaleRefs();
+  const results = [];
+  walkWithShadow(document.body, (el) => {
+    const style = getComputedStyle(el);
+    if (isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES, style) && isVisible(el, style)) {
+      const idx = nextIndex++;
+      const selector = buildSelector(el);
+      selectorMap.set(idx, selector);
+      const refId = getOrAssignRef(el);
+      const tag = el.tagName.toLowerCase();
+      const text = getAccessibleName(el);
+      const attrs = getRelevantAttrs(el);
+      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: safeValue(el).slice(0, 40) });
+      results.push({ index: idx, refId, element: el, selector, tag, text, attrs });
+    }
+  });
+  return results;
+}
+var selectorMap, nextIndex = 0, INTERACTIVE_TAGS, INTERACTIVE_ROLES;
+var init_element_discovery = __esm(() => {
+  init_ref_registry();
+  init_a11y_tree();
+  init_element_tree();
+  init_sensitive();
+  selectorMap = new Map;
+  INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "DETAILS", "SUMMARY"]);
+  INTERACTIVE_ROLES = new Set(["button", "link", "tab", "menuitem", "checkbox", "radio", "switch", "textbox", "combobox", "listbox", "option", "slider"]);
 });
 
 // extension/src/content/a11y-tree.ts
@@ -294,7 +527,7 @@ function getAccessibleName(el) {
   const title = el.getAttribute("title");
   if (title && title.trim())
     return title.trim();
-  return (el.textContent || "").trim().slice(0, 80);
+  return safeText(el).trim().slice(0, 80);
 }
 function compactAttrClause(attrs) {
   if (!attrs)
@@ -383,218 +616,12 @@ function buildA11yTree(root, depth, maxDepth, filter, includeStyle = false, form
 }
 var LANDMARK_ROLES, LANDMARK_TAGS;
 var init_a11y_tree = __esm(() => {
+  init_sensitive();
   init_element_discovery();
   init_ref_registry();
   init_element_tree();
   LANDMARK_ROLES = new Set(["banner", "navigation", "main", "complementary", "contentinfo", "search", "form", "region"]);
   LANDMARK_TAGS = new Set(["NAV", "MAIN", "ASIDE", "HEADER", "FOOTER", "FORM", "SECTION"]);
-});
-
-// extension/src/content/element-discovery.ts
-function getShadowRoot(el) {
-  if (el.shadowRoot)
-    return el.shadowRoot;
-  try {
-    if (typeof chrome !== "undefined" && chrome.dom?.openOrClosedShadowRoot) {
-      return chrome.dom.openOrClosedShadowRoot(el);
-    }
-  } catch {}
-  return null;
-}
-function walkWithShadow(root, callback) {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
-  let node = walker.nextNode();
-  while (node) {
-    const el = node;
-    callback(el);
-    const shadow = getShadowRoot(el);
-    if (shadow)
-      walkWithShadow(shadow, callback);
-    node = walker.nextNode();
-  }
-}
-function isVisible(el, style = getComputedStyle(el)) {
-  if (style.visibility === "hidden" || style.display === "none")
-    return false;
-  const pos = style.position;
-  if (pos !== "fixed" && pos !== "sticky") {
-    if (!el.offsetParent && el.tagName !== "BODY")
-      return false;
-  }
-  const rect = el.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0)
-    return false;
-  return true;
-}
-function isInteractive(el, tags, roles, style = getComputedStyle(el)) {
-  if (tags.has(el.tagName))
-    return true;
-  const role = el.getAttribute("role");
-  if (role && roles.has(role))
-    return true;
-  if (el.hasAttribute("onclick"))
-    return true;
-  if (el.getAttribute("contenteditable") === "true")
-    return true;
-  if (el.hasAttribute("tabindex") && el.getAttribute("tabindex") !== "-1")
-    return true;
-  if (el.namespaceURI === "http://www.w3.org/2000/svg") {
-    const svgTag = el.tagName.toLowerCase();
-    if (svgTag === "a" && (el.hasAttribute("href") || el.getAttributeNS("http://www.w3.org/1999/xlink", "href")))
-      return true;
-    if (el.hasAttribute("onclick") || el.hasAttribute("tabindex"))
-      return true;
-    if (role && roles.has(role))
-      return true;
-    if (style.cursor === "pointer")
-      return true;
-  }
-  if (style.cursor === "pointer" && el.tagName !== "BODY" && el.tagName !== "HTML") {
-    const parent = el.parentElement;
-    const parentCursor = parent ? getComputedStyle(parent).cursor : null;
-    if (hasOwnPointerCursor(style.cursor, parentCursor))
-      return true;
-  }
-  return false;
-}
-function getInteractiveElements() {
-  selectorMap.clear();
-  nextIndex = 0;
-  pruneStaleRefs();
-  const results = [];
-  walkWithShadow(document.body, (el) => {
-    const style = getComputedStyle(el);
-    if (isInteractive(el, INTERACTIVE_TAGS, INTERACTIVE_ROLES, style) && isVisible(el, style)) {
-      const idx = nextIndex++;
-      const selector = buildSelector(el);
-      selectorMap.set(idx, selector);
-      const refId = getOrAssignRef(el);
-      const tag = el.tagName.toLowerCase();
-      const text = getAccessibleName(el);
-      const attrs = getRelevantAttrs(el);
-      refMetadata.set(refId, { role: getEffectiveRole(el, style), name: text, tag, value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40) });
-      results.push({ index: idx, refId, element: el, selector, tag, text, attrs });
-    }
-  });
-  return results;
-}
-var selectorMap, nextIndex = 0, INTERACTIVE_TAGS, INTERACTIVE_ROLES;
-var init_element_discovery = __esm(() => {
-  init_ref_registry();
-  init_a11y_tree();
-  init_sensitive();
-  init_element_tree();
-  selectorMap = new Map;
-  INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "DETAILS", "SUMMARY"]);
-  INTERACTIVE_ROLES = new Set(["button", "link", "tab", "menuitem", "checkbox", "radio", "switch", "textbox", "combobox", "listbox", "option", "slider"]);
-});
-
-// extension/src/content/semantic-match.ts
-function findBestMatch(name, role, text) {
-  const query = (name || text || "").toLowerCase();
-  const targetRole = (role || "").toLowerCase();
-  const isTextPseudoRole = targetRole === "text";
-  let best = null;
-  for (const [refId, weakRef] of refRegistry) {
-    const el = weakRef.deref();
-    if (!el || !el.isConnected || !isVisible(el))
-      continue;
-    const elRole = getEffectiveRole(el).toLowerCase();
-    const elName = getAccessibleName(el).toLowerCase();
-    let score = 0;
-    if (targetRole && !isTextPseudoRole && elRole !== targetRole)
-      continue;
-    if (targetRole && !isTextPseudoRole && elRole === targetRole)
-      score += 50;
-    if (query) {
-      if (elName === query)
-        score += 100;
-      else if (elName.includes(query))
-        score += 60;
-      const id = el.getAttribute("id")?.toLowerCase();
-      if (id?.includes(query))
-        score += 50;
-      const placeholder = el.getAttribute("placeholder")?.toLowerCase();
-      if (placeholder?.includes(query))
-        score += 40;
-      if (isTextPseudoRole) {
-        const elText = (el.textContent || "").trim().toLowerCase();
-        if (elText === query)
-          score += 80;
-        else if (elText.includes(query))
-          score += 50;
-      }
-    }
-    if (score >= 30 && (!best || score > best.score)) {
-      best = { refId, role: getEffectiveRole(el), name: getAccessibleName(el), score, element: el };
-    }
-  }
-  return best;
-}
-var init_semantic_match = __esm(() => {
-  init_ref_registry();
-  init_element_discovery();
-  init_a11y_tree();
-});
-
-// extension/src/content/ref-registry.ts
-function getStaleWarning() {
-  return staleWarning;
-}
-function clearStaleWarning() {
-  staleWarning = null;
-}
-function getOrAssignRef(el) {
-  const existing = elementToRef.get(el);
-  if (existing) {
-    const ref = refRegistry.get(existing);
-    const live = ref?.deref();
-    if (live === el)
-      return existing;
-    if (!live) {
-      refRegistry.set(existing, new WeakRef(el));
-      return existing;
-    }
-    refRegistry.set(existing, new WeakRef(el));
-    return existing;
-  }
-  const refId = `e${refIdCounter.value++}`;
-  refRegistry.set(refId, new WeakRef(el));
-  elementToRef.set(el, refId);
-  return refId;
-}
-function resolveRef(refId) {
-  const ref = refRegistry.get(refId);
-  if (ref) {
-    const el = ref.deref();
-    if (el && el.isConnected)
-      return el;
-  }
-  const meta = refMetadata.get(refId);
-  if (meta) {
-    const match = findBestMatch(meta.name, meta.role);
-    if (match && match.score >= 70) {
-      staleWarning = `stale ref ${refId} re-resolved to ${match.refId} (${match.role} '${match.name}', score: ${match.score})`;
-      return match.element;
-    }
-  }
-  return null;
-}
-function pruneStaleRefs() {
-  for (const [id, ref] of refRegistry) {
-    const el = ref.deref();
-    if (!el || !el.isConnected)
-      refRegistry.delete(id);
-  }
-}
-var g, refRegistry, elementToRef, refMetadata, refIdCounter, staleWarning = null;
-var init_ref_registry = __esm(() => {
-  init_semantic_match();
-  g = globalThis;
-  refRegistry = g.__interceptor_refRegistry ?? (g.__interceptor_refRegistry = new Map);
-  elementToRef = g.__interceptor_elementToRef ?? (g.__interceptor_elementToRef = new WeakMap);
-  refMetadata = g.__interceptor_refMetadata ?? (g.__interceptor_refMetadata = new Map);
-  refIdCounter = g.__interceptor_nextRefId ?? (g.__interceptor_nextRefId = { value: 1 });
 });
 
 // extension/src/content/snapshot-diff.ts
@@ -614,7 +641,7 @@ function cacheSnapshot() {
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40),
+      value: safeValue(el).slice(0, 40),
       states: getRelevantAttrs(el)
     });
   }
@@ -634,7 +661,7 @@ function computeSnapshotDiff() {
       refId,
       role: getEffectiveRole(el),
       name: getAccessibleName(el),
-      value: isValueSecret(el) ? SECURE_MASK : (el.value || "").slice(0, 40),
+      value: safeValue(el).slice(0, 40),
       states: getRelevantAttrs(el)
     });
   }
@@ -663,14 +690,89 @@ function computeSnapshotDiff() {
 }
 var lastSnapshot;
 var init_snapshot_diff = __esm(() => {
+  init_sensitive();
   init_ref_registry();
   init_a11y_tree();
-  init_sensitive();
   init_element_tree();
   lastSnapshot = [];
 });
 
+// extension/src/content/deep-query.ts
+function collectRoots(root = document) {
+  const roots = [root];
+  for (let i = 0;i < roots.length && roots.length < MAX_ROOTS; i++) {
+    const current = roots[i];
+    let hosts;
+    try {
+      hosts = Array.from(current.querySelectorAll("*"));
+    } catch {
+      continue;
+    }
+    for (const host of hosts) {
+      const shadow = getShadowRoot(host);
+      if (shadow) {
+        roots.push(shadow);
+        if (roots.length >= MAX_ROOTS)
+          break;
+      }
+    }
+  }
+  return roots;
+}
+function queryAllDeep(selector, root = document) {
+  const direct = Array.from(root.querySelectorAll(selector));
+  const roots = collectRoots(root);
+  if (roots.length === 1)
+    return direct;
+  const seen = new Set(direct);
+  const out = [...direct];
+  for (let i = 1;i < roots.length; i++) {
+    let matches;
+    try {
+      matches = Array.from(roots[i].querySelectorAll(selector));
+    } catch {
+      continue;
+    }
+    for (const el of matches) {
+      if (seen.has(el))
+        continue;
+      seen.add(el);
+      out.push(el);
+    }
+  }
+  return out;
+}
+function queryOneDeep(selector, root = document) {
+  const direct = root.querySelector(selector);
+  if (direct)
+    return direct;
+  const roots = collectRoots(root);
+  for (let i = 1;i < roots.length; i++) {
+    let match;
+    try {
+      match = roots[i].querySelector(selector);
+    } catch {
+      continue;
+    }
+    if (match)
+      return match;
+  }
+  return null;
+}
+var MAX_ROOTS = 2000;
+var init_deep_query = __esm(() => {
+  init_element_discovery();
+});
+
 // extension/src/content/input-simulation.ts
+function staleElementError(action, verb) {
+  const label = String(action.ref ?? action.index ?? "unknown");
+  return {
+    success: false,
+    error: `stale element [${label}] — it is no longer in the DOM, so nothing was ${verb}. Run 'interceptor read' for fresh refs.`,
+    delivered: false
+  };
+}
 function resolveElement(indexOrRef, ref) {
   if (ref) {
     return resolveRef(ref);
@@ -686,6 +788,12 @@ function resolveElement(indexOrRef, ref) {
   if (!isVisible(el))
     return null;
   return el;
+}
+function resolveElementOrSelector(action) {
+  const el = resolveElement(action.index, action.ref);
+  if (el)
+    return el;
+  return action.selector ? queryOneDeep(String(action.selector)) : null;
 }
 function scrollIntoViewIfNeeded(el) {
   const rect = el.getBoundingClientRect();
@@ -739,20 +847,45 @@ function getKeyCode(key) {
     return `Key${key.toUpperCase()}`;
   return KEY_CODES[key] || `Key${key.toUpperCase()}`;
 }
+function getLegacyKeyCode(key) {
+  const named = LEGACY_KEY_CODES[key];
+  if (named !== undefined)
+    return named;
+  if (key.length !== 1)
+    return 0;
+  return key.toUpperCase().charCodeAt(0);
+}
+function withLegacyCodes(event, keyCode, charCode) {
+  for (const [name, value] of [["keyCode", keyCode], ["which", keyCode], ["charCode", charCode]]) {
+    try {
+      Object.defineProperty(event, name, { get: () => value, configurable: true });
+    } catch {}
+  }
+  return event;
+}
+function producesKeypress(key) {
+  return key === "Enter" || key === "Space" || key.length === 1;
+}
 function dispatchKeySequence(target, combo) {
   const parts = combo.split("+");
-  const key = parts[parts.length - 1];
   const modifiers = {
     ctrlKey: parts.includes("Control"),
     shiftKey: parts.includes("Shift"),
     altKey: parts.includes("Alt"),
     metaKey: parts.includes("Meta")
   };
+  const raw = parts[parts.length - 1];
+  const key = modifiers.shiftKey && /^[a-z]$/.test(raw) ? raw.toUpperCase() : raw;
   const code = getKeyCode(key);
-  const keyOpts = { key, code, bubbles: true, cancelable: true, ...modifiers };
-  target.dispatchEvent(new KeyboardEvent("keydown", keyOpts));
-  target.dispatchEvent(new KeyboardEvent("keypress", keyOpts));
-  target.dispatchEvent(new KeyboardEvent("keyup", keyOpts));
+  const legacy = getLegacyKeyCode(key);
+  const base = { key, code, bubbles: true, cancelable: true, ...modifiers };
+  const fire = (type, keyCode, charCode) => target.dispatchEvent(withLegacyCodes(new KeyboardEvent(type, { ...base, keyCode, charCode, which: charCode || keyCode }), keyCode, charCode));
+  const notCancelled = fire("keydown", legacy, 0);
+  if (notCancelled && producesKeypress(key)) {
+    const charCode = key === "Enter" ? 13 : key === "Space" ? 32 : key.charCodeAt(0);
+    fire("keypress", charCode, charCode);
+  }
+  fire("keyup", legacy, 0);
 }
 function waitForMutation(timeoutMs) {
   return new Promise((resolve) => {
@@ -776,24 +909,30 @@ function waitForMutation(timeoutMs) {
 }
 function waitForElement(selector, timeout) {
   return new Promise((resolve) => {
-    const existing = document.querySelector(selector);
+    const existing = queryOneDeep(selector);
     if (existing) {
       resolve(existing);
       return;
     }
-    const timer = setTimeout(() => {
+    let done = false;
+    const finish = (el) => {
+      if (done)
+        return;
+      done = true;
+      clearTimeout(timer);
+      clearInterval(poll);
       observer.disconnect();
-      resolve(null);
-    }, timeout);
-    const observer = new MutationObserver(() => {
-      const el = document.querySelector(selector);
-      if (el) {
-        clearTimeout(timer);
-        observer.disconnect();
-        resolve(el);
-      }
-    });
+      resolve(el);
+    };
+    const check = () => {
+      const el = queryOneDeep(selector);
+      if (el)
+        finish(el);
+    };
+    const timer = setTimeout(() => finish(null), timeout);
+    const observer = new MutationObserver(check);
     observer.observe(document.body, { childList: true, subtree: true });
+    const poll = setInterval(check, 250);
   });
 }
 function waitForDomStable(debounceMs = 200, timeoutMs = 5000) {
@@ -825,11 +964,12 @@ function waitForDomStable(debounceMs = 200, timeoutMs = 5000) {
     }, debounceMs);
   });
 }
-var KEY_CODES;
+var KEY_CODES, LEGACY_KEY_CODES;
 var init_input_simulation = __esm(() => {
   init_ref_registry();
   init_element_discovery();
   init_element_discovery();
+  init_deep_query();
   KEY_CODES = {
     Enter: "Enter",
     Tab: "Tab",
@@ -858,25 +998,42 @@ var init_input_simulation = __esm(() => {
     F11: "F11",
     F12: "F12"
   };
+  LEGACY_KEY_CODES = {
+    Backspace: 8,
+    Tab: 9,
+    Enter: 13,
+    Shift: 16,
+    Control: 17,
+    Alt: 18,
+    Escape: 27,
+    Space: 32,
+    " ": 32,
+    PageUp: 33,
+    PageDown: 34,
+    End: 35,
+    Home: 36,
+    ArrowLeft: 37,
+    ArrowUp: 38,
+    ArrowRight: 39,
+    ArrowDown: 40,
+    Delete: 46,
+    Meta: 91,
+    F1: 112,
+    F2: 113,
+    F3: 114,
+    F4: 115,
+    F5: 116,
+    F6: 117,
+    F7: 118,
+    F8: 119,
+    F9: 120,
+    F10: 121,
+    F11: 122,
+    F12: 123
+  };
 });
 
 // extension/src/content/scene/ops.ts
-var exports_ops = {};
-__export(exports_ops, {
-  boundingBox: () => boundingBox,
-  clickAtViewport: () => clickAtViewport,
-  clickElementCenter: () => clickElementCenter,
-  dblclickElementCenter: () => dblclickElementCenter,
-  dispatchKeysIn: () => dispatchKeysIn,
-  findAncestorScale: () => findAncestorScale,
-  findElementById: () => findElementById,
-  focusIframeTextbox: () => focusIframeTextbox,
-  isVisibleRect: () => isVisibleRect,
-  parseDocCoord: () => parseDocCoord,
-  parseScale: () => parseScale,
-  parseTranslate: () => parseTranslate,
-  scrollElementIntoView: () => scrollElementIntoView
-});
 function boundingBox(el) {
   const r = el.getBoundingClientRect();
   return {
@@ -887,44 +1044,6 @@ function boundingBox(el) {
     cx: Math.round(r.left + r.width / 2),
     cy: Math.round(r.top + r.height / 2)
   };
-}
-function isVisibleRect(r) {
-  return r.w > 0 && r.h > 0;
-}
-function parseTranslate(transform) {
-  if (!transform)
-    return null;
-  const m = transform.match(TRANSLATE_RE);
-  if (!m)
-    return null;
-  return { x: parseFloat(m[1]), y: parseFloat(m[2]) };
-}
-function parseScale(transform) {
-  if (!transform)
-    return null;
-  const m = transform.match(SCALE_RE);
-  if (!m)
-    return null;
-  return parseFloat(m[1]);
-}
-function findAncestorScale(el) {
-  let cur = el;
-  for (let i = 0;i < 20 && cur; i++) {
-    const s = parseScale(cur.style?.transform);
-    if (s !== null)
-      return s;
-    cur = cur.parentElement;
-  }
-  return null;
-}
-function parseDocCoord(el) {
-  const he = el;
-  const t = parseTranslate(he.style?.transform);
-  const w = parseFloat(he.style?.width || "");
-  const h = parseFloat(he.style?.height || "");
-  if (!t || isNaN(w) || isNaN(h))
-    return null;
-  return { x: t.x, y: t.y, w, h };
 }
 function scrollElementIntoView(el) {
   const r = el.getBoundingClientRect();
@@ -967,45 +1086,8 @@ function clickAtViewport(x, y) {
   } catch {}
   return el;
 }
-function focusIframeTextbox(iframe) {
-  try {
-    const doc = iframe.contentDocument;
-    if (!doc)
-      return null;
-    const textbox = doc.querySelector("[role=textbox]") || doc.querySelector("[contenteditable]");
-    if (!textbox)
-      return null;
-    try {
-      iframe.focus();
-    } catch {}
-    try {
-      textbox.focus();
-    } catch {}
-    return { doc, textbox };
-  } catch {
-    return null;
-  }
-}
-function dispatchKeysIn(target, keys) {
-  dispatchKeySequence(target, keys);
-}
-function findElementById(id) {
-  try {
-    const direct = document.getElementById(id);
-    if (direct)
-      return direct;
-  } catch {}
-  try {
-    return document.querySelector(`#${CSS.escape(id)}`);
-  } catch {
-    return null;
-  }
-}
-var TRANSLATE_RE, SCALE_RE;
 var init_ops = __esm(() => {
   init_input_simulation();
-  TRANSLATE_RE = /translate\(\s*(-?[\d.]+)(?:px)?\s*,\s*(-?[\d.]+)(?:px)?\s*\)/;
-  SCALE_RE = /scale\(\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/;
 });
 
 // extension/src/content/canvas-bridge.ts
@@ -1347,7 +1429,7 @@ function shouldPersistBody(contentType, body) {
     return true;
   return false;
 }
-function redactSensitiveText(text) {
+function redactSensitiveText2(text) {
   return text.replace(/("?(authorization|cookie|set-cookie|access[_-]?token|refresh[_-]?token|csrf|session(id)?|jwt)"?\s*[:=]\s*"?)([^"\s,&}]+)/gi, "$1[REDACTED]").replace(/\beyJ[A-Za-z0-9._-]{20,}\b/g, "[REDACTED_JWT]");
 }
 function buildBodyPreview(contentType, body) {
@@ -1355,7 +1437,7 @@ function buildBodyPreview(contentType, body) {
     return null;
   if (!persistBodiesAlways && !shouldPersistBody(contentType, body))
     return null;
-  const redacted = redactSensitiveText(body);
+  const redacted = redactSensitiveText2(body);
   const truncated = redacted.length > netBodyCap;
   const preview = truncated ? redacted.slice(0, netBodyCap) : redacted;
   return { preview, bytes: body.length, truncated };
@@ -1832,12 +1914,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // extension/src/content.ts
-init_ref_registry();
 init_snapshot_diff();
 init_ref_registry();
 init_a11y_tree();
 
 // extension/src/content/state.ts
+init_sensitive();
 init_element_discovery();
 init_element_tree();
 init_ref_registry();
@@ -1850,13 +1932,13 @@ function getPageState(full = false) {
   const scrollY = window.scrollY;
   const scrollHeight = document.documentElement.scrollHeight;
   const viewportHeight = window.innerHeight;
-  const active2 = document.activeElement;
+  const active = document.activeElement;
   let focusedStr = "none";
-  if (active2 && active2 !== document.body && active2 !== document.documentElement) {
-    const fRef = getOrAssignRef(active2);
-    const fRole = getEffectiveRole(active2);
-    const fName = getAccessibleName(active2);
-    focusedStr = `${fRef} ${fRole || active2.tagName.toLowerCase()} "${fName}"`;
+  if (active && active !== document.body && active !== document.documentElement) {
+    const fRef = getOrAssignRef(active);
+    const fRole = getEffectiveRole(active);
+    const fName = getAccessibleName(active);
+    focusedStr = `${fRef} ${fRole || active.tagName.toLowerCase()} "${fName}"`;
   }
   const state = {
     url: location.href,
@@ -1867,7 +1949,7 @@ function getPageState(full = false) {
     timestamp: Date.now()
   };
   if (full) {
-    state.staticText = document.body.innerText.slice(0, 5000);
+    state.staticText = safeText(document.body, true).slice(0, 5000);
   }
   cacheSnapshot();
   return { success: true, data: state };
@@ -1879,11 +1961,12 @@ init_input_simulation();
 // extension/src/content/actions/click.ts
 init_input_simulation();
 init_ref_registry();
+init_deep_query();
 init_a11y_tree();
 async function handleClick(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "clicked");
   scrollIntoViewIfNeeded(el);
   const mutation = waitForMutation(200);
   dispatchClickSequence(el, action.x, action.y);
@@ -1900,7 +1983,7 @@ async function handleClickSelector(action) {
     return { success: false, error: "click_selector: no selector given" };
   let matches;
   try {
-    matches = document.querySelectorAll(selector);
+    matches = queryAllDeep(selector);
   } catch {
     return { success: false, error: `click_selector: invalid CSS selector ${JSON.stringify(selector)}` };
   }
@@ -1926,7 +2009,7 @@ async function handleClickSelector(action) {
 async function handleDblclick(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "double-clicked");
   scrollIntoViewIfNeeded(el);
   dispatchClickSequence(el, action.x, action.y);
   const rect = el.getBoundingClientRect();
@@ -1938,7 +2021,7 @@ async function handleDblclick(action) {
 async function handleRightclick(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "right-clicked");
   scrollIntoViewIfNeeded(el);
   const rect = el.getBoundingClientRect();
   const x = action.x !== undefined ? rect.left + action.x : rect.left + rect.width / 2;
@@ -1993,8 +2076,13 @@ init_sensitive();
 async function handleInputText(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
-  if (action.sensitive === true)
+    return staleElementError(action, "typed");
+  if (el.tagName === "SELECT") {
+    if (action.sensitive === true)
+      return { success: false, error: "credential delivery requires a text field" };
+    return handleSelectOption({ ...action, value: action.text });
+  }
+  if (action.sensitive === true || isSensitive(el))
     markSensitive(el);
   el.focus();
   const text = action.text;
@@ -2047,15 +2135,41 @@ async function handleInputText(action) {
 async function handleSelectOption(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
-  el.value = action.value;
+    return staleElementError(action, "selected");
+  if (el.tagName !== "SELECT")
+    return { success: false, error: "select requires a native <select>; use click/read for a custom dropdown" };
+  if (typeof action.value !== "string")
+    return { success: false, error: "select requires an option value or label" };
+  if (el.matches(":disabled") || el.getAttribute("aria-disabled") === "true")
+    return { success: false, error: "select is disabled" };
+  const options = Array.from(el.options);
+  const exact = options.find((option) => option.value === action.value);
+  const labels = exact ? [] : options.filter((option) => option.label === action.value);
+  const option = exact || (labels.length === 1 ? labels[0] : undefined);
+  if (!option)
+    return {
+      success: false,
+      error: (labels.length > 1 ? "option label is ambiguous; use its exact value" : "no matching option; use an exact value or unique label") + `. Available options: ${JSON.stringify(options.slice(0, 30).map((o) => ({ value: o.value.slice(0, 160), label: o.label.slice(0, 160) })))}${options.length > 30 ? " (first 30)" : ""}`,
+      data: { options: options.slice(0, 30).map((o) => ({ value: o.value.slice(0, 160), label: o.label.slice(0, 160), disabled: o.matches(":disabled") })), total: options.length, truncated: options.length > 30 }
+    };
+  if (option.matches(":disabled"))
+    return { success: false, error: "option or its optgroup is disabled" };
+  if (el.selectedOptions.length === 1 && el.selectedOptions[0] === option) {
+    return { success: true, data: { value: option.value, label: option.label, changed: false } };
+  }
+  el.selectedIndex = options.indexOf(option);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  return { success: true };
+  await Promise.resolve();
+  if (!el.isConnected || el.selectedOptions.length !== 1 || el.selectedOptions[0] !== option) {
+    return { success: false, error: "page did not retain the selected option; read the dropdown before retrying" };
+  }
+  return { success: true, data: { value: option.value, label: option.label, changed: true } };
 }
 async function handleCheck(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "toggled");
   const target = action.checked !== undefined ? !!action.checked : !el.checked;
   if (el.checked !== target) {
     el.checked = target;
@@ -2093,7 +2207,7 @@ async function handleScrollAbsolute(action) {
 async function handleScrollTo(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "scrolled to");
   el.scrollIntoView({ block: "center", behavior: "instant" });
   return { success: true };
 }
@@ -2136,7 +2250,7 @@ init_input_simulation();
 async function handleDrag(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "dragged");
   scrollIntoViewIfNeeded(el);
   const dragRect = el.getBoundingClientRect();
   const fromX = dragRect.left + action.fromX;
@@ -2302,10 +2416,10 @@ function stageForPicker(bytes, name, type) {
 var chunkBuffers = new Map;
 function handleFileUploadChunk(action) {
   const uploadId = String(action.uploadId || "");
-  const seq2 = Number(action.seq);
+  const seq = Number(action.seq);
   const total = Number(action.total);
   const chunk = typeof action.chunk === "string" ? action.chunk : "";
-  if (!uploadId || !Number.isInteger(seq2) || !Number.isInteger(total) || total <= 0) {
+  if (!uploadId || !Number.isInteger(seq) || !Number.isInteger(total) || total <= 0) {
     return { success: false, error: "file_upload_chunk: malformed chunk header" };
   }
   let buf = chunkBuffers.get(uploadId);
@@ -2313,10 +2427,10 @@ function handleFileUploadChunk(action) {
     buf = { parts: new Array(total).fill(null), total };
     chunkBuffers.set(uploadId, buf);
   }
-  if (seq2 < 0 || seq2 >= buf.total) {
-    return { success: false, error: `file_upload_chunk: seq ${seq2} out of range 0..${buf.total - 1}` };
+  if (seq < 0 || seq >= buf.total) {
+    return { success: false, error: `file_upload_chunk: seq ${seq} out of range 0..${buf.total - 1}` };
   }
-  buf.parts[seq2] = chunk;
+  buf.parts[seq] = chunk;
   const received = buf.parts.reduce((n, p) => n + (p !== null ? 1 : 0), 0);
   return { success: true, data: { buffered: received, of: buf.total } };
 }
@@ -2371,10 +2485,10 @@ async function handleFileUpload(action) {
     fileInput.files = dt.files;
     fileInput.dispatchEvent(new Event("input", { bubbles: true }));
     fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-    const verified2 = fileInput.files.length > 0;
+    const verified = fileInput.files.length > 0;
     return {
       success: true,
-      data: { method: "input", fileName, size: bytes.byteLength, verified: verified2, multiple: fileInput.multiple, accept: fileInput.accept || null }
+      data: { method: "input", fileName, size: bytes.byteLength, verified, multiple: fileInput.multiple, accept: fileInput.accept || null }
     };
   }
   const target = el;
@@ -2402,7 +2516,7 @@ init_input_simulation();
 async function handleHover(action) {
   const el = resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
+    return staleElementError(action, "hovered");
   const hoverFromX = action.fromX;
   const hoverFromY = action.fromY;
   if (hoverFromX !== undefined && hoverFromY !== undefined) {
@@ -2432,11 +2546,30 @@ async function handleHover(action) {
 init_input_simulation();
 init_ref_registry();
 init_a11y_tree();
+init_sensitive();
+init_element_discovery();
 async function handleFocus(action) {
-  const el = resolveElement(action.index, action.ref);
+  const focusedSensitive = action.focused === true && action.sensitive === true;
+  const el = focusedSensitive ? document.activeElement : resolveElement(action.index, action.ref);
   if (!el)
-    return { success: false, error: `stale element [${action.index}] — run interceptor state to refresh` };
-  el.focus();
+    return staleElementError(action, "focused");
+  if (action.sensitive === true) {
+    if (el === document.body || el === document.documentElement)
+      return { success: false, error: "no focused credential field" };
+  }
+  if (!focusedSensitive)
+    el.focus();
+  if (action.sensitive === true) {
+    let active = document.activeElement;
+    let focused = active === el;
+    while (active && getShadowRoot(active)?.activeElement) {
+      active = getShadowRoot(active).activeElement;
+      focused ||= active === el;
+    }
+    if (!focused)
+      return { success: false, error: "credential target did not receive focus; nothing typed" };
+    markSensitive(focusedSensitive ? active : el);
+  }
   return { success: true };
 }
 async function handleBlur(_action) {
@@ -2444,23 +2577,23 @@ async function handleBlur(_action) {
   return { success: true };
 }
 async function handleGetFocus(_action) {
-  const active2 = document.activeElement;
-  if (!active2 || active2 === document.body || active2 === document.documentElement) {
+  const active = document.activeElement;
+  if (!active || active === document.body || active === document.documentElement) {
     return { success: true, data: { focused: null } };
   }
-  const focusRef = getOrAssignRef(active2);
-  const focusRole = getEffectiveRole(active2);
-  const focusName = getAccessibleName(active2);
-  const isEditable = active2.tagName === "INPUT" || active2.tagName === "TEXTAREA" || active2.isContentEditable || active2.getAttribute("role") === "textbox";
+  const focusRef = getOrAssignRef(active);
+  const focusRole = getEffectiveRole(active);
+  const focusName = getAccessibleName(active);
+  const isEditable = active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable || active.getAttribute("role") === "textbox";
   return {
     success: true,
     data: {
       focused: {
         ref: focusRef,
-        tag: active2.tagName.toLowerCase(),
+        tag: active.tagName.toLowerCase(),
         role: focusRole,
         name: focusName,
-        type: active2.type || undefined,
+        type: active.type || undefined,
         editable: isEditable
       }
     }
@@ -2468,10 +2601,12 @@ async function handleGetFocus(_action) {
 }
 
 // extension/src/content/data/extract.ts
+init_sensitive();
 init_input_simulation();
 
 // extension/src/content/data/markdown-extract.ts
 init_element_discovery();
+init_sensitive();
 var SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE"]);
 var BLOCK_TAGS = new Set(["P", "DIV", "SECTION", "ARTICLE", "HEADER", "FOOTER", "MAIN", "ASIDE", "NAV", "FORM", "FIELDSET", "DETAILS", "SUMMARY", "FIGURE", "FIGCAPTION", "ADDRESS", "DD", "DT", "DL"]);
 function renderMarkdown(root) {
@@ -2493,6 +2628,8 @@ function walkNode(node) {
     return "";
   if (!isVisible(el) && tag !== "BODY")
     return "";
+  if (isSensitive(el))
+    return el.textContent ? SECURE_MASK : "";
   switch (tag) {
     case "H1":
     case "H2":
@@ -2547,8 +2684,8 @@ ${content}
     }
     case "CODE": {
       if (el.closest("pre"))
-        return el.textContent || "";
-      const c = (el.textContent || "").trim();
+        return safeText(el);
+      const c = safeText(el).trim();
       return c ? `\`${c}\`` : "";
     }
     case "A": {
@@ -2584,13 +2721,15 @@ ${content}
   return out;
 }
 function inlineChildren(el) {
+  if (isSensitive(el))
+    return el.textContent ? SECURE_MASK : "";
   let out = "";
   for (const child of el.childNodes)
     out += walkNode(child);
   return out.replace(/\s+/g, " ").trim();
 }
 function renderPre(el) {
-  const code = (el.textContent || "").replace(/^\n+|\n+$/g, "");
+  const code = safeText(el).replace(/^\n+|\n+$/g, "");
   if (!code)
     return "";
   const codeEl = el.querySelector("code");
@@ -2648,6 +2787,8 @@ ${items.join(`
 function renderListItem(el, kind, index, indent) {
   const pad = "  ".repeat(indent);
   const bullet = kind === "ul" ? "-" : `${index}.`;
+  if (isSensitive(el))
+    return el.textContent ? `${pad}${bullet} ${SECURE_MASK}` : "";
   let mainLine = "";
   const nested = [];
   for (const child of el.childNodes) {
@@ -2750,10 +2891,10 @@ async function handleExtractText(action) {
       const label = String(action.ref ?? action.index ?? "unknown");
       return { success: false, error: `stale element [${label}] — run interceptor state to refresh` };
     }
-    const raw = (el.textContent || "").trim();
+    const raw = safeText(el).trim();
     return { success: true, data: withTruncationMarker(raw, Math.min(maxChars, ELEMENT_MAX_CHARS)) };
   }
-  return { success: true, data: withTruncationMarker(document.body.innerText, maxChars) };
+  return { success: true, data: withTruncationMarker(safeText(document.body, true), maxChars) };
 }
 async function handleExtractMarkdown(action) {
   const maxChars = typeof action.maxChars === "number" && action.maxChars > 0 ? action.maxChars : DEFAULT_TEXT_MAX_CHARS;
@@ -2775,83 +2916,89 @@ async function handleExtractHtml(action) {
       const label = String(action.ref ?? action.index ?? "unknown");
       return { success: false, error: `stale element [${label}] — run interceptor state to refresh` };
     }
-    return { success: true, data: withTruncationMarker(el.outerHTML, Math.min(maxChars, ELEMENT_MAX_CHARS)) };
+    return { success: true, data: withTruncationMarker(safeHtml(el), Math.min(maxChars, ELEMENT_MAX_CHARS)) };
   }
-  return { success: true, data: withTruncationMarker(document.documentElement.outerHTML, maxChars) };
+  return { success: true, data: withTruncationMarker(safeHtml(document.documentElement), maxChars) };
 }
 
 // extension/src/content/data/query.ts
+init_sensitive();
 init_input_simulation();
 init_ref_registry();
+init_deep_query();
 async function handleQuery(action) {
   const selector = action.selector;
-  const els = document.querySelectorAll(selector);
+  const els = queryAllDeep(selector);
+  const elements = els.slice(0, 20).map((el, i) => ({
+    index: i,
+    ref: getOrAssignRef(el),
+    tag: el.tagName.toLowerCase(),
+    text: safeText(el).trim().slice(0, 80),
+    id: el.id || undefined,
+    classes: el.className || undefined
+  }));
   return {
     success: true,
     data: {
       count: els.length,
-      elements: Array.from(els).slice(0, 20).map((el, i) => ({
-        index: i,
-        ref: getOrAssignRef(el),
-        tag: el.tagName.toLowerCase(),
-        text: (el.textContent || "").trim().slice(0, 80),
-        id: el.id || undefined,
-        classes: el.className || undefined
-      }))
+      returned: elements.length,
+      truncated: elements.length < els.length,
+      elements
     }
   };
 }
 async function handleQueryOne(action) {
-  const el = document.querySelector(action.selector);
+  const el = queryOneDeep(action.selector);
   if (!el)
     return { success: false, error: `no element matching: ${action.selector}` };
   return {
     success: true,
     data: {
       tag: el.tagName.toLowerCase(),
-      text: (el.textContent || "").trim().slice(0, 200),
-      html: el.outerHTML.slice(0, 500),
+      text: safeText(el).trim().slice(0, 200),
+      html: safeHtml(el).slice(0, 500),
       id: el.id || undefined,
       rect: el.getBoundingClientRect()
     }
   };
 }
 async function handleExists(action) {
-  const el = document.querySelector(action.selector);
+  const el = queryOneDeep(action.selector);
   return { success: true, data: !!el };
 }
 async function handleCount(action) {
-  const els = document.querySelectorAll(action.selector);
+  const els = queryAllDeep(action.selector);
   return { success: true, data: els.length };
 }
 async function handleTableData(action) {
-  const table = action.index !== undefined ? resolveElement(action.index, action.ref) : document.querySelector(action.selector || "table");
+  const table = action.index !== undefined ? resolveElement(action.index, action.ref) : queryOneDeep(String(action.selector || "table"));
   if (!table)
     return { success: false, error: "table not found" };
   const rows = [];
   table.querySelectorAll("tr").forEach((tr) => {
     const cells = [];
-    tr.querySelectorAll("td, th").forEach((cell) => cells.push((cell.textContent || "").trim()));
+    tr.querySelectorAll("td, th").forEach((cell) => cells.push(safeText(cell).trim()));
     rows.push(cells);
   });
   return { success: true, data: rows };
 }
 async function handleAttrGet(action) {
-  const el = resolveElement(action.index, action.ref) || document.querySelector(action.selector);
+  const el = resolveElementOrSelector(action);
   if (!el)
     return { success: false, error: "element not found" };
   const name = action.name;
-  return { success: true, data: el.getAttribute(name) };
+  const value = el.getAttribute(name);
+  return { success: true, data: name.toLowerCase() === "value" && value && isSensitive(el) ? SECURE_MASK : value };
 }
 async function handleAttrSet(action) {
-  const el = resolveElement(action.index, action.ref) || document.querySelector(action.selector);
+  const el = resolveElementOrSelector(action);
   if (!el)
     return { success: false, error: "element not found" };
   el.setAttribute(action.name, action.value);
   return { success: true };
 }
 async function handleStyleGet(action) {
-  const el = resolveElement(action.index, action.ref) || document.querySelector(action.selector);
+  const el = resolveElementOrSelector(action);
   if (!el)
     return { success: false, error: "element not found" };
   const computed = getComputedStyle(el);
@@ -2880,7 +3027,7 @@ async function handleForms(_action) {
         tag: el.tagName.toLowerCase(),
         type: el.type,
         name: el.name,
-        value: isValueSecret(el) ? SECURE_MASK : el.value?.slice(0, 40),
+        value: safeValue(el).slice(0, 40),
         placeholder: el.placeholder
       }))
     }))
@@ -2991,12 +3138,49 @@ async function handleSelectionSet(action) {
 init_input_simulation();
 init_element_discovery();
 init_a11y_tree();
+init_deep_query();
+function frameHost(frameId, url) {
+  const frames = queryAllDeep("iframe, frame");
+  const getFrameId = chrome.runtime.getFrameId;
+  if (typeof getFrameId === "function") {
+    const exact = frames.find((f) => {
+      try {
+        return getFrameId(f) === frameId;
+      } catch {
+        return false;
+      }
+    });
+    if (exact)
+      return exact;
+  }
+  const bySrc = typeof url === "string" ? frames.filter((f) => f.src === url) : [];
+  return bySrc.length === 1 ? bySrc[0] : null;
+}
 async function handleRect(action) {
-  const el = resolveElement(action.index, action.ref) || document.querySelector(action.selector);
+  const host = typeof action.hostOfFrame === "number";
+  const el = host ? frameHost(action.hostOfFrame, action.hostUrl) : resolveElementOrSelector(action);
   if (!el)
-    return { success: false, error: "element not found" };
-  const r = el.getBoundingClientRect();
-  return { success: true, data: { top: r.top, left: r.left, width: r.width, height: r.height, bottom: r.bottom, right: r.right } };
+    return { success: false, error: host ? "iframe not found" : "element not found" };
+  const box = el.getBoundingClientRect();
+  const style = host ? getComputedStyle(el) : null;
+  const r = {
+    left: box.left + (style ? el.clientLeft + (parseFloat(style.paddingLeft) || 0) : 0),
+    top: box.top + (style ? el.clientTop + (parseFloat(style.paddingTop) || 0) : 0),
+    width: box.width,
+    height: box.height,
+    bottom: box.bottom,
+    right: box.right
+  };
+  return { success: true, data: {
+    top: r.top,
+    left: r.left,
+    width: r.width,
+    height: r.height,
+    bottom: r.bottom,
+    right: r.right,
+    viewportHeight: window.innerHeight,
+    pageHidden: document.visibilityState === "hidden"
+  } };
 }
 async function handleRegions(_action) {
   const regionElements = getInteractiveElements();
@@ -3088,12 +3272,59 @@ async function handlePanels(_action) {
   return { success: true, data: { panels } };
 }
 
+// extension/src/content/semantic-match.ts
+init_sensitive();
+init_ref_registry();
+init_element_discovery();
+init_a11y_tree();
+function findBestMatch(name, role, text) {
+  const query = (name || text || "").toLowerCase();
+  const targetRole = (role || "").toLowerCase();
+  const isTextPseudoRole = targetRole === "text";
+  let best = null;
+  for (const [refId, weakRef] of refRegistry) {
+    const el = weakRef.deref();
+    if (!el || !el.isConnected || !isVisible(el))
+      continue;
+    const elRole = getEffectiveRole(el).toLowerCase();
+    const elName = getAccessibleName(el).toLowerCase();
+    let score = 0;
+    if (targetRole && !isTextPseudoRole && elRole !== targetRole)
+      continue;
+    if (targetRole && !isTextPseudoRole && elRole === targetRole)
+      score += 50;
+    if (query) {
+      if (elName === query)
+        score += 100;
+      else if (elName.includes(query))
+        score += 60;
+      const id = el.getAttribute("id")?.toLowerCase();
+      if (id?.includes(query))
+        score += 50;
+      const placeholder = el.getAttribute("placeholder")?.toLowerCase();
+      if (placeholder?.includes(query))
+        score += 40;
+      if (isTextPseudoRole) {
+        const elText = safeText(el).trim().toLowerCase();
+        if (elText === query)
+          score += 80;
+        else if (elText.includes(query))
+          score += 50;
+      }
+    }
+    if (score >= 30 && (!best || score > best.score)) {
+      best = { refId, role: getEffectiveRole(el), name: getAccessibleName(el), score, element: el };
+    }
+  }
+  return best;
+}
+
 // extension/src/content/find.ts
-init_semantic_match();
 init_ref_registry();
 init_element_discovery();
 init_a11y_tree();
 init_input_simulation();
+init_sensitive();
 function findRenderedText(renderedText, rawQuery, limit = 10, contextChars = 80) {
   const query = rawQuery.trim();
   const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 10;
@@ -3162,7 +3393,7 @@ function findAccessibleElements(rawQuery, rawRole, limit = 10) {
       const placeholder = el.getAttribute("placeholder")?.toLowerCase();
       if (placeholder?.includes(query))
         score += 40;
-      const value = (el.value || "").toLowerCase();
+      const value = isSensitive(el) ? "" : (el.value || "").toLowerCase();
       if (value.includes(query))
         score += 30;
     }
@@ -3183,7 +3414,7 @@ async function handleFindElement(action) {
   const mode = role ? "elements" : requestedMode;
   const data = { query, mode };
   if (mode !== "elements") {
-    data.text = findRenderedText(document.body?.innerText || "", query, limit);
+    data.text = findRenderedText(document.body ? safeText(document.body, true) : "", query, limit);
   }
   if (mode !== "text") {
     data.elements = findAccessibleElements(query, role, limit);
@@ -3209,7 +3440,7 @@ async function handleFindAndType(action) {
   if (!match)
     return { success: false, error: "no matching element found (score < 30)" };
   const typeResult = await handleInputText({ type: "input_text", ref: match.refId, text: action.inputText, clear: action.clear, sensitive: action.sensitive });
-  return { success: true, data: { matched: { ref: match.refId, role: match.role, name: match.name, score: match.score }, actionResult: typeResult } };
+  return { ...typeResult, data: { matched: { ref: match.refId, role: match.role, name: match.name, score: match.score }, actionResult: typeResult } };
 }
 async function handleFindAndCheck(action) {
   const match = findBestMatch(action.name, action.role, action.text);
@@ -3223,6 +3454,7 @@ async function handleFindAndCheck(action) {
 init_a11y_tree();
 init_element_discovery();
 init_ops();
+init_sensitive();
 var sceneRefRegistry = new Map;
 var sceneElementToId = new WeakMap;
 var sceneRefMeta = new Map;
@@ -3230,8 +3462,8 @@ var nextSceneId = 1;
 var cachedDiscovery = null;
 function discoveryCacheKey() {
   const structuralCount = document.querySelectorAll('[data-page-id], [role="application"], [role="document"], [role="main"], [contenteditable="true"], canvas, svg').length;
-  const active2 = document.activeElement;
-  const activeSig = active2 ? [active2.tagName, active2.getAttribute("role") || "", active2.getAttribute("aria-label") || "", active2.getAttribute("data-hidden-input") || ""].join("|") : "none";
+  const active = document.activeElement;
+  const activeSig = active ? [active.tagName, active.getAttribute("role") || "", active.getAttribute("aria-label") || "", active.getAttribute("data-hidden-input") || ""].join("|") : "none";
   return [location.href, structuralCount, activeSig].join("::");
 }
 function isHtmlElement(el) {
@@ -3261,20 +3493,22 @@ function isHiddenProxyInput(el) {
   const role = el.getAttribute("role");
   return hiddenAttr === "true" || role === "application" && inputMode === "none";
 }
+function maskSensitiveText(el, text) {
+  return text && isSensitive(el) ? SECURE_MASK : text;
+}
 function readElementText(el) {
   if (!isHtmlElement(el))
     return "";
-  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
-    return (el.value || "").toString();
-  }
+  if (el.tagName === "INPUT" || el.tagName === "TEXTAREA")
+    return safeValue(el);
   if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
-    return (el.textContent || "").toString();
+    return maskSensitiveText(el, (el.textContent || "").toString());
   }
   const role = el.getAttribute("role");
   if (role === "textbox" || role === "combobox" || role === "searchbox") {
-    return (el.textContent || "").toString();
+    return maskSensitiveText(el, (el.textContent || "").toString());
   }
-  return (getAccessibleName(el) || el.getAttribute("aria-label") || el.textContent || "").toString();
+  return maskSensitiveText(el, (getAccessibleName(el) || el.getAttribute("aria-label") || el.textContent || "").toString());
 }
 function visibleOrActive(el) {
   return isVisible(el) || document.activeElement === el;
@@ -3507,38 +3741,38 @@ function hitTestAdaptiveScene(x, y) {
   };
 }
 function deepestActiveElement(root = document) {
-  let active2 = root.activeElement;
-  while (active2) {
-    const shadow = getShadowRoot(active2);
+  let active = root.activeElement;
+  while (active) {
+    const shadow = getShadowRoot(active);
     const nested = shadow?.activeElement;
-    if (!nested || nested === active2)
+    if (!nested || nested === active)
       break;
-    active2 = nested;
+    active = nested;
   }
-  return active2;
+  return active;
 }
 function findFocusedWritableSurface() {
-  const active2 = deepestActiveElement();
-  if (!active2)
+  const active = deepestActiveElement();
+  if (!active)
     return null;
-  const tag = active2.tagName;
-  const role = active2.getAttribute("role");
+  const tag = active.tagName;
+  const role = active.getAttribute("role");
   if (tag === "TEXTAREA") {
-    return { element: active2, kind: "textarea", text: active2.value || "" };
+    return { element: active, kind: "textarea", text: active.value || "" };
   }
   if (tag === "INPUT") {
-    const hiddenProxy = isHiddenProxyInput(active2);
+    const hiddenProxy = isHiddenProxyInput(active);
     return {
-      element: active2,
+      element: active,
       kind: hiddenProxy ? role === "application" ? "application-proxy" : "hidden-input" : "input",
-      text: active2.value || ""
+      text: active.value || ""
     };
   }
-  if (active2.isContentEditable || active2.getAttribute("contenteditable") === "true") {
-    return { element: active2, kind: "contenteditable", text: active2.textContent || "" };
+  if (active.isContentEditable || active.getAttribute("contenteditable") === "true") {
+    return { element: active, kind: "contenteditable", text: active.textContent || "" };
   }
   if (role === "textbox" || role === "combobox" || role === "searchbox") {
-    return { element: active2, kind: "textbox", text: active2.textContent || "" };
+    return { element: active, kind: "textbox", text: active.textContent || "" };
   }
   return null;
 }
@@ -3546,10 +3780,8 @@ function readFocusedWritableText() {
   const surface = findFocusedWritableSurface();
   if (!surface)
     return null;
-  return {
-    text: surface.text,
-    length: surface.text.length
-  };
+  const text = maskSensitiveText(surface.element, surface.text);
+  return { text, length: text.length };
 }
 function setInputValue(el, text) {
   const tag = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -3619,12 +3851,12 @@ function selectedAdaptiveScene() {
   const writable = findFocusedWritableSurface();
   if (writable) {
     const id = getOrAssignSceneId(writable.element, "text", "focused-writable");
-    const label2 = getAccessibleName(writable.element) || writable.element.getAttribute("aria-label") || writable.kind;
+    const label = getAccessibleName(writable.element) || writable.element.getAttribute("aria-label") || writable.kind;
     return {
       has: true,
       id,
-      label: label2,
-      text: writable.text.slice(0, 200),
+      label,
+      text: maskSensitiveText(writable.element, writable.text).slice(0, 200),
       extras: {
         kind: writable.kind,
         writable: true,
@@ -3632,16 +3864,16 @@ function selectedAdaptiveScene() {
       }
     };
   }
-  const active2 = deepestActiveElement();
-  if (active2) {
-    const id = getOrAssignSceneId(active2, "group", "focused-element");
+  const active = deepestActiveElement();
+  if (active) {
+    const id = getOrAssignSceneId(active, "group", "focused-element");
     return {
       has: true,
       id,
-      label: getAccessibleName(active2) || active2.getAttribute("aria-label") || active2.tagName.toLowerCase(),
-      text: readElementText(active2).slice(0, 200),
+      label: getAccessibleName(active) || active.getAttribute("aria-label") || active.tagName.toLowerCase(),
+      text: readElementText(active).slice(0, 200),
       extras: {
-        role: getEffectiveRole(active2),
+        role: getEffectiveRole(active),
         focused: true
       }
     };
@@ -3843,6 +4075,7 @@ var canvaProfile = {
 
 // extension/src/content/scene/profiles/google-docs.ts
 init_ops();
+init_sensitive();
 function findTextEventTarget() {
   const iframe = document.querySelector(".docs-texteventtarget-iframe");
   if (!iframe)
@@ -3932,7 +4165,7 @@ var googleDocsProfile = {
       if (!sel || sel.rangeCount === 0)
         return { has: false };
       const range = sel.getRangeAt(0);
-      const text = range.toString();
+      const text = isSensitive(tet.textbox) && range.toString() ? SECURE_MASK : range.toString();
       return {
         has: text.length > 0,
         text: text.slice(0, 200),
@@ -3946,10 +4179,10 @@ var googleDocsProfile = {
     const tet = findTextEventTarget();
     if (!tet)
       return null;
-    const text = (tet.textbox.textContent || "").toString();
+    const text = safeText(tet.textbox);
     return {
       text,
-      html: opts?.withHtml ? tet.textbox.innerHTML : undefined,
+      html: opts?.withHtml ? safeHtml(tet.textbox) : undefined,
       length: text.length
     };
   },
@@ -4034,25 +4267,26 @@ var googleDocsProfile = {
 
 // extension/src/content/scene/profiles/google-slides.ts
 init_ops();
+init_sensitive();
 var FILMSTRIP_ID = /^filmstrip-slide-(\d+)-(gd[a-z0-9_-]+)$/i;
 function gatherSlides() {
   const all = Array.from(document.querySelectorAll('g[id^="filmstrip-slide-"]'));
   const byIndex = new Map;
-  for (const g2 of all) {
-    if (g2.id.endsWith("-bg"))
+  for (const g of all) {
+    if (g.id.endsWith("-bg"))
       continue;
-    const m = g2.id.match(FILMSTRIP_ID);
+    const m = g.id.match(FILMSTRIP_ID);
     if (!m)
       continue;
     const index = parseInt(m[1], 10);
     if (byIndex.has(index))
       continue;
-    const rect = boundingBox(g2);
-    const img = g2.querySelector("image");
+    const rect = boundingBox(g);
+    const img = g.querySelector("image");
     const blob = img ? img.getAttribute("xlink:href") || img.getAttribute("href") || undefined : undefined;
-    const wrapper = g2.closest("g.punch-filmstrip-thumbnail");
+    const wrapper = g.closest("g.punch-filmstrip-thumbnail");
     const pageId = wrapper?.getAttribute("data-slide-page-id") || undefined;
-    byIndex.set(index, { index, id: g2.id, rect, blobUrl: blob, pageId });
+    byIndex.set(index, { index, id: g.id, rect, blobUrl: blob, pageId });
   }
   const out = Array.from(byIndex.values()).sort((a, b) => a.index - b.index);
   const current = currentSlideId();
@@ -4151,10 +4385,10 @@ var googleSlidesProfile = {
     if (paragraphs.length === 0) {
       const notesContainer = document.getElementById("speakernotes") || document.getElementById("speakernotes-workspace");
       if (notesContainer)
-        return (notesContainer.textContent || "").trim() || null;
+        return safeText(notesContainer).trim() || null;
       return null;
     }
-    const text = paragraphs.map((p) => (p.textContent || "").trim()).filter(Boolean).join(`
+    const text = paragraphs.map((p) => safeText(p).trim()).filter(Boolean).join(`
 `);
     return text || null;
   },
@@ -4169,7 +4403,7 @@ var googleSlidesProfile = {
       const textbox = doc.querySelector("[role=textbox]") || doc.querySelector("[contenteditable]");
       if (!textbox)
         return null;
-      const text = (textbox.textContent || "").trim();
+      const text = safeText(textbox).trim();
       return { text, length: text.length };
     } catch {
       return null;
@@ -4462,7 +4696,7 @@ async function handleCanvasAction(action) {
         const resolved = canvasResolve(id, profileOverride);
         if (!resolved.success)
           return resolved;
-        const { clickElementCenter: clickElementCenter2, dblclickElementCenter: dblclickElementCenter2 } = await Promise.resolve().then(() => (init_ops(), exports_ops));
+        await Promise.resolve().then(() => init_ops());
         const target = resolved.data;
         const beforeSelection = canvasSelected(profileOverride);
         const cx = Math.round(target.rect.cx);
@@ -4480,18 +4714,18 @@ async function handleCanvasAction(action) {
         }
         if (action.type === "scene_dblclick") {
           if (target.element)
-            dblclickElementCenter2(target.element);
+            dblclickElementCenter(target.element);
           else {
             const clicked = document.elementFromPoint(cx, cy);
             if (clicked)
-              dblclickElementCenter2(clicked);
+              dblclickElementCenter(clicked);
           }
           return {
             success: true,
             data: { id, clicked: true, at: { x: cx, y: cy }, method: "synthetic" }
           };
         }
-        const click = target.element ? () => clickElementCenter2(target.element) : await Promise.resolve().then(() => (init_ops(), exports_ops)).then(({ clickAtViewport: clickAtViewport3 }) => () => clickAtViewport3(cx, cy));
+        const click = target.element ? () => clickElementCenter(target.element) : await Promise.resolve().then(() => (init_ops(), {})).then(({}) => () => clickAtViewport(cx, cy));
         const mutation = waitForMutation(200);
         click();
         const mutated = await mutation;
@@ -4539,6 +4773,7 @@ async function handleCanvasAction(action) {
 
 // extension/src/content/dom-screenshot.ts
 init_input_simulation();
+init_deep_query();
 var TRANSPARENT_1PX = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==";
 var SKIP_TAGS2 = new Set(["script", "noscript", "style", "link", "meta", "template", "iframe", "object", "embed"]);
 function extractUrls(cssValue) {
@@ -4620,11 +4855,11 @@ function buildStyledClone(src, collect) {
     } catch {}
   }
   if (tag === "svg") {
-    const c2 = el.cloneNode(true);
+    const c = el.cloneNode(true);
     try {
-      inlineComputedStyle(el, c2, collect);
+      inlineComputedStyle(el, c, collect);
     } catch {}
-    return c2;
+    return c;
   }
   const c = el.cloneNode(false);
   if (c.style)
@@ -4727,7 +4962,7 @@ function resolveTarget(action) {
       if (!action.selector) {
         return { node: null, error: "selector mode requires selector string" };
       }
-      const el = document.querySelector(action.selector);
+      const el = queryOneDeep(action.selector);
       if (!el)
         return { node: null, error: `selector not found: ${action.selector}` };
       if (!(el instanceof HTMLElement)) {
@@ -4822,12 +5057,11 @@ if (!__interceptorContentAlreadyLoaded)
   });
 async function handleAction(action) {
   const warnDirty = getDomDirty();
-  clearStaleWarning();
   const wantChanges = !!action.changes;
   if (wantChanges)
     cacheSnapshot();
   const result = await executeAction(action);
-  const note = getStaleWarning() ?? (warnDirty ? "DOM has changed since last state read" : null);
+  const note = warnDirty ? "DOM has changed since last state read" : null;
   if (note && result.success)
     result.warning = result.warning ? `${result.warning}; ${note}` : note;
   if (wantChanges && result.success) {
@@ -4943,13 +5177,11 @@ async function executeAction(action) {
         const wantsTarget = action.index !== undefined || action.ref !== undefined;
         pruneStaleRefs();
         const root = wantsTarget ? resolveElement(action.index, action.ref) : document.body;
-        if (wantsTarget && !root) {
-          const label = String(action.ref ?? action.index ?? "unknown");
-          return { success: false, error: `stale element [${label}] — run interceptor state to refresh` };
-        }
+        if (wantsTarget && !root)
+          return staleElementError(action, "read");
         const treeOutput = buildA11yTree(root || document.body, 0, maxDepth, filter, includeStyle, treeFormat);
         const truncated = treeOutput.length > maxChars ? treeOutput.slice(0, maxChars) + `
-... (truncated)` : treeOutput;
+... (tree truncated at ${maxChars} chars: pass --tree-format compact, scope with 'read e<ref>', or raise INTERCEPTOR_TREE_MAX_CHARS)` : treeOutput;
         cacheSnapshot();
         return { success: true, data: truncated };
       }

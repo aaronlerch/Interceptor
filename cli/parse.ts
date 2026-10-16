@@ -3,6 +3,7 @@
  */
 
 import { createHash } from "node:crypto"
+import { globalGroupFlagIndex } from "./global-flags"
 
 export function parseElementTarget(arg: string): { index?: number; ref?: string; frameId?: number; semantic?: { role: string; name: string } } {
   // Every caller that allows an absent target guards before calling (focus,
@@ -53,6 +54,26 @@ export function parseContextFlag(args: string[]): string | undefined {
     process.exit(1)
   }
   return args[idx + 1]
+}
+
+/**
+ * Browser-context resolution, highest precedence first:
+ *   1. --context <id>          explicit per-call choice
+ *   2. $INTERCEPTOR_CONTEXT    per-lane default, set once (parallel to
+ *                              $INTERCEPTOR_GROUP); empty means unset
+ *   3. undefined               the daemon auto-routes when exactly one browser
+ *                              context is connected and refuses otherwise
+ *
+ * "multiple extensions connected, use --context <id>" was the most frequent
+ * error in 80k agent CLI calls (924 results, 286 sessions, 2026-09-10 review)
+ * because every command had to repeat the flag; agents dropped it on the
+ * cleanup and status calls.
+ */
+export function resolveContextId(args: string[], env: Record<string, string | undefined> = process.env): string | undefined {
+  const explicit = parseContextFlag(args)
+  if (explicit !== undefined) return explicit
+  const fromEnv = env.INTERCEPTOR_CONTEXT?.trim()
+  return fromEnv ? fromEnv : undefined
 }
 
 // per-agent named tab groups. Labels become part of a tab-strip title.
@@ -115,7 +136,7 @@ export function resolveSessionId(env: Record<string, string | undefined>): strin
 export function resolveGroupScope(args: string[], env: Record<string, string | undefined> = process.env): GroupScope {
   const optionTerminator = args.indexOf("--")
   const scopeArgs = optionTerminator === -1 ? args : args.slice(0, optionTerminator)
-  const idx = scopeArgs.indexOf("--group")
+  const idx = globalGroupFlagIndex(scopeArgs)
   if (scopeArgs.includes("--shared-group")) {
     if (idx !== -1) {
       console.error("error: --shared-group conflicts with --group")

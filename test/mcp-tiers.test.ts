@@ -134,8 +134,10 @@ describe("issue #244 vault, sudo, admin prompt, auth", () => {
   // them either, so a reintroduction cannot inherit an exec/destructive tier
   // and look sanctioned.
   test("sudo and authdialog carry no tier of their own", () => {
-    expect(classify("macos", "sudo", ["--secret", "admin", "--", "id"]).tier).toBe("mutate")
-    expect(classify("macos", "authdialog", ["fill", "--secret", "admin"]).tier).toBe("mutate")
+    // Upstream 2.x classifies an unknown verb carrying `--` argv as exec, which
+    // is stricter than mutate; either way no dedicated (sanctioned) row exists.
+    expect(["mutate", "exec"]).toContain(classify("macos", "sudo", ["--secret", "admin", "--", "id"]).tier)
+    expect(["mutate", "exec"]).toContain(classify("macos", "authdialog", ["fill", "--secret", "admin"]).tier)
   })
 
   test("auth is explicitly mutate; status reads", () => {

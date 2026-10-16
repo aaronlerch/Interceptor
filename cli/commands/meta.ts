@@ -7,16 +7,21 @@
  */
 
 import { existsSync, readFileSync } from "node:fs"
+import { EVENTS_PATH } from "../../shared/platform"
 import { parseElementTarget } from "../parse"
 import {
   readStatusSnapshot,
   detectConfiguredBrowsers,
   detectMacOSDefaultBrowser,
+  describeEvalMain,
   formatStatus,
   snapshotToJson,
+  type ContextStatus,
   type StatusSnapshot,
 } from "../lib/status-renderer"
 import { sendCommand } from "../transport"
+import { callDesktopProvider } from "../../daemon/desktop-provider"
+import type { DesktopHello } from "../../shared/desktop-contract"
 
 type Action = { type: string; [key: string]: unknown }
 
@@ -48,6 +53,49 @@ async function probeExtensionReachability(contextId?: string): Promise<{ reachab
   }
 }
 
+type ContextEntry = { contextId: string; kind?: string; version?: string; extensionId?: string; installType?: string }
+
+/** Every connected context (daemon-local `contexts --verbose`), 2s-bounded. */
+async function listContexts(): Promise<ContextEntry[]> {
+  try {
+    const resp = await Promise.race([
+      sendCommand({ type: "contexts", verbose: true }, undefined, undefined),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("contexts probe timed out after 2s")), 2000)),
+    ])
+    const data = resp.result?.data
+    if (!Array.isArray(data)) return []
+    return data.map(e => typeof e === "string" ? { contextId: e, kind: "extension" } : e as ContextEntry)
+  } catch {
+    return []
+  }
+}
+
+/** Probe one context: reachability plus page-world eval availability. */
+async function probeContextStatus(entry: ContextEntry): Promise<ContextStatus> {
+  const base: ContextStatus = {
+    contextId: entry.contextId,
+    kind: entry.kind ?? "extension",
+    version: entry.version,
+    installType: entry.installType,
+    extensionId: entry.extensionId,
+    reachable: false,
+  }
+  if (base.kind !== "extension") return { ...base, reachable: true }
+  const [probe, caps] = await Promise.all([
+    probeExtensionReachability(entry.contextId),
+    Promise.race([
+      sendCommand({ type: "capabilities" }, undefined, entry.contextId),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("capabilities probe timed out after 2s")), 2000)),
+    ]).then(r => (r.result?.success ? r.result.data : undefined)).catch(() => undefined),
+  ])
+  return {
+    ...base,
+    reachable: probe.reachable,
+    reason: probe.reason,
+    evalMain: caps === undefined ? undefined : describeEvalMain(caps, entry.extensionId),
+  }
+}
+
 export async function parseMetaCommand(filtered: string[], jsonMode = false, contextId?: string): Promise<Action | null> {
   const cmd = filtered[0]
 
@@ -55,6 +103,15 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false, con
     case "status": {
       const verbose = filtered.includes("--verbose") || filtered.includes("--explain") || filtered.includes("-v")
       const snap: StatusSnapshot = readStatusSnapshot()
+
+      if (verbose && snap.nativeDesktop?.binary) {
+        const result = await callDesktopProvider({ type: "desktop_hello" }, 2000)
+        const hello = result.data as DesktopHello | undefined
+        Object.assign(snap.nativeDesktop, {
+          reachable: result.success,
+          ...(result.success && hello ? { version: hello.version, pid: hello.pid, session: hello.session } : { error: result.error, code: result.code }),
+        })
+      }
 
       // Browser-config block (#52) — verbose-only, macOS-only.
       if (verbose && process.platform === "darwin") {
@@ -76,14 +133,29 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false, con
       // Extension-reachability probe (#49) — verbose-only, daemon-alive-only.
       // Stays a true local-pre-spawn check otherwise.
       if (verbose && snap.daemon) {
-        const probe = await probeExtensionReachability(contextId)
-        snap.extension = { probed: true, ...probe }
+        // Probe every connected context (or just the resolved one) instead of
+        // sending one unscoped probe that the daemon refuses when several
+        // browser profiles are connected.
+        const all = await listContexts()
+        const targets = contextId ? all.filter(c => c.contextId === contextId) : all
+        if (targets.length > 0) {
+          snap.contexts = await Promise.all(targets.map(probeContextStatus))
+          // The aggregate line follows a reachable extension when there is one,
+          // so an unreachable profile listed first does not hide a working one.
+          const extensions = snap.contexts.filter(c => c.kind === "extension")
+          const first = extensions.find(c => c.reachable) ?? extensions[0] ?? snap.contexts[0]
+          snap.extension = { probed: true, reachable: first.reachable, reason: first.reason }
+        } else {
+          const probe = await probeExtensionReachability(contextId)
+          snap.extension = { probed: true, ...probe }
+        }
         // Surface the extension-resolved tab-lifecycle policy so agents
         // can observe the reuse/idle-close behavior. Best-effort, 2s-bounded.
-        if (probe.reachable) {
+        const lifecycleContext = contextId ?? (snap.contexts?.find(c => c.kind === "extension" && c.reachable)?.contextId)
+        if (snap.extension.reachable && (lifecycleContext || (snap.contexts?.length ?? 0) <= 1)) {
           try {
             const resp = await Promise.race([
-              sendCommand({ type: "status" }, undefined, contextId),
+              sendCommand({ type: "status" }, undefined, lifecycleContext),
               new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error("status probe timed out after 2s")), 2000)
               ),
@@ -105,7 +177,7 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false, con
     }
 
     case "events": {
-      const eventsPath = "/tmp/interceptor-events.jsonl"
+      const eventsPath = EVENTS_PATH
       if (!existsSync(eventsPath)) {
         console.log("no events yet")
         return null
@@ -221,7 +293,9 @@ export async function parseMetaCommand(filtered: string[], jsonMode = false, con
           console.error("error: sessions restore requires a <sessionId> — run 'interceptor sessions' to list recently closed tabs/windows. (No-arg restore is disabled: it reopens whatever closed most recently, which may be the user's own window.)")
           process.exit(1)
         }
-        return { type: "session_restore", sessionId }
+        // Default reopens in the background; --activate asks for the browser's own
+        // restore, which brings the restored tab to the front.
+        return { type: "session_restore", sessionId, ...(filtered.includes("--activate") ? { active: true } : {}) }
       } else {
         const max = filtered.slice(1).find(a => !a.startsWith("-"))
         return { type: "session_list", maxResults: max ? parseInt(max) : 10 }

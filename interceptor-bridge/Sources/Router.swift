@@ -19,8 +19,9 @@ final class Router: @unchecked Sendable {
     private static let axGatedDomains: Set<String> = [
         "tree", "find", "inspect", "value", "action", "focused", "windows",
         "resize", "move", "click", "type", "keys", "scroll", "drag",
+        // The daemon's window-addressed browser input (click / type / keys).
+        "bginput",
         "menu", "text",
-        // issue #244: the admin-prompt filler reads and drives SecurityAgent via AX.
     ]
 
     // FORK-DELTA: per-domain allowlist. "Full" mode is otherwise all-or-nothing
@@ -32,6 +33,9 @@ final class Router: @unchecked Sendable {
     // `trust` is always allowed — it is the permission-walkthrough bootstrap.
     private static let alwaysAllowedDomains: Set<String> = ["trust"]
     private let allowedDomains: @Sendable () -> Set<String>?
+    // FORK-DELTA: true when ~/.interceptor/mode says "browser-only". The TS
+    // daemon and CLI check the same marker; this copy is the authoritative one.
+    private let surfaceDisabled: @Sendable () -> Bool
 
     // Injectable so tests can force trusted/untrusted without live TCC state.
     private let axTrustCheck: @Sendable () -> Bool
@@ -39,15 +43,34 @@ final class Router: @unchecked Sendable {
     init(
         axTrustCheck: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
         allowedDomains: @escaping @Sendable () -> Set<String>? = Router.readAllowlistFromFile,
+        surfaceDisabled: @escaping @Sendable () -> Bool = Router.readBrowserOnlyMarker,
     ) {
         self.axTrustCheck = axTrustCheck
         self.allowedDomains = allowedDomains
+        self.surfaceDisabled = surfaceDisabled
     }
+
+    /// True when ~/.interceptor/mode reads "browser-only". Mirrors
+    /// readSurfaceMarker in shared/surface-mode.ts. Absent, unreadable, or
+    /// "full" → false (the allowlist then decides).
+    static func readBrowserOnlyMarker() -> Bool {
+        if runningUnderXCTest { return false }
+        let path = (NSHomeDirectory() as NSString).appendingPathComponent(".interceptor/mode")
+        guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return false }
+        return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "browser-only"
+    }
+
+    /// True inside an XCTest run. The default gate providers then ignore this
+    /// machine's ~/.interceptor files, so unit tests are not decided by whatever
+    /// mode the developer's own install is in. The shipped bridge never links
+    /// XCTest; a test that exercises the gate injects its providers explicitly.
+    static let runningUnderXCTest: Bool = NSClassFromString("XCTestCase") != nil
 
     /// Read ~/.interceptor/macos-allow. nil when the file is absent (allow all);
     /// a set (possibly empty → deny all) when present. Mirrors the TypeScript
     /// reader in shared/surface-mode.ts so the two enforcers agree.
     static func readAllowlistFromFile() -> Set<String>? {
+        if runningUnderXCTest { return nil }
         let path = (NSHomeDirectory() as NSString).appendingPathComponent(".interceptor/macos-allow")
         guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         var set = Set<String>()
@@ -79,6 +102,11 @@ final class Router: @unchecked Sendable {
         return domains[prefix] != nil || lazyDomains[prefix] != nil
     }
 
+    func registeredPrefixes() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(Set(domains.keys).union(lazyDomains.keys)).sorted()
+    }
+
     private func resolveHandler(for key: String) -> DomainHandler? {
         lock.lock()
         if let handler = domains[key] {
@@ -97,9 +125,82 @@ final class Router: @unchecked Sendable {
     }
 
     func route(action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
-        guard let type = action["type"] as? String else {
+        guard let originalType = action["type"] as? String else {
             completion(WireFormat.error("missing action type"))
             return
+        }
+
+        var action = action
+        let type: String
+        if originalType.hasPrefix("desktop_") {
+            guard originalType.range(of: "^desktop_[a-z][a-z0-9_]*$", options: .regularExpression) == originalType.startIndex..<originalType.endIndex else {
+                completion(["success": false, "code": "invalid_request", "error": "invalid desktop action type"])
+                return
+            }
+            if let failure = DesktopFilesystemValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopAccessibilityValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopClipboardValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopCaptureValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopDisplayValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopCompoundValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopLogValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopThumbnailValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopAuthValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopContainerValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopFilesValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopNotificationsValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if let failure = DesktopMonitorValidation.validate(action) {
+                completion(failure)
+                return
+            }
+            if DesktopCompoundShape.operations.contains(originalType) {
+                type = "macos_compound_" + (originalType == "desktop_inspect_app" ? "inspect" : String(originalType.dropFirst(8)))
+            } else {
+                type = ["desktop_hello", "desktop_capabilities"].contains(originalType)
+                    ? "macos_desktop" : "macos_" + originalType.dropFirst(8)
+            }
+            // Retain validated discriminators where native handlers enforce
+            // neutral filesystem or geometry constraints. Legacy calls keep
+            // their compatibility action type.
+            action["type"] = originalType.hasPrefix("desktop_fs_") || DesktopDisplayShape.operations.contains(originalType) || DesktopCompoundShape.operations.contains(originalType) || ["desktop_move", "desktop_resize", "desktop_value", "desktop_action", "desktop_inspect", "desktop_clipboard", "desktop_screenshot", "desktop_capture", "desktop_text", "desktop_log_query", "desktop_thumbnail", "desktop_auth", "desktop_container_run", "desktop_files", "desktop_notifications", "desktop_trust", "desktop_stream"].contains(originalType) ? originalType : type
+        } else {
+            type = originalType
         }
 
         let parts = type.split(separator: "_", maxSplits: 2)
@@ -116,21 +217,34 @@ final class Router: @unchecked Sendable {
             command = domainKey
         }
 
+        // FORK-DELTA: the browser-only switch and the per-domain allowlist are
+        // checked HERE, after the desktop_* → macos_* rewrite above, so the
+        // neutral `desktop_*` names upstream added cannot reach a domain the
+        // macos_* spelling would be refused. This is the one choke point every
+        // caller shares (daemon IPC, daemon WS branches, background input, a
+        // direct socket write, App Intents, compound re-entry), so it is the
+        // gate that holds when a new upstream path skips the TypeScript checks.
+        if !Self.alwaysAllowedDomains.contains(domainKey), surfaceDisabled() {
+            completion(Self.surfaceDisabledError(domain: domainKey))
+            return
+        }
         if !Self.alwaysAllowedDomains.contains(domainKey), let allow = allowedDomains(), !allow.contains(domainKey) {
             completion(Self.domainNotAllowedError(domain: domainKey))
             return
         }
 
-        if Self.axGatedDomains.contains(domainKey), !axTrustCheck() {
-            completion(Self.accessibilityGateError(
+        if (Self.axGatedDomains.contains(domainKey) || originalType == "desktop_open"), !axTrustCheck() {
+            completion(DesktopAccessibilityResult.normalize(Self.accessibilityGateError(
                 verb: domainKey,
                 adhocSigned: LiveSigningInfoProvider.current.adhoc
-            ))
+            ), type: originalType == "desktop_open" ? "desktop_tree" : originalType))
             return
         }
 
         if let handler = resolveHandler(for: domainKey) {
-            handler.handle(command, action: action, completion: completion)
+            handler.handle(command, action: action) { result in
+                completion(originalType.hasPrefix("desktop_fs_") ? DesktopFilesystemValidation.bounded(result) : DesktopAccessibilityResult.normalize(result, type: originalType))
+            }
             return
         }
 
@@ -141,13 +255,17 @@ final class Router: @unchecked Sendable {
         for prefix in allKeys {
             if type.hasPrefix("macos_\(prefix)") {
                 if let handler = resolveHandler(for: prefix) {
-                    handler.handle(command, action: action, completion: completion)
+                    handler.handle(command, action: action) { result in
+                        completion(DesktopAccessibilityResult.normalize(result, type: originalType))
+                    }
                     return
                 }
             }
         }
 
-        completion(WireFormat.error("no handler for domain: \(domainKey)"))
+        var missing = WireFormat.error("no handler for domain: \(domainKey)")
+        if DesktopAccessibilityShape.operations.contains(originalType) || DesktopCompoundShape.operations.contains(originalType) { missing["code"] = "unsupported_operation" }
+        completion(missing)
     }
 
     /// The actionable envelope an AX-gated verb returns when the bridge is
@@ -158,6 +276,15 @@ final class Router: @unchecked Sendable {
     /// MonitorDomain's TCC preflight established.
     /// Returned when a domain is not in the configured allowlist. Pure so it is
     /// unit-testable; names the exact command to permit it.
+    static func surfaceDisabledError(domain: String) -> [String: Any] {
+        var err = WireFormat.error(
+            "macOS control is disabled on this install (browser-only). "
+            + "Run 'interceptor surface full' to enable it; the '\(domain)' domain was refused."
+        )
+        err["code"] = "surface_disabled"
+        return err
+    }
+
     static func domainNotAllowedError(domain: String) -> [String: Any] {
         var err = WireFormat.error(
             "the '\(domain)' macOS domain is not in this install's allowlist. "

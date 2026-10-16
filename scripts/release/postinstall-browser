@@ -14,41 +14,29 @@ INSTALL_ROOT="/Library/Application Support/Interceptor"
 RENDERED_MANIFEST="$INSTALL_ROOT/com.interceptor.host.json"
 DAEMON_PID_PATH="/tmp/interceptor.pid"
 DAEMON_SOCKET_PATH="/tmp/interceptor.sock"
+DAEMON_LOCK_PATH="/tmp/interceptor.lock"
 
 refresh_interceptor_daemon() {
+  # Every account's daemon (standalone singleton and Chrome-spawned native
+  # hosts alike) runs the binary this pkg just replaced, and since 1.0.3 each
+  # account owns its runtime files and port pair, so stop all of them: root
+  # can, and each account's next CLI call or browser reconnect cold-starts the
+  # new binary on that account's own port. Stopping only the installing user's
+  # daemon left the other accounts on the old inode holding the old ports.
   local pid=""
-  local command_line=""
+  for pid in $(pgrep -x interceptor-daemon 2>/dev/null || true); do
+    kill "$pid" 2>/dev/null || true
+  done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -x interceptor-daemon >/dev/null 2>&1 || break
+    sleep 0.1
+  done
+  pkill -KILL -x interceptor-daemon 2>/dev/null || true
 
-  if [[ -f "$DAEMON_PID_PATH" ]]; then
-    pid="$(head -n 1 "$DAEMON_PID_PATH" 2>/dev/null | tr -d '[:space:]')"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-      command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-      if [[ "$command_line" == *"interceptor-daemon"* ]]; then
-        kill "$pid" 2>/dev/null || true
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-          kill -0 "$pid" 2>/dev/null || break
-          sleep 0.1
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-          command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-          if [[ "$command_line" == *"interceptor-daemon"* ]]; then
-            kill -KILL "$pid" 2>/dev/null || true
-          fi
-        fi
-      fi
-    fi
-  fi
-
-  # The pid file and socket describe a live process. Removing them while that
-  # process is still running (a daemon this script chose not to stop, or one
-  # the kill did not reach) strands every CLI command on "daemon failed to
-  # start": the next spawn loses the port to the survivor. Only a dead pid
-  # leaves files that are safe to remove.
-  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
-    echo "interceptor: daemon pid $pid is still running; leaving its runtime files in place" >&2
-    return
-  fi
-  rm -f "$DAEMON_PID_PATH" "$DAEMON_SOCKET_PATH" 2>/dev/null || true
+  # Releases before 1.0.3 kept these under /tmp for every account; the
+  # per-user files are rebuilt by each account's next daemon (a stale pid is
+  # cleared at bootstrap and a leftover socket path is unlinked before listen).
+  rm -f "$DAEMON_PID_PATH" "$DAEMON_SOCKET_PATH" "$DAEMON_LOCK_PATH" 2>/dev/null || true
 }
 
 # The browser daemon is a long-lived user process. Stop only that daemon after
@@ -58,11 +46,31 @@ refresh_interceptor_daemon
 
 # ── Identify the installing user ──────────────────────────────────────────────
 # The installer sets $USER to root; we need the GUI user who initiated the
-# install. macOS exposes that via the console-owning user.
-TARGET_USER="$(stat -f '%Su' /dev/console)"
-if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
-  TARGET_USER="${USER:-}"
-fi
+# install. Console ownership can be root/loginwindow while a GUI login still
+# exists, so accept a fallback only when one distinct console login has a live
+# GUI domain (the same selection as postinstall-full).
+resolve_installing_gui_user() {
+  local candidate="" uid="" terminal="" rest="" selected=""
+  candidate="$(stat -f '%Su' /dev/console)"
+  uid="$(id -u "$candidate" 2>/dev/null || true)"
+  if [[ "$uid" =~ ^[0-9]+$ && "$uid" != "0" ]] && \
+      launchctl print "gui/$uid" >/dev/null 2>&1; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  while read -r candidate terminal rest; do
+    [[ "$terminal" == "console" ]] || continue
+    uid="$(id -u "$candidate" 2>/dev/null || true)"
+    [[ "$uid" =~ ^[0-9]+$ && "$uid" != "0" ]] || continue
+    launchctl print "gui/$uid" >/dev/null 2>&1 || continue
+    [[ -z "$selected" || "$selected" == "$candidate" ]] || return 1
+    selected="$candidate"
+  done < <(who 2>/dev/null || true)
+  [[ -n "$selected" ]] || return 1
+  printf '%s\n' "$selected"
+}
+
+TARGET_USER="$(resolve_installing_gui_user || true)"
 
 if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
   # No GUI user (e.g. headless install). Payload is laid down; per-user
@@ -72,6 +80,7 @@ if [[ -z "$TARGET_USER" || "$TARGET_USER" == "root" ]]; then
 fi
 
 TARGET_HOME="$(dscl . -read /Users/"$TARGET_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || true)"
 
 # ── Symlink manifest into Chrome + Brave per-user NMH dirs ────────────────────
 if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
@@ -83,6 +92,17 @@ if [[ -n "$TARGET_HOME" && -d "$TARGET_HOME" ]]; then
     ln -sfn "$RENDERED_MANIFEST" "$browser_dir/com.interceptor.host.json"
     chown -R "$TARGET_USER" "$browser_dir" 2>/dev/null || true
   done
+fi
+
+# A preinstall marker exists only when no Interceptor daemon package receipt
+# preceded this install. Open the approved listing once for that new user;
+# routine pkg and Sparkle upgrades leave the browser alone.
+STORE_MARKER="$INSTALL_ROOT/.open-extension-store-$TARGET_UID"
+if [[ -n "$TARGET_UID" && -f "$STORE_MARKER" ]]; then
+  rm -f "$STORE_MARKER"
+  /bin/launchctl asuser "$TARGET_UID" /usr/bin/sudo -u "$TARGET_USER" \
+    /usr/bin/open "https://chromewebstore.google.com/detail/interceptor/gomcpnagjjlhehnkoobkjgnkbleiooed" \
+    >/dev/null 2>&1 || true
 fi
 
 # ── skills-refresh marker ────────────────────────────────────────

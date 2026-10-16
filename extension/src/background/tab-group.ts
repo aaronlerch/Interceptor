@@ -143,6 +143,27 @@ export async function ensureNamedGroup(label: string): Promise<number> {
   return -1
 }
 
+/**
+ * Re-register named groups the registry lost. A group moved to another window,
+ * re-created by the browser's own restore, or restored after a restart comes
+ * back under a new id, and tabGroups.onRemoved already dropped the old entry.
+ * Exact match on the brand-composed `<brand>-<label>` title.
+ */
+// ponytail: current brand prefix only; a pre-rebrand title is re-adopted on the next brand change
+export async function readoptNamedGroups(live?: chrome.tabGroups.TabGroup[]): Promise<void> {
+  if (!hasTabGroupApi()) return
+  await hydrateNamedGroups()
+  const groups = live ?? await chrome.tabGroups.query({}).catch(() => []) // windowless profile → no groups (issue #162)
+  const prefix = groupTitleFor("")
+  for (const g of groups) {
+    if (typeof g.title !== "string" || !g.title.startsWith(prefix)) continue
+    const label = g.title.slice(prefix.length)
+    if (GROUP_LABEL_RE.test(label) && labelForGroupId(g.id) === null && g.id !== interceptorGroupId) {
+      await ensureNamedGroup(label)
+    }
+  }
+}
+
 export function addTabToNamedGroup(
   tabId: number,
   label: string,
@@ -181,6 +202,23 @@ async function addTabToNamedGroupSerialized(
     return -1
   }
   return groupId
+}
+
+/**
+ * Moves a named group and its tabs into `windowId`. A group lives in one
+ * window, so adding a tab from another window to it pulls that tab back to the
+ * group's window. No-op when the group does not exist or is already there.
+ */
+export async function moveNamedGroupToWindow(label: string, windowId: number): Promise<void> {
+  if (!hasTabGroupApi() || typeof chrome.tabGroups.move !== "function") return
+  const groupId = await ensureNamedGroup(label)
+  if (groupId === -1) return
+  try {
+    const group = await chrome.tabGroups.get(groupId)
+    if (group.windowId !== windowId) await chrome.tabGroups.move(groupId, { windowId, index: -1 })
+  } catch (err) {
+    console.warn(`moveNamedGroupToWindow: group '${label}' stayed where it was:`, err)
+  }
 }
 
 export async function isTabInNamedGroup(tabId: number, label: string): Promise<boolean> {
@@ -337,6 +375,47 @@ async function addTabToInterceptorGroupSerialized(tabId: number): Promise<number
     return -1
   }
   return groupId
+}
+
+/**
+ * Ungroup the tabs of every managed group that closing `tabIds` would empty.
+ * Chrome saves every tab group, and a group whose last tabs are closed with
+ * chrome.tabs.remove (or with their window) is kept as a CLOSED saved group: a
+ * chip on the bookmarks bar and a row in the Tab groups menu, synced to every
+ * profile on the account, and out of reach of chrome.tabGroups for good. One
+ * piled up per agent session (issue #301). A group emptied by ungrouping is
+ * deleted instead, so every close path calls this right before it closes.
+ *
+ * A group that keeps a tab is left alone, and so is a group Interceptor does not
+ * manage. Best effort: a failure here must not stop the close.
+ */
+export async function ungroupBeforeClose(tabIds: number[]): Promise<void> {
+  if (tabIds.length === 0 || !hasTabGroupApi() || typeof chrome.tabs.ungroup !== "function") return
+  try {
+    await ensureInterceptorGroup()
+    // A group moved to another window or restored by the browser comes back
+    // under a new id; without this its registry entry is gone and it is missed.
+    await readoptNamedGroups()
+    const managed = new Set(namedGroups.values())
+    if (interceptorGroupId !== null) managed.add(interceptorGroupId)
+    const closing = new Set(tabIds)
+    const emptied: number[] = []
+    for (const groupId of managed) {
+      const members = (await chrome.tabs.query({ groupId }))
+        .map((t) => t.id)
+        .filter((id): id is number => typeof id === "number")
+      if (members.length > 0 && members.every((id) => closing.has(id))) emptied.push(...members)
+    }
+    if (emptied.length > 0) await chrome.tabs.ungroup(emptied as [number, ...number[]])
+  } catch (err) {
+    console.warn("ungroupBeforeClose: the closed group may stay behind as a saved group:", err)
+  }
+}
+
+/** chrome.tabs.remove that deletes, rather than saves, a managed group it empties. */
+export async function removeTabsAndEmptiedGroups(tabIds: number[]): Promise<void> {
+  await ungroupBeforeClose(tabIds)
+  await chrome.tabs.remove(tabIds)
 }
 
 export async function isTabInInterceptorGroup(tabId: number): Promise<boolean> {

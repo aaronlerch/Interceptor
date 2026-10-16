@@ -23,6 +23,38 @@ export function rewriteCspEvalError(raw: string | undefined): string | undefined
   ].join("\n  ")
 }
 
+// Chrome's messaging errors leak through when a click starts a navigation (the
+// content script that would answer is torn down with the old document) or when
+// the extension's service worker was replaced mid-request. 276 agent results in
+// the 2026-09-10 session review carried the raw text. Substitute the fragment
+// (composed messages keep their context) and name the recovery once.
+const CHROME_MESSAGING_FRAGMENTS: Array<[RegExp, string]> = [
+  [/\bThe message port closed before a response was received\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bA listener indicated an asynchronous response by returning true, but the message channel closed before a response was received\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bmessage channel is closed\.?/i, "the page navigated or reloaded before it answered"],
+  [/\bCould not establish connection\. Receiving end does not exist\.?/i, "no content script answered in that tab (still loading, or a page Interceptor cannot inject into)"],
+]
+
+export function isChromeMessagingError(raw: string | undefined): boolean {
+  return !!raw && CHROME_MESSAGING_FRAGMENTS.some(([re]) => re.test(raw))
+}
+
+export function rewriteChromeMessagingError(raw: string | undefined): string | undefined {
+  if (!raw) return raw
+  let out = raw
+  let hit = false
+  for (const [re, text] of CHROME_MESSAGING_FRAGMENTS) {
+    if (re.test(out)) { out = out.replace(re, text); hit = true }
+  }
+  if (!hit) return raw
+  return `${out.replace(/[.\s]+$/, "")}. Run 'interceptor read' for the current page state before retrying.`
+}
+
+/** Every error string shown to an agent passes through here once. */
+export function humanizeError(raw: string | undefined): string | undefined {
+  return rewriteChromeMessagingError(rewriteCspEvalError(raw))
+}
+
 export function formatState(data: {
   url: string
   title: string
@@ -84,8 +116,17 @@ export function formatResult(result: { success: boolean; error?: string; data?: 
   if (jsonMode) return JSON.stringify(result, null, 2)
 
   if (!result.success) {
-    const cleaned = rewriteCspEvalError(result.error)
-    return `error: ${cleaned}`
+    const cleaned = humanizeError(result.error)
+    const lines = [`error: ${cleaned}`]
+    // A refusal's `data.hint` is the actionable part (the trusted-input
+    // foreground guard names the background-safe path there); text mode is
+    // what agents read, so it must not stay JSON-only.
+    const hint = (result.data as { hint?: unknown } | undefined)?.hint
+    if (typeof hint === "string" && hint.length > 0) lines.push(`hint: ${hint}`)
+    // A failed result can carry a side-effect disclosure too (the CSP recovery
+    // that reloaded the tab and still failed); it is as important as on success.
+    if (result.warning) lines.push(`warning: ${result.warning}`)
+    return lines.join("\n")
   }
   let body: string
   if (result.data === undefined || result.data === null) body = "ok"

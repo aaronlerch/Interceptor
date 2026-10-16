@@ -46,13 +46,23 @@ struct InputTargetSelector {
     // real RefRegistry / NSWorkspace lookups.
     let resolveRef: (String) -> (element: AXUIElement, pid: pid_t?)?
     let resolvePidByName: (String) -> pid_t?
+    // Liveness for an explicit --pid. kill(pid, 0) delivers no signal; EPERM
+    // still means the process exists. Pid reuse is not detectable here.
+    let pidIsLive: (pid_t) -> Bool
+
+    static func defaultPidIsLive(_ pid: pid_t) -> Bool {
+        guard pid > 0 else { return false }
+        return kill(pid, 0) == 0 || errno == EPERM
+    }
 
     init(
         resolveRef: @escaping (String) -> (element: AXUIElement, pid: pid_t?)?,
-        resolvePidByName: @escaping (String) -> pid_t?
+        resolvePidByName: @escaping (String) -> pid_t?,
+        pidIsLive: @escaping (pid_t) -> Bool = InputTargetSelector.defaultPidIsLive
     ) {
         self.resolveRef = resolveRef
         self.resolvePidByName = resolvePidByName
+        self.pidIsLive = pidIsLive
     }
 
     // Live-AX selection. Called from InputDomain when the request
@@ -85,6 +95,43 @@ struct InputTargetSelector {
         return .cghidEventTap
     }
 
+    // An explicit target that does not resolve is an error, never a
+    // fall-through. The legacy chain ended at cghidEventTap (the frontmost
+    // app), so `type --ref e9` after the ref expired typed into whatever the
+    // user was looking at (native-ref probe, reliability review 2026-09-10).
+    // Returns a message when the caller named a ref/app/pid that cannot be
+    // honored, or when the ref's owner is not the requested app; nil when the
+    // target resolves or nothing explicit was given.
+    func explicitTargetProblem(ref: String?, appName: String?, pid: pid_t?) -> String? {
+        var refOwner: pid_t? = nil
+        if let ref = ref, !ref.isEmpty {
+            guard let entry = resolveRef(ref) else {
+                return Self.expiredReferenceProblem(ref)
+            }
+            refOwner = entry.pid
+        }
+        if let pid = pid, !pidIsLive(pid) {
+            return "no running process has pid \(pid); 'interceptor macos apps' lists running apps with their pids (nothing was delivered)"
+        }
+        var explicitPid: pid_t? = pid
+        if explicitPid == nil, let appName = appName, !appName.isEmpty {
+            guard let resolved = resolvePidByName(appName) else {
+                return "no running app matches '\(appName)' — names are case-insensitive and accept the .app name or bundle id; 'interceptor macos apps' lists them (nothing was delivered)"
+            }
+            explicitPid = resolved
+        }
+        if let owner = refOwner, let explicitPid = explicitPid, owner != explicitPid, let ref = ref {
+            return "ref \(ref) belongs to pid \(owner), not the requested app/pid \(explicitPid); re-read that app's tree (nothing was delivered)"
+        }
+        return nil
+    }
+
+    // One diagnostic for the input preflight and neutral reply classification.
+    // Its wording remains identical to the legacy refusal.
+    static func expiredReferenceProblem(_ ref: String) -> String {
+        "ref \(ref) not found \u{2014} its element was removed, or the ref came from an earlier bridge run; run 'interceptor macos tree' or 'macos find' again and use a fresh ref (nothing was delivered)"
+    }
+
     // Ref-aware PID resolution: when a ref is provided and registered,
     // its owning PID is the right target for any keyboard fallback path
     // that needs CGEvent.postToPid (e.g. text-field type when AX value
@@ -108,11 +155,24 @@ extension InputTargetSelector {
                 guard let entry = refRegistry.resolveInfo(ref) else { return nil }
                 return (entry.element, entry.pid)
             },
-            resolvePidByName: { name in
-                NSWorkspace.shared.runningApplications
-                    .first(where: { $0.localizedName?.lowercased() == name.lowercased() })?
-                    .processIdentifier
-            }
+            resolvePidByName: { name in RunningApps.resolve(name)?.processIdentifier }
         )
+    }
+}
+
+extension CGEvent {
+    /// `postToPid(_:)` with the timestamp set to now. CGEvent initializers
+    /// leave `timestamp` at 0, and per-pid delivery skips the WindowServer
+    /// stamping a tap-posted event gets, so the target app would read a time
+    /// from just after boot. Chromium traps on such a click when it starts a
+    /// same-document navigation (an interaction older than its own page).
+    func postToPidNow(_ pid: pid_t) {
+        stampNow()
+        postToPid(pid)
+    }
+
+    /// Sets `timestamp` on the uptime clock that `NSEvent.timestamp` reads.
+    func stampNow() {
+        timestamp = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
     }
 }

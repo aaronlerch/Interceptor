@@ -1,3 +1,4 @@
+import { safeValue } from "./sensitive"
 import { getEffectiveRole } from "./a11y-tree"
 import { isValueSecret, SECURE_MASK } from "./sensitive"
 import type { IndexedElement } from "./element-discovery"
@@ -43,14 +44,14 @@ export function getRelevantAttrs(el: Element): string {
     if (type) attrs.push(`type="${type}"`)
     const placeholder = el.getAttribute("placeholder")
     if (placeholder) attrs.push(`placeholder="${placeholder}"`)
-    const value = (el as HTMLInputElement).value
-    if (value) attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`)
+    const value = safeValue(el)
+    if (value) attrs.push(`value="${value.slice(0, 40)}"`)
     if ((el as HTMLInputElement).checked) attrs.push("checked")
     if ((el as HTMLInputElement).disabled) attrs.push("disabled")
   }
   if (tag === "select" || tag === "textarea") {
-    const value = (el as HTMLSelectElement | HTMLTextAreaElement).value
-    if (value) attrs.push(`value="${isValueSecret(el) ? SECURE_MASK : value.slice(0, 40)}"`)
+    const value = safeValue(el)
+    if (value) attrs.push(`value="${value.slice(0, 40)}"`)
   }
   if (tag === "img") {
     const src = el.getAttribute("src")

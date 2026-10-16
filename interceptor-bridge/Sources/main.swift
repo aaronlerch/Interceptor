@@ -3,8 +3,16 @@ import Network
 import AppKit
 import Sparkle
 
+// One-shot OCR child (VisionDomain.recognizeOutOfProcess). It must not take the bridge's locks or start the app.
+if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--vision-text-helper" { VisionDomain.textHelperMain() }
+
+// Keep this descriptor open for the process lifetime. A Sparkle relaunch or
+// direct launch must not overwrite the supervised bridge's PID or socket.
+guard let bridgeInstanceLockFD = Platform.acquireLifecycleLock(path: Platform.bridgeInstanceLockPath, timeout: 0) else {
+    Platform.log("another bridge owns the instance lock, or the lock is unavailable; exiting")
+    exit(1)
+}
 Platform.log("interceptor-bridge starting")
-Platform.cleanupSocket()
 // Lifecycle lock: held from pid publication through the socket bind (released
 // after `transport.start()` below) so an exiting older instance's cleanup can
 // never interleave with this instance taking ownership of the files.
@@ -18,6 +26,7 @@ guard let lifecycleLockFD = Platform.acquireLifecycleLock(timeout: 5.0) else {
 Platform.writePID()
 
 let router = Router()
+router.register("desktop", handler: DesktopDomain(router: router))
 
 // expose the router to AppIntents perform() callbacks so declared
 // intents can dispatch into the same domain handlers the CLI uses.
@@ -40,7 +49,7 @@ let notificationsDomain = NotificationsDomain()
 let clipboardDomain = ClipboardDomain()
 let displayDomain = DisplayDomain()
 let audioDomain = AudioDomain()
-let streamDomain = StreamDomain()
+let streamDomain = StreamDomain(router: router)
 let monitorDomain = MonitorDomain()
 let trustDomain = TrustDomain()
 let tccDomain = TccDomain()
@@ -103,6 +112,7 @@ router.register("type", handler: inputDomain)
 router.register("keys", handler: inputDomain)
 router.register("scroll", handler: inputDomain)
 router.register("drag", handler: inputDomain)
+router.register(InputDomain.browserDomainKey, handler: inputDomain)
 router.register("screenshot", handler: captureDomain)
 router.register("capture", handler: captureDomain)
 router.register("listen", handler: speechDomain)
@@ -205,6 +215,7 @@ signal(SIGTERM) { _ in
 // resident on the main run loop instead.
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory) // No dock icon, no menu bar
+notificationsDomain.startNativeResponseObservation()
 
 // Install an NSApplicationDelegate so AppKit's default Apple-Event
 // handling routes Sparkle's `kAEQuitApplication` (sent at stage 2 of an

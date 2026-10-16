@@ -68,7 +68,12 @@ const STATE = ["--depth", "--filter", "--limit", "--max-chars", "--role"]
 // disambiguates when several 1Password accounts are signed in (see FORK-DELTA
 // on the 1Password vault). The upstream saved-login flags (--browser-login,
 // --browser, --user) are intentionally absent: that credential surface is cut.
-const ACTIONS = ["--at", "--duration", "--from", "--nth", "--op-account", "--secret", "--selector", "--steps", "--to"]
+const ACTIONS = ["--at", "--duration", "--from", "--op-account", "--secret", "--steps", "--to"]
+// CSS targeting is implemented by `click` alone (cli/commands/actions.ts). When
+// every action verb accepted --selector here, `dblclick --selector x` parsed
+// `--selector` as the element target and failed as "stale element" (agent
+// session log, 2026-09-09). Other verbs reject it with a hint instead.
+const CLICK = [...ACTIONS, "--nth", "--selector"]
 const NAV = ["--amount", "--ms", "--timeout"]
 const NET = ["--filter", "--format", "--limit", "--out", "--since", "--pattern", "--patterns", "--type"]
 const SCREENSHOT = ["--clip", "--element", "--filter", "--format", "--kind", "--limit", "--quality", "--ref", "--region", "--scale", "--selector", "--target-max-long-edge", "--threshold"]
@@ -100,7 +105,7 @@ const VALUE_FLAGS_BY_CMD: Record<string, string[]> = {
   // state
   state: STATE, tree: STATE, diff: STATE, find: STATE, text: STATE, html: STATE,
   // actions
-  click: ACTIONS, type: ACTIONS, select: ACTIONS, focus: ACTIONS, blur: ACTIONS,
+  click: CLICK, type: ACTIONS, select: ACTIONS, focus: ACTIONS, blur: ACTIONS,
   hover: ACTIONS, drag: ACTIONS, dblclick: ACTIONS, rightclick: ACTIONS,
   check: ACTIONS, keys: ACTIONS, "click-at": ACTIONS, "what-at": ACTIONS, regions: ACTIONS,
   // navigation
@@ -119,8 +124,8 @@ const VALUE_FLAGS_BY_CMD: Record<string, string[]> = {
   attr: META, style: META, events: META, notify: META, sessions: META,
   capabilities: META, modals: META, panels: META,
   // singles
-  eval: [], save: SAVE, brand: BRAND, group: [], batch: BATCH, raw: BATCH,
-  monitor: MONITOR, scene: SCENE, sse: SSE, override: [],
+  eval: [], save: SAVE, brand: BRAND, group: ["--app", "--brand"], batch: BATCH, raw: BATCH,
+  monitor: MONITOR, scene: SCENE, sse: SSE, override: ["--status", "--body", "--delay", "--content-type"],
   upgrade: [], init: [], research: RESEARCH, extensions: [], contexts: [],
   skills: SKILLS, daemon: DAEMON, manifest: [],
   keepawake: POWER, idle: POWER,
@@ -140,7 +145,8 @@ const STATE_BOOL = ["--elements-only", "--full", "--include-frames", "--markdown
 // on the 1Password vault). --user is omitted: it belonged to the cut saved-login surface.
 const ACTIONS_BOOL = ["--append", "--dropzone", "--op-any-target", "--picker", "--trusted", "--os"]
 const TABS_BOOL = ["--incognito"]
-const TAB_BOOL = ["--activate", "--no-reuse", "--reuse"]
+const TAB_BOOL = ["--activate", "--no-reuse", "--off", "--reuse"]
+const WINDOW_BOOL = ["--activate", "--incognito"]
 // --redact-auth stays declared so existing scripts keep working; it is now the
 // default, and --no-redact-auth is the opt-out (FORK-DELTA §8).
 const NET_BOOL = ["--from-start", "--persist", "--reload", "--redact-auth", "--no-redact-auth"]
@@ -150,7 +156,7 @@ const META_BOOL = ["--author", "--explain", "--tail", "--top-only", "--verbose"]
 // FORK-DELTA §2: --allow-csp-strip is fork-local. It MUST stay declared here —
 // upstream's strict flag contract (#212) rejects any undeclared flag, so
 // omitting it makes the CSP-strip escape hatch exit 1 instead of working.
-const EVAL_BOOL = ["--allow-csp-strip", "--main"]
+const EVAL_BOOL = ["--allow-csp-strip", "--main", "--no-reload"]
 const SAVE_BOOL = ["--allow-csp-strip", "--isolated", "--main"]
 const BATCH_BOOL = ["--stop-on-error"]
 const MONITOR_BOOL = ["--force-diagnostic", "--from-start", "--include-synthetic", "--no-regenerate", "--plan", "--raw", "--reload", "--snapshot-sources", "--stop-sources", "--with-bodies"]
@@ -167,15 +173,15 @@ const BOOLEAN_FLAGS_BY_CMD: Record<string, string[]> = {
   hover: ACTIONS_BOOL, drag: ACTIONS_BOOL, dblclick: ACTIONS_BOOL, rightclick: ACTIONS_BOOL,
   check: ACTIONS_BOOL, keys: ACTIONS_BOOL, "click-at": ACTIONS_BOOL, "what-at": ACTIONS_BOOL, regions: ACTIONS_BOOL,
   navigate: [], back: [], forward: [], scroll: [], wait: [], "wait-stable": [], wait_for: [],
-  tabs: TABS_BOOL, tab: TAB_BOOL, window: TABS_BOOL, frames: [], session: [],
+  tabs: TABS_BOOL, tab: TAB_BOOL, window: WINDOW_BOOL, frames: [], session: [],
   network: NET_BOOL, net: NET_BOOL, headers: NET_BOOL,
   screenshot: SCREENSHOT_BOOL, canvas: SCREENSHOT_BOOL, capture: SCREENSHOT_BOOL, ocr: SCREENSHOT_BOOL,
   cookies: DATA_BOOL, storage: DATA_BOOL, history: DATA_BOOL, bookmarks: DATA_BOOL, downloads: DATA_BOOL, clear: DATA_BOOL, clipboard: DATA_BOOL,
   status: META_BOOL, reload: META_BOOL, meta: META_BOOL, links: META_BOOL, images: META_BOOL, forms: META_BOOL,
   info: META_BOOL, page_info: META_BOOL, query: META_BOOL, exists: META_BOOL, count: META_BOOL, table: META_BOOL,
-  attr: META_BOOL, style: META_BOOL, events: META_BOOL, notify: META_BOOL, sessions: META_BOOL,
+  attr: META_BOOL, style: META_BOOL, events: META_BOOL, notify: META_BOOL, sessions: [...META_BOOL, "--activate"],
   capabilities: META_BOOL, modals: META_BOOL, panels: META_BOOL,
-  eval: EVAL_BOOL, save: SAVE_BOOL, brand: [], group: [], batch: BATCH_BOOL, raw: BATCH_BOOL,
+  eval: EVAL_BOOL, save: SAVE_BOOL, brand: [], group: ["--allow-frontmost", "--dry-run"], batch: BATCH_BOOL, raw: BATCH_BOOL,
   monitor: MONITOR_BOOL, scene: SCENE_BOOL, sse: [], override: [],
   upgrade: ["--full"], init: ["--explain", "--verbose"], research: RESEARCH_BOOL, extensions: ["--remove"], contexts: ["--verbose"],
   skills: SKILLS_BOOL, daemon: [], manifest: [],
@@ -202,6 +208,9 @@ function rejectUnknownFlag(cmd: string, tok: string): void {
   const name = tok.includes("=") ? tok.slice(0, tok.indexOf("=")) : tok
   if (name === "--out" && (cmd === "screenshot" || cmd === "canvas" || cmd === "capture" || cmd === "ocr")) {
     extra = " (--out belongs to 'save' and 'net'; 'screenshot --save' writes the image to disk)"
+  }
+  if ((name === "--selector" || name === "--nth") && cmd !== "click") {
+    extra = ` (CSS targeting is a 'click' flag; for '${cmd}' run 'interceptor query "<css>"' to get an e<ref>, then 'interceptor ${cmd} e<ref>')`
   }
   const msg = `unknown flag '${tok}' for '${cmd}'${extra}. Run 'interceptor help ${cmd}' for its flags; use '--' before positional values that begin with --.`
   if (lax) {
@@ -269,10 +278,13 @@ export function normalizeArgsSplit(filtered: string[]): NormalizedArgs {
     positionals.push(tok)
   }
 
-  if (cmd === "tab" && positionals[0] !== "new") {
-    const unsupported = TAB_BOOL.find((flag) => flags.includes(flag))
+  if (cmd === "tab") {
+    // Per-subverb: `tab new` takes the create flags, `tab keepalive` takes
+    // --off, the rest take none.
+    const allowed = positionals[0] === "new" ? TAB_BOOL.filter((flag) => flag !== "--off") : positionals[0] === "keepalive" ? ["--off"] : []
+    const unsupported = TAB_BOOL.find((flag) => flags.includes(flag) && !allowed.includes(flag))
     if (unsupported) {
-      throw new Error(`flag '${unsupported}' is only valid with 'tab new'.`)
+      throw new Error(`flag '${unsupported}' is only valid with 'tab ${unsupported === "--off" ? "keepalive" : "new"}'.`)
     }
   }
 

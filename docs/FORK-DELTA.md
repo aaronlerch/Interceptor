@@ -8,7 +8,8 @@ these can silently revert — each item below names the regression test or gate
 that should catch it if it does.
 
 Fork point: `86e7eb6` (upstream v0.16.9, 2026-06-07).
-Last merged: `00ca85f` (upstream v0.24.2, 2026-09-05).
+Last merged: `315dd14` (upstream v2.1.3, 2026-10-14), merged 2026-10-16.
+Previous: `1a0291a` (v0.25.0), `00ca85f` (v0.24.2).
 
 ---
 
@@ -260,6 +261,77 @@ ambiguous account each fail *before* `op read` appears in the recorded argv.
 that silently carries `Authorization` headers is the wrong default whatever its
 mode bits are, and the safe direction costs a flag on the rare capture that
 genuinely needs credentials in it.
+
+---
+
+## 9. The control WebSocket is loopback-bound AND peer/Host-checked
+
+**What.** Upstream 2.x (#274) binds the daemon WebSocket to `127.0.0.1` and
+refuses page Origins (`isAllowedWsOrigin`). This fork keeps its own
+`daemon/ws-guard.ts` on top: the peer address must be loopback, the Origin must
+be empty or an extension scheme, and the `Host` header must name a loopback host
+on the daemon's port.
+
+**Why.** The bind alone protects only while nobody drops it; the peer check is a
+free second layer. The Host check closes DNS rebinding: a rebound page makes
+same-origin GETs with no Origin header and could read `/health` (pid, version,
+port) and trigger runtime-file healing.
+
+**Regression guard.** `test/ws-guard.test.ts` (Host cases), `test/ws-origin.test.ts`.
+
+---
+
+## 10. Browser-only vs full is enforced at the bridge, not just the CLI and daemon
+
+**What.** `interceptor surface browser-only|full` writes `~/.interceptor/mode`;
+`interceptor surface allow …` writes `~/.interceptor/macos-allow`. Both are
+checked in four places: the CLI gate (`cli/index.ts`, now covering `macos`,
+`desktop`, `group prune` and `update`), the daemon (`macosSurfaceBlocked` in
+`sendToBridge`, `forwardDelegateToBridge`, **`bridgeCall`**, and the
+`backgroundOk` flag), `callDesktopProvider` on darwin, and — authoritatively —
+the Swift `Router.route`, which now reads the mode marker as well as the
+allowlist, after the `desktop_*` → `macos_*` rewrite.
+
+**Why.** Upstream 2.x added routes to the bridge that skip the original two
+TypeScript choke points: a WebSocket branch that hands `desktop_*`/`macos_*`
+straight to `bridgeCall`, background trusted input (`macos_bginput_*`, triggered
+by the extension's reply), `desktop_stream` (missed the `macos_` prefix check),
+and the CLI's `desktop` verbs and `group prune`, which open the bridge socket
+from the CLI process. Patching each route is whack-a-mole against an upstream
+that keeps adding them; the bridge is the one place every route must pass.
+`bginput` is full input (any window, any app), not a browser-only domain —
+allowlist it only alongside `click`/`type`/`keys`.
+
+**Regression guard.** `RouterAllowlistTests` (browser-only denial, desktop_*
+spelling) — **needs full Xcode to run; this machine has only the Command Line
+Tools, so verify live**: with the marker set to browser-only, a direct socket
+write of `macos_screenshot` must return `surface_disabled`. `test/surface-mode.test.ts`
+covers the TS `desktop_*` domain mapping. Router defaults ignore `~/.interceptor`
+under XCTest so the suite is not decided by the developer's own mode.
+
+---
+
+## 11. Read-verb masking covers payment and one-time-code fields
+
+**What.** Upstream 2.x's `sensitive.ts` (`isSensitive`/`safeValue`/`safeText`,
+applied across ~15 read verbs, sticky across a show-password toggle) replaces the
+fork's narrower `isValueSecret`. The fork widens `isSensitive` to `cc-*`
+autocomplete (except `cc-name`), `one-time-code`, and cvv/cvc/card-number/otp/pin
+names.
+
+**Regression guard.** `extension/src/content/sensitive.test.ts`.
+
+---
+
+## 12. Agents never install updates; Sparkle auto-check is off
+
+**What.** `INTERCEPTOR_SPARKLE_AUTO_CHECK` (default `false`) drives
+`SUEnableAutomaticChecks`; the macOS command catalog tells agents to report
+`update_available` and stop, never to press Install. `update` is not in the
+`recommended` allowlist.
+
+**Why.** A Sparkle update installs the vendor pkg over this source build and
+silently reverts every item in this file.
 
 ---
 

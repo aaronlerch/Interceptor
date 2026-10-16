@@ -1,10 +1,38 @@
 import Foundation
 
 enum Platform {
-    static let bridgeSocketPath = "/tmp/interceptor-bridge.sock"
-    static let bridgePidPath = "/tmp/interceptor-bridge.pid"
-    static let bridgeLogPath = "/tmp/interceptor-bridge.log"
-    static let bridgeEventsPath = "/tmp/interceptor-bridge-events.jsonl"
+    // Per-user runtime directory. NSTemporaryDirectory() is
+    // confstr(_CS_DARWIN_USER_TEMP_DIR) for the current uid (Apple: "the
+    // temporary directory for the current user"), so two logged-in accounts no
+    // longer share one /tmp socket + pid file (the second account's LaunchAgent
+    // failed with EACCES on the first one's files, 2026-08-31). The daemon and
+    // CLI derive the same path from $TMPDIR (shared/bridge-paths.ts); the env
+    // override exists for tests and scratch bridges.
+    static let runtimeDir: String = {
+        let raw: String
+        if let override = ProcessInfo.processInfo.environment["INTERCEPTOR_BRIDGE_RUNTIME_DIR"], !override.isEmpty {
+            raw = override
+        } else {
+            raw = NSTemporaryDirectory()
+        }
+        return raw.hasSuffix("/") ? String(raw.dropLast()) : raw
+    }()
+    static let bridgeSocketPath = runtimeDir + "/interceptor-bridge.sock"
+    static let bridgePidPath = runtimeDir + "/interceptor-bridge.pid"
+    static let bridgeLogPath = runtimeDir + "/interceptor-bridge.log"
+    static let bridgeEventsPath = runtimeDir + "/interceptor-bridge-events.jsonl"
+
+    // The daemon's WebSocket port is per OS user: uid 501 keeps 19222, uid 504
+    // gets 19228, root 20220 (shared/platform.ts derivePorts is the source of
+    // truth; the runtime agent and the Safari appex carry the same line).
+    static func wsPort(uid: uid_t) -> Int {
+        let slot = ((Int(uid) - 501) % 500 + 500) % 500
+        return 19222 + 2 * slot
+    }
+    static let wsPort: Int = {
+        if let raw = ProcessInfo.processInfo.environment["INTERCEPTOR_WS_PORT"], let port = Int(raw) { return port }
+        return wsPort(uid: getuid())
+    }()
     static let maxEventFileSize = 10 * 1024 * 1024
 
     // Monitor-session artifacts. The directory mirrors the browser's
@@ -16,7 +44,7 @@ enum Platform {
         if let override = ProcessInfo.processInfo.environment["INTERCEPTOR_MONITOR_SESSIONS_DIR"], !override.isEmpty {
             return override
         }
-        return "/tmp/interceptor-monitor-sessions"
+        return runtimeDir + "/interceptor-monitor-sessions"
     }
 
     static func sessionDir(_ sid: String) -> String {
@@ -80,7 +108,10 @@ enum Platform {
         unlink(pidPath)
     }
 
-    static let bridgeLockPath = "/tmp/interceptor-bridge.lock"
+    static let bridgeLockPath = runtimeDir + "/interceptor-bridge.lock"
+    // Held until process exit, independently of the short startup/cleanup
+    // lock. Never unlink this file while a bridge could still hold it.
+    static let bridgeInstanceLockPath = runtimeDir + "/interceptor-bridge-instance.lock"
 
     /// Advisory `flock` guarding the pid-file + socket-path lifecycle. Returns
     /// the held descriptor, or nil if the lock could not be taken in time.

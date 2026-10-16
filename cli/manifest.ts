@@ -20,7 +20,7 @@ import { skillsStatusSummary } from "./commands/skills"
 export type FlagSpec = { name: string; value?: string; description: string }
 export type CommandSpec = {
   name: string
-  surface: "browser" | "macos" | "local"
+  surface: "browser" | "macos" | "desktop" | "local"
   usage: string
   summary: string
   returns: string
@@ -146,7 +146,7 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "links", surface: "browser", usage: "interceptor links", summary: "All links on the page", returns: "Array of {text, href}." },
   { name: "images", surface: "browser", usage: "interceptor images", summary: "All images", returns: "Array of {alt, src}." },
   { name: "forms", surface: "browser", usage: "interceptor forms", summary: "All forms and fields", returns: "Form structure with field names/types/values." },
-  { name: "query", surface: "browser", usage: "interceptor query <css-selector>", summary: "Query elements by CSS selector", returns: "Matching elements with attributes and clickable e<ref>s." },
+  { name: "query", surface: "browser", usage: "interceptor query <css-selector>", summary: "Query elements by CSS selector", returns: "Total count, returned count, truncation flag, and up to 20 elements with clickable e<ref>s." },
   { name: "exists", surface: "browser", usage: "interceptor exists <css-selector>", summary: "Does a selector match?", returns: "Boolean." },
   { name: "count", surface: "browser", usage: "interceptor count <css-selector>", summary: "How many elements match", returns: "Number." },
   { name: "attr", surface: "browser", usage: "interceptor attr e<ref> <name> | attr set e<ref> <name> <value>", summary: "Get/set an attribute", returns: "Attribute value." },
@@ -159,7 +159,7 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "scroll", surface: "browser", usage: "interceptor scroll up|down|top|bottom [--amount <px>]", summary: "Scroll the page", returns: "ok." },
   { name: "hover", surface: "browser", usage: "interceptor hover e<ref>", summary: "Hover an element", returns: "ok." },
   { name: "drag", surface: "browser", usage: "interceptor drag e<ref> [--from x,y --to x,y --steps <n>]", summary: "Drag an element or coordinates", returns: "ok." },
-  { name: "upload", surface: "browser", usage: "interceptor upload e<ref> <path> [--dropzone] [--picker]", summary: "Attach a local file to an <input type=file>, drag-and-drop dropzone, or File System Access picker (--picker). Any size — large files auto-chunk. No CDP.", returns: "ok with {method, fileName, size, verified}. method: input | dropzone-trusted | dropzone-isolated | picker-staged." },
+  { name: "upload", surface: "browser", usage: "interceptor upload e<ref> <path> [--dropzone] [--picker]", summary: "Attach a local file to an <input type=file>, drag-and-drop dropzone, or File System Access picker (--picker). Up to 100 MB — large files auto-chunk, bigger ones are refused up front. No CDP.", returns: "ok with {method, fileName, size, verified}. method: input | dropzone-trusted | dropzone-isolated | picker-staged." },
   { name: "keepawake", surface: "browser", usage: "interceptor keepawake on|off [--display]", summary: "Keep the machine awake for an unattended run (chrome.power)", returns: "ok with {on, level}." },
   { name: "idle", surface: "browser", usage: "interceptor idle state [--interval <sec>]", summary: "Query user idle state: active | idle | locked (chrome.idle)", returns: "ok with {state}." },
   { name: "delegate", surface: "browser", usage: "interceptor delegate log [--since <ms>] [--follow]", summary: "Read human→agent delegation intents (right-click menu / hotkey)", returns: "list of delegation_intent events." },
@@ -171,26 +171,27 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "tabs", surface: "browser", usage: "interceptor tabs", summary: "List managed tabs", returns: "Tab list (id, url, title)." },
   {
     name: "tab", surface: "browser",
-    usage: "interceptor tab new [url] [--reuse|--no-reuse] [--activate] | tab close [id] | tab switch <id>",
-    summary: "Create, reuse, activate, or close managed tabs",
-    returns: "Tab metadata for creation, or ok / error for exact-ID lifecycle actions.",
+    usage: "interceptor tab new [url] [--reuse|--no-reuse] [--activate] | tab close [id] | tab switch <id> | tab keepalive <id> [--off]",
+    summary: "Create, reuse, activate, keep rendering, or close managed tabs",
+    returns: "Tab metadata for creation, or ok / error for exact-ID lifecycle actions; keepalive returns the flag state and its limits.",
     flags: [
       { name: "--reuse", description: "reuse the most recent tab in the caller's managed group" },
       { name: "--no-reuse", description: "force creation of a new managed tab" },
       { name: "--activate", description: "activate the created or reused tab (default is background-first)" },
+      { name: "--off", description: "tab keepalive: clear the flag so the page reads its real visibility again" },
     ],
   },
   {
     name: "update", surface: "local",
-    usage: "interceptor update [status]",
-    summary: "Update Interceptor itself — checks with Sparkle and reports its selected version or no-update result (full install only)",
-    returns: "check: started, concluded, outcome, phase, selected/latest version or error, and feed. status: the same observed lifecycle plus lastCheck, automaticChecks, checkInterval, canCheckForUpdates, and sessionInProgress.",
+    usage: "interceptor update [status|check]",
+    summary: "Update Interceptor itself: checks the update feed and reports its selected version or no-update result. A newer release opens the update window and installs when the user clicks Install Update (Sparkle on macOS). Full install only.",
+    returns: "check: started, concluded, outcome, phase, selected/latest version or error, and feed. status: the same observed lifecycle plus lastCheck, nextCheckAt, automaticChecks, checkInterval, canCheckForUpdates, sessionInProgress and the last install (lastInstallVersion, lastInstallOutcome, lastInstallAt).",
     example: "interceptor update",
   },
   { name: "network", surface: "browser", usage: "interceptor net [--filter <pattern>] [--limit <n>] [--format har|json|pcapng --out <path>]", summary: "Passive network log", returns: "Recent requests (method, url, status, type); exportable to HAR/pcapng." },
   { name: "headers", surface: "browser", usage: "interceptor headers [--filter <pattern>]", summary: "Request headers seen", returns: "Header sets per request." },
-  { name: "screenshot", surface: "browser", usage: "interceptor screenshot [e<ref>] [--save] [--format png|jpeg|webp] [--quality <n>]", summary: "Screenshot page/element", returns: "Image (saved to disk with --save; path on stderr)." },
-  { name: "eval", surface: "browser", usage: "interceptor eval <expr> [--main] [--frame <id>] [--allow-csp-strip]", summary: "Evaluate JS in the requested frame and world (ISOLATED by default)", returns: "Expression result. Isolated eval needs userScripts support when extension CSP blocks eval; strict-CSP/Trusted-Types pages are handled inside the page policy. --allow-csp-strip additionally removes the page CSP header for the tab (off by default; disables the site's own XSS defenses)." },
+  { name: "screenshot", surface: "browser", usage: "interceptor screenshot [--element <ref>] [--save] [--format png|jpeg|webp] [--quality <n>]", summary: "Screenshot page/element", returns: "Image. --save takes no value and writes one auto-named file in the current directory." },
+  { name: "eval", surface: "browser", usage: "interceptor eval <expr> [--main] [--frame <id>] [--no-reload] [--allow-csp-strip]", summary: "Evaluate JS in the requested frame and world (isolated by default)", returns: "Expression result. Isolated eval needs userScripts support when extension CSP blocks eval. MAIN CSP recovery can reload the tab and returns {value,cspBypassApplied,originalError}; never switches world or frame. --no-reload refuses that reload and returns the CSP error instead. Use it on a stateful page a reload would destroy." },
   { name: "save", surface: "browser", usage: "interceptor save --out <abs-path> <expr> [--allow-csp-strip]", summary: "Stream page-produced bytes (Blob/File/ArrayBuffer) to disk", returns: "{path, bytes, sha256} — integrity-checked." },
   { name: "cookies", surface: "browser", usage: "interceptor cookies [domain] | cookies set/delete …", summary: "Read/write cookies", returns: "Cookie list." },
   { name: "storage", surface: "browser", usage: "interceptor storage [key] | storage delete <key>", summary: "localStorage access", returns: "Values." },
@@ -228,6 +229,7 @@ export const COMMAND_SPECS: CommandSpec[] = [
   { name: "research", surface: "local", usage: "interceptor research [init|log|status|…]", summary: "Deep-research methodology + on-disk source ledger", returns: "Playbook guidance / ledger state." },
   { name: "upgrade", surface: "local", usage: "interceptor upgrade --full", summary: "Promote browser-only install to full computer-use mode (macOS)", returns: "Installer output." },
   // ── other surfaces (verbs enumerated via their own --help) ──────────────────
+  { name: "desktop", surface: "desktop", usage: "interceptor desktop <verb> …", summary: "Shared desktop commands backed by the host native provider", returns: "Per operation. desktop capabilities reports current provider, permissions, limits and availability." },
   { name: "macos", surface: "macos", usage: "interceptor macos <verb> … (see: interceptor help macos)", summary: "Native macOS control: AX trees, background input, windows, screenshots, Apple Events, Electron CDP, app runtime", returns: "Per-verb; background-first — only 'app activate'/'open --activate' move focus." },
 ]
 
@@ -235,7 +237,7 @@ export function runManifestCommand(argv: string[]): null {
   const surfaces = detectSurfaces(argv)
   const commands = COMMAND_SPECS.filter(c =>
     c.surface === "browser" || c.surface === "local" ||
-    (c.surface === "macos" && surfaces.macos))
+    ((c.surface === "macos" || c.surface === "desktop") && surfaces.macos))
   let skills: ReturnType<typeof skillsStatusSummary> | { packDir: null } = { packDir: null }
   try { skills = skillsStatusSummary() } catch {}
   console.log(JSON.stringify({

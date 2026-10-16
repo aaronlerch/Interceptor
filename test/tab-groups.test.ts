@@ -10,7 +10,7 @@ import {
   deriveSessionGroupLabel,
   resolveSessionId,
 } from "../cli/parse"
-import { setGlobalGroup, withGroup } from "../cli/transport"
+import { setGlobalGroup, setGlobalFrame, withGroup } from "../cli/transport"
 import { buildFilteredArgs } from "../cli/global-flags"
 import { managedTabGateError, resolveGroupDispatchScope } from "../extension/src/background/message-dispatch"
 
@@ -190,6 +190,28 @@ describe("tab groups: CLI global flags", () => {
       .toEqual({ label: expected, soft: true })
   })
 
+  test("native Contacts IDs never enter browser label validation or session injection", () => {
+    const env = { INTERCEPTOR_SESSION_ID: "session" }
+    for (const surface of ["macos", "desktop"]) {
+      expect(resolveGroupScope([surface, "contacts", "list", "--group", "native:id-longer-than-a-browser-group-label"], env))
+        .toEqual({ label: deriveSessionGroupLabel("session"), soft: true })
+      expect(resolveGroupScope(["--group", "browser-lane", surface, "contacts", "list", "--group", "native:id"], env))
+        .toEqual({ label: "browser-lane", soft: false })
+      expect(resolveGroupScope([surface, "contacts", "list", "--shared-group", "--group", "native:id"], env))
+        .toEqual({ label: undefined, soft: false })
+    }
+    setGlobalGroup("browser-lane", "blue", true)
+    setGlobalFrame(7)
+    try {
+      for (const type of ["desktop_contacts", "macos_contacts", "desktop_share", "macos_tree", "ios_tree"]) {
+        expect(withGroup({ type, sub: "status" })).toEqual({ type, sub: "status" })
+      }
+      expect(withGroup({ type: "desktop_contacts", sub: "list", group: "native:id" })).toEqual({ type: "desktop_contacts", sub: "list", group: "native:id" })
+      // Browser trusted input still needs its managed tab and frame boundary.
+      expect(withGroup({ type: "os_click" })).toEqual({ type: "os_click", frameId: 7, group: "browser-lane", groupSoft: true, groupColor: "blue" })
+    } finally { setGlobalGroup(undefined); setGlobalFrame(undefined) }
+  })
+
   test("wire shape: an automatic label carries groupSoft; explicit and MCP labels do not", () => {
     setGlobalGroup("s-ba7816bf8f01cfea", undefined, true)
     expect(withGroup({ type: "tab_create" })).toEqual({ type: "tab_create", group: "s-ba7816bf8f01cfea", groupSoft: true })
@@ -299,12 +321,15 @@ describe("tab groups: dispatch never falls back to the browser-active tab for gr
 })
 
 describe("tab groups: group_close is one atomic tabs.remove over the group's own ids", () => {
-  test("handler exists and uses a single chrome.tabs.remove(ids)", () => {
+  test("handler exists and uses a single removeTabsAndEmptiedGroups(ids)", () => {
     const closeCase = tabsSrc.slice(tabsSrc.indexOf('case "group_close"'))
     expect(closeCase.length).toBeGreaterThan(10)
     const body = closeCase.slice(0, closeCase.indexOf("case ", 10))
-    expect(body).toContain("chrome.tabs.remove(ids)")
-    expect((body.match(/chrome\.tabs\.remove/g) || []).length).toBe(1)
+    // Ungroup-then-remove, so Chrome deletes the group instead of saving it
+    // closed (issue #301); behavior is pinned in tab-group-delete-on-close.test.ts.
+    expect(body).toContain("removeTabsAndEmptiedGroups(ids)")
+    expect((body.match(/removeTabsAndEmptiedGroups\(/g) || []).length).toBe(1)
+    expect(body).not.toContain("chrome.tabs.remove")
     expect(body).not.toContain("chrome.windows.remove")
   })
 })

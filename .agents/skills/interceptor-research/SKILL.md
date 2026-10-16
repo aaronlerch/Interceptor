@@ -174,7 +174,8 @@ Full version: interceptor research --full   |   Skill: interceptor-research
 ## The source ledger (collect-before-synthesize, made concrete)
 
 ```bash
-interceptor research init <slug> [--effort quick|standard|exhaustive]   # floor 8 / 20 / 40
+interceptor research init <slug> [--effort quick|standard|exhaustive]   # floor 8 / 20 / 40; becomes the current ledger
+interceptor research use <slug>                                         # switch the current ledger (add/note/status use it when several exist)
 interceptor research add <url> --note "why it matters"                  # append a lead
 interceptor research note "<running insight>"                           # append to insights.md
 interceptor research status [<slug>]                                    # rubric readout + verdict
@@ -229,6 +230,7 @@ vs floor, distinct domains, claims still needing corroboration, saturation, and 
 
 - Pulling a single value off one known page → use `interceptor-browser`'s
   `workflows/read-and-extract.md` (3-command budget). This skill is for breadth.
-- Native apps / OS dialogs / browser chrome → `interceptor-macos`.
+- Native apps / OS dialogs / browser chrome → `interceptor-macos`. <!-- os:darwin -->
+- Native apps / OS dialogs / browser chrome → `interceptor-desktop`. <!-- os:win32,linux -->
 - Logging in, submitting forms, or anything beyond public pages without the
   user's explicit authorization → out of scope.

@@ -13,16 +13,35 @@ final class RefRegistryTests: XCTestCase {
         XCTAssertEqual(registry.resolveInfo(ref)?.pid, 4242)
     }
 
-    func testClearRemovesElementsAndResetsCounter() {
+    // Refs are unique for the bridge lifetime. Clearing drops the entries but
+    // keeps counting, so a ref an agent still holds from an earlier tree read
+    // can never resolve to another app's element (native-ref probe, 2026-09-10).
+    func testClearRemovesElementsButKeepsIssuingFreshRefs() {
         let registry = RefRegistry()
-        _ = registry.register(AXUIElementCreateSystemWide(), pid: 1)
+        let old = registry.register(AXUIElementCreateSystemWide(), pid: 101)
         registry.clear()
 
         XCTAssertEqual(registry.count, 0)
-        XCTAssertEqual(registry.currentCount(), 0)
+        XCTAssertEqual(registry.currentCount(), 1, "the counter must not rewind")
 
-        let next = registry.register(AXUIElementCreateSystemWide(), pid: 2)
-        XCTAssertEqual(next, "e1")
-        XCTAssertEqual(registry.resolvePID(next), 2)
+        let next = registry.register(AXUIElementCreateSystemWide(), pid: 202)
+        XCTAssertEqual(next, "e2")
+        XCTAssertNotEqual(next, old)
+        XCTAssertNil(registry.resolvePID(old), "a cleared ref resolves to nothing, never to the new owner")
+        XCTAssertEqual(registry.resolvePID(next), 202)
+    }
+
+    // A later read neither expires a ref nor gives its element a new one.
+    func testSameElementKeepsItsRefUntilDestroyed() {
+        let registry = RefRegistry()
+        let app = AXUIElementCreateApplication(getpid()), other = AXUIElementCreateApplication(getppid())
+        let first = registry.register(app, pid: getpid())
+        let second = registry.register(other, pid: getppid())
+        XCTAssertEqual(registry.register(AXUIElementCreateApplication(getpid()), pid: getpid()), first)
+        XCTAssertNotEqual(first, second)
+        registry.remove(app)
+        XCTAssertNil(registry.resolve(first))
+        XCTAssertNotNil(registry.resolve(second), "removing one element keeps the others")
+        XCTAssertNotEqual(registry.register(app, pid: getpid()), first, "a dropped ref is never reissued")
     }
 }

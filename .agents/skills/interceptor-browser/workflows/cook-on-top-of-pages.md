@@ -189,18 +189,20 @@ interceptor eval --main "
 "
 ```
 
-Optional: if your environment has a trusted OS-input path, you can also hide the browser chrome after takeover:
+<!-- os:darwin -->
+Optional, on a full install: when the window is already in full screen, toggle the browser's toolbar off. Address the keys to the window; do not activate the browser.
 
 ```bash
-interceptor macos app activate "Brave Browser"
-interceptor macos keys "Meta+Shift+F"    # Brave / Chrome full-screen toggle
+interceptor macos windows --app "Brave Browser"                                  # read the windowId of the page's window
+interceptor macos keys "Meta+Shift+F" --app "Brave Browser" --window <windowId>  # "Always Show Toolbar in Full Screen" on/off
 ```
 
-`Meta+Shift+F` (⌘⇧F) triggers Chromium's actual full-screen mode — the whole screen is yours, no tabs, no URL bar. `Esc` or the same shortcut exits.
+`Meta+Shift+F` is a persistent browser setting, not a full-screen toggle: send it again when you are done to put it back. Putting a window into full screen takes over the user's display, so do that only when the user asked for a full-screen show.
 
-> `interceptor macos keys` produces OS-level CGEvents, so shortcuts the browser normally intercepts (like full-screen toggle) actually fire. Web-level `interceptor keys` will **not** work for browser-chrome shortcuts — they only reach the page.
+> `interceptor macos keys` produces OS-level CGEvents, so shortcuts the browser normally intercepts (like the toolbar toggle) actually fire. Web-level `interceptor keys` will **not** work for browser-chrome shortcuts — they only reach the page.
 
 If you do **not** have the macOS path available, the cook still works. Full-screen browser chrome hiding is optional polish, not the core technique.
+<!-- /os -->
 
 ---
 
@@ -266,7 +268,8 @@ This is the literal sequence I ran for the demo:
 
 5. **Plus-up pass 3** — confetti-style dramatic reveal with screen shake (`body { animation: shake .25s infinite }`) + glitch-clip reveal card.
 
-6. **Optional full-screen cook** — nuke the page, repaint as pure roses + headline. If trusted OS input is available, activate Brave and send `Meta+Shift+F` through `interceptor macos keys`.
+6. **Optional full-screen cook** — nuke the page, repaint as pure roses + headline. On a full install, hide the toolbar with `interceptor macos keys "Meta+Shift+F" --app "Brave Browser" --window <windowId>` (no activation; send it again afterwards to restore the setting). <!-- os:darwin -->
+6. **Optional full-screen cook** — nuke the page, repaint as pure roses + headline. <!-- os:win32,linux -->
 
 7. **Exit** — `Esc` or reload the tab. Page restores cleanly.
 
@@ -305,6 +308,7 @@ This is the literal sequence I ran for the demo:
 
 ## Credits
 
-This use case grew out of a live-demo session: take a real map site → live tour → increasingly dramatic overlays → a full-screen rose-rain finale with a headline glowing in the middle. The whole thing ran in one session through Interceptor's `eval --main` + `macos keys` bridge, with no code deployed anywhere.
+This use case grew out of a live-demo session: take a real map site → live tour → increasingly dramatic overlays → a full-screen rose-rain finale with a headline glowing in the middle. The whole thing ran in one session through Interceptor's `eval --main` + `macos keys` bridge, with no code deployed anywhere. <!-- os:darwin -->
+This use case grew out of a live-demo session: take a real map site → live tour → increasingly dramatic overlays → a full-screen rose-rain finale with a headline glowing in the middle. The whole thing ran in one session through Interceptor's `eval --main`, with no code deployed anywhere. <!-- os:win32,linux -->
 
 The trick isn't the effects. The trick is realizing that a real browser extension talking to a real Chromium tab gives you a canvas that already has the user's session, data, and layout. Interceptor just hands you the brush.

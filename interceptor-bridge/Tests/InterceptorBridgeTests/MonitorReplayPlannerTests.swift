@@ -7,6 +7,52 @@ import XCTest
 // invocations.
 
 final class MonitorReplayPlannerTests: XCTestCase {
+    func testReplayArgumentsStayLiteralAndCapturedCommentsCannotBecomeCommands() throws {
+        let payload = "$(printf EXPANDED)`printf EXPANDED`$INTERCEPTOR_REPLAY_VAR \"quote\" \\ apostrophe' 文件\nsecond line"
+        let comment = "caption\nprintf COMMENT_EXECUTED\r\ntrailer"
+        let events: [[String: Any]] = [
+            ["event": "key", "app": payload, "kc": payload],
+            ["event": "input", "app": payload, "r": "AXTextField", "n": payload, "v": payload],
+            ["event": "click", "app": payload, "r": "AXButton", "n": payload],
+            ["event": "rclick", "app": payload, "x": 120, "y": 240],
+            ["event": "dblclick", "app": payload, "r": "AXButton", "n": payload],
+            ["event": "menu_open", "app": payload, "n": payload],
+            ["event": "menu_select", "app": payload, "n": payload],
+            ["event": "scroll", "app": payload, "sy": -1.0],
+            ["event": "input", "r": "AXSecureTextField", "n": comment, "v": "***SECURE***"],
+            ["event": "menu_select", "n": comment],
+            ["event": "window_create", "app": comment],
+            ["event": comment]
+        ]
+        let plan = MonitorReplayPlanner.generateReplayPlan(events: events, instruction: comment)
+        // Window-create also produces a background open of its literal app name.
+        let expected = [
+            ["macos", "open", payload], ["macos", "keys", payload, "--app", payload],
+            ["macos", "type", "AXTextField:" + payload, payload, "--app", payload],
+            ["macos", "click", "AXButton:" + payload, "--app", payload],
+            ["macos", "click", "--right", "120,240", "--app", payload],
+            ["macos", "click", "--double", "AXButton:" + payload, "--app", payload],
+            ["macos", "menu", payload, payload, "--app", payload],
+            ["macos", "scroll", "down", "50", "--app", payload], ["macos", "open", comment]
+        ]
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            let process = Process(), output = Pipe(), errors = Pipe()
+            process.executableURL = URL(fileURLWithPath: shell)
+            process.arguments = ["-f", "-c", "interceptor() { printf '%s\\0' \"$@\"; printf '\\1'; }\n" + plan]
+            process.environment = ProcessInfo.processInfo.environment.merging(["INTERCEPTOR_REPLAY_VAR": "EXPANDED"]) { _, new in new }
+            process.standardOutput = output; process.standardError = errors
+            try process.run()
+            let bytes = output.fileHandleForReading.readDataToEndOfFile()
+            let stderr = errors.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, String(decoding: stderr, as: UTF8.self))
+            let rows = bytes.split(separator: 1).map { row in
+                row.split(separator: 0, omittingEmptySubsequences: false).dropLast().map { String(decoding: $0, as: UTF8.self) }
+            }
+            XCTAssertEqual(rows, expected, shell)
+        }
+    }
+
     func testEmptySequenceProducesHeaderOnly() {
         let plan = MonitorReplayPlanner.generateReplayPlan(events: [], instruction: nil)
         XCTAssertTrue(plan.contains("# Replay plan for macOS monitor session"))
@@ -17,21 +63,36 @@ final class MonitorReplayPlannerTests: XCTestCase {
         XCTAssertTrue(plan.contains("# Instruction: send hello in slack"))
     }
 
-    func testFrontmostTriggersAppLaunchOrActivate() {
+    // The recorded user switched apps; the replay must not. An app change
+    // becomes a background `open`, with or without a bundle id on the event.
+    func testAppChangeOpensInTheBackgroundAndNeverTakesFocus() {
         let events: [[String: Any]] = [
-            ["event": "frontmost", "app": "Slack", "bundleId": "com.tinyspeck.slackmacgap"]
+            ["event": "frontmost", "app": "Slack", "bundleId": "com.tinyspeck.slackmacgap"],
+            ["event": "key", "kc": "Meta+K", "app": "Slack"],
+            ["event": "frontmost", "app": "Mail"],
+            ["event": "click", "x": 120, "y": 240, "app": "Mail"],
+            ["event": "input", "r": "AXTextField", "n": "To", "v": "sam", "app": "Mail"],
         ]
         let plan = MonitorReplayPlanner.generateReplayPlan(events: events, instruction: nil)
-        // Bundle id is preferred when present.
-        XCTAssertTrue(plan.contains("interceptor macos app launch \"com.tinyspeck.slackmacgap\""))
+        XCTAssertTrue(plan.contains("interceptor macos open \"Slack\""))
+        XCTAssertTrue(plan.contains("interceptor macos open \"Mail\""))
+        XCTAssertFalse(plan.contains("app activate"))
+        XCTAssertFalse(plan.contains("app launch"))
+        XCTAssertFalse(plan.contains("--activate"))
+        // Every input line names its app, so none falls back to the frontmost app.
+        XCTAssertTrue(plan.contains("interceptor macos type \"AXTextField:To\" \"sam\" --app \"Mail\""))
+        for line in plan.split(separator: "\n") where line.hasPrefix("interceptor macos keys") || line.hasPrefix("interceptor macos click 1") {
+            XCTAssertTrue(line.contains("--app"), "no --app on: \(line)")
+        }
     }
 
-    func testFrontmostFallsBackToAppActivateWhenNoBundleId() {
+    func testOneOpenPerAppRun() {
         let events: [[String: Any]] = [
-            ["event": "frontmost", "app": "Slack"]
+            ["event": "key", "kc": "a", "app": "Slack"],
+            ["event": "key", "kc": "b", "app": "Slack"],
         ]
         let plan = MonitorReplayPlanner.generateReplayPlan(events: events, instruction: nil)
-        XCTAssertTrue(plan.contains("interceptor macos app activate \"Slack\""))
+        XCTAssertEqual(plan.components(separatedBy: "interceptor macos open \"Slack\"").count - 1, 1)
     }
 
     func testClickWithRoleAndNameEmitsInterceptorClick() {

@@ -7,13 +7,16 @@
  * module so the rule is unit-testable without importing the daemon entry.
  */
 
-const VALUE_FIELDS = ["value", "text", "inputText", "password", "pw", "passcode", "token"]
+const VALUE_FIELDS = ["value", "text", "inputText", "password", "pw", "passcode", "token", "secretLease", "bindingToken"]
 
 export function isSecretBearing(action: unknown): boolean {
   if (!action || typeof action !== "object" || Array.isArray(action)) return false
   const a = action as Record<string, unknown>
-  if (a.type === "macos_secret") return true
+  // The cut upstream vault/sudo/saved-login types stay listed so a stray or
+  // replayed frame carrying one is still redacted before it reaches a log line.
+  if (["macos_secret", "desktop_secret", "macos_secrets", "browser_creds", "macos_sudo", "desktop_sudo"].includes(String(a.type))) return true
   if (typeof a.secret === "string") return true
+  if(a.secretLease!==undefined||a.secretBindingName!==undefined||a.bindingToken!==undefined)return true
   // issue #248: a browser saved-login fill; the delivered value rides text/inputText.
   if (a.browserLogin && typeof a.browserLogin === "object") return true
   if (a.sensitive === true) return true
@@ -44,13 +47,16 @@ export function actionLogSummary(action: unknown): string {
  */
 export function redactMessage(msg: unknown): unknown {
   if (msg && typeof msg === "object" && !Array.isArray(msg)) {
-    const m = msg as Record<string, unknown>
+    const original = msg as Record<string, unknown>
+    const m = original.vaultToken !== undefined ? {...original,vaultToken:"<redacted>"} : original
     if (isSecretBearing(m.action)) return { ...m, action: redactAction(m.action) }
     const result = m.result as { data?: unknown } | undefined
     const data = result?.data as Record<string, unknown> | undefined
+    if(data&&typeof data==='object'&&(data.secretLease!==undefined||data.bindingToken!==undefined))return {...m,result:{...result,data:{...data,...(data.secretLease!==undefined?{secretLease:'<redacted>'}:{}),...(data.bindingToken!==undefined?{bindingToken:'<redacted>'}:{})}}}
     if (data && typeof data === "object" && typeof data.name === "string" && typeof data.value === "string") {
       return { ...m, result: { ...result, data: { ...data, value: "<redacted>" } } }
     }
+    return m
   }
   return msg
 }

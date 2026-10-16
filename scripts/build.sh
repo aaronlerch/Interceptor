@@ -109,8 +109,10 @@ build_extension() {
   bun build extension/src/inject-net.ts --outdir=extension/dist --target=browser
   bun build extension/src/inject-canvas.ts --outdir=extension/dist --target=browser
   bun build extension/src/offscreen.ts --outfile=extension/dist/offscreen.js --target=browser
-  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser
+  bun build extension/src/popup.ts --outfile=extension/dist/popup.js --target=browser --format=iife
   cp extension/manifest.json extension/dist/
+  # The manifest names this file; a missing or invalid schema stops Chrome from loading the extension.
+  cp extension/managed-schema.json extension/dist/
   cp extension/offscreen.html extension/dist/
   cp extension/popup.html extension/dist/
   rm -rf extension/dist/icons
@@ -141,6 +143,7 @@ build_extension_mv2() {
   cp extension/dist/inject-canvas.js extension/dist-mv2/inject-canvas.js
   cp extension/dist/offscreen.html extension/dist-mv2/offscreen.html
   cp extension/dist/popup.html extension/dist-mv2/popup.html
+  cp extension/dist/popup.js extension/dist-mv2/popup.js
   printf '%s\n' 'globalThis.INTERCEPTOR_APP_CONTEXT_ID = "app:electron";' > extension/dist-mv2/electron-config.js
   rm -rf extension/dist-mv2/icons
   cp -R extension/icons extension/dist-mv2/icons
@@ -218,7 +221,7 @@ const manifest = {
   // loopback endpoints explicit for diagnostic/fallback probes. The selected
   // production path is the containing appex native relay.
   content_security_policy: {
-    extension_pages: "script-src '"'"'self'"'"'; object-src '"'"'self'"'"'; connect-src ws://localhost:19222 ws://127.0.0.1:19222"
+    extension_pages: "script-src '"'"'self'"'"'; object-src '"'"'self'"'"'; connect-src ws://127.0.0.1:* ws://localhost:*"
   },
   action: {
     default_title: "Interceptor",
@@ -250,6 +253,30 @@ build_macos() {
   bun build cli/index.ts --compile --target=bun-darwin-arm64 --outfile=dist/interceptor
   echo "Building daemon (macOS arm64)..."
   bun build daemon/index.ts --compile --target=bun-darwin-arm64 --outfile=daemon/interceptor-daemon
+}
+
+# Compile one entry point for both Mac architectures and merge the slices into
+# one Mach-O, so the same pkg runs on Apple silicon and Intel. x64 uses the
+# baseline build like Windows and Linux: Intel Macs that macOS 11 still
+# supports include CPUs without AVX2. The slices go under dist/ (ignored), so a
+# failed compile does not leave a stray binary beside the daemon.
+compile_macos_universal() {
+  local entry="$1" out="$2"
+  local slice="dist/macos-slices/$(basename "$out")"
+  mkdir -p dist/macos-slices
+  bun build "$entry" --compile --target=bun-darwin-arm64 --outfile="$slice-arm64"
+  bun build "$entry" --compile --target=bun-darwin-x64-baseline --outfile="$slice-x64"
+  lipo -create "$slice-arm64" "$slice-x64" -output "$out"
+  rm -f "$slice-arm64" "$slice-x64"
+}
+
+# --target=macos-universal: the CLI and daemon that release.sh --universal
+# packages. The bridge follows through build_bridge universal.
+build_macos_universal() {
+  echo "Building CLI (macOS arm64 + x64)..."
+  compile_macos_universal cli/index.ts dist/interceptor
+  echo "Building daemon (macOS arm64 + x64)..."
+  compile_macos_universal daemon/index.ts daemon/interceptor-daemon
 }
 
 # Windows keeps a mandatory write lock on a running .exe, so `bun build
@@ -339,6 +366,35 @@ build_windows_arch() {
   fi
   rm -rf "$stage/extension"
   cp -R extension/dist "$stage/extension"
+  # Agent skills with only the Windows lines; the installer copies them from the stage.
+  bun scripts/gen-skills.ts win32 "$stage/skills" interceptor interceptor-browser interceptor-research interceptor-desktop
+  local engine_root="${INTERCEPTOR_DESKTOP_WINDOWS_ENGINE_ROOT:-$PWD/interceptor-desktop/target/windows-packages}"
+  if [[ -e "$engine_root/$arch/engines" || -L "$engine_root/$arch/engines" ]]; then
+    mkdir -p "$stage/desktop"
+    bun scripts/stage-desktop-engines.ts "$engine_root/$arch/engines" win32 "$arch" "$PWD/$stage/desktop/engines"
+  fi
+}
+
+build_linux_arch() {
+  local arch="$1"
+  local bun_target stage
+  case "$arch" in
+    x64) bun_target="bun-linux-x64-baseline" ;;
+    arm64) bun_target="bun-linux-arm64" ;;
+    *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
+  esac
+
+  stage="dist/linux/$arch"
+  rm -rf "$stage"
+  mkdir -p "$stage/daemon"
+  echo "Building CLI (Linux $arch, $bun_target)..."
+  bun build cli/index.ts --compile --target="$bun_target" --outfile="$stage/interceptor"
+  echo "Building daemon (Linux $arch, $bun_target)..."
+  bun build daemon/index.ts --compile --target="$bun_target" --outfile="$stage/daemon/interceptor-daemon"
+  cp daemon/com.interceptor.host.json "$stage/daemon/com.interceptor.host.json"
+  chmod 755 "$stage/interceptor" "$stage/daemon/interceptor-daemon"
+  # Agent skills with only the Linux lines; release-linux.sh packs them beside the CLI.
+  bun scripts/gen-skills.ts linux "$stage/skills" interceptor interceptor-browser interceptor-research interceptor-desktop
 }
 
 build_bridge() {
@@ -351,8 +407,13 @@ build_bridge() {
     echo "Skipping interceptor-bridge (not on macOS)"
     return 0
   fi
-  echo "Building interceptor-bridge (macOS native)..."
-  bash scripts/build-bridge.sh
+  if [[ "${1:-}" == "universal" ]]; then
+    echo "Building interceptor-bridge (macOS arm64 + x86_64)..."
+    INTERCEPTOR_BRIDGE_UNIVERSAL=1 bash scripts/build-bridge.sh
+  else
+    echo "Building interceptor-bridge (macOS native)..."
+    bash scripts/build-bridge.sh
+  fi
 }
 
 # Preflight before any bundling: a locked .exe is a user-fixable condition, and
@@ -373,6 +434,8 @@ if [[ "$BUILD_ALL" == "1" ]]; then
   build_macos
   build_windows_arch x64
   build_windows_arch arm64
+  build_linux_arch x64
+  build_linux_arch arm64
   build_bridge
 elif [[ "$TARGET" == "host" ]]; then
   build_extension
@@ -386,12 +449,28 @@ elif [[ "$TARGET" == "macos" ]]; then
   build_extension_safari
   build_macos
   build_bridge
+elif [[ "$TARGET" == "macos-universal" ]]; then
+  build_extension
+  build_extension_mv2
+  build_extension_safari
+  build_macos_universal
+  build_bridge universal
 elif [[ "$TARGET" == "windows-x64" ]]; then
   build_extension
   build_windows_arch x64
 elif [[ "$TARGET" == "windows-arm64" ]]; then
   build_extension
   build_windows_arch arm64
+elif [[ "$TARGET" == "linux" ]]; then
+  build_extension
+  build_linux_arch x64
+  build_linux_arch arm64
+elif [[ "$TARGET" == "linux-x64" ]]; then
+  build_extension
+  build_linux_arch x64
+elif [[ "$TARGET" == "linux-arm64" ]]; then
+  build_extension
+  build_linux_arch arm64
 elif [[ "$TARGET" == "windows" ]]; then
   echo "Unsupported target: windows. Use --target=windows-x64 or --target=windows-arm64." >&2
   exit 1
@@ -407,7 +486,7 @@ fi
 # No --entitlements here: entitlement enforcement only applies under the
 # hardened runtime, which ad-hoc signing doesn't enable. Release builds are
 # re-signed (--force) with the real identity + entitlements by release.sh.
-if [[ "$(uname -s)" == "Darwin" && "$TARGET" != windows-* ]] && command -v codesign >/dev/null 2>&1; then
+if [[ "$(uname -s)" == "Darwin" && ( "$BUILD_ALL" == "1" || "$TARGET" == "host" || "$TARGET" == "macos" || "$TARGET" == "macos-universal" ) ]] && command -v codesign >/dev/null 2>&1; then
   for b in dist/interceptor daemon/interceptor-daemon dist/interceptor-bridge; do
     if [[ -f "$b" ]]; then
       codesign --remove-signature "$b" 2>/dev/null || true
@@ -435,10 +514,19 @@ if [[ "$BUILD_ALL" == "1" ]]; then
   echo "  macOS Bridge: dist/interceptor-bridge"
   echo "  Windows x64: dist/windows/x64/"
   echo "  Windows ARM64: dist/windows/arm64/"
+  echo "  Linux x64: dist/linux/x64/"
+  echo "  Linux ARM64: dist/linux/arm64/"
 elif [[ "$TARGET" == "windows-x64" ]]; then
   echo "  Windows x64: dist/windows/x64/"
 elif [[ "$TARGET" == "windows-arm64" ]]; then
   echo "  Windows ARM64: dist/windows/arm64/"
+elif [[ "$TARGET" == "linux" ]]; then
+  echo "  Linux x64: dist/linux/x64/"
+  echo "  Linux ARM64: dist/linux/arm64/"
+elif [[ "$TARGET" == "linux-x64" ]]; then
+  echo "  Linux x64: dist/linux/x64/"
+elif [[ "$TARGET" == "linux-arm64" ]]; then
+  echo "  Linux ARM64: dist/linux/arm64/"
 else
   echo "  Extension: extension/dist/"
   echo "  Electron extension: extension/dist-mv2/"

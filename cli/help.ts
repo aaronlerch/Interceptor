@@ -4,20 +4,28 @@
 // loaded — so this block carries everything needed to form a correct invocation
 // in one shot (flags, accepted inputs, response shape, an example).
 import { COMMAND_SPECS } from "./manifest"
+import { filterDesktopHelp, hostDesktopOs } from "../shared/desktop-support"
 
 const COMMAND_HELP: Record<string, string> = {
   update: [
-    "interceptor update — update Interceptor itself",
+    "interceptor update: check Interceptor releases",
     "",
-    "  interceptor update             macOS: check now — reports Sparkle's selected version or no-update reason",
-    "  interceptor update status      macOS: check result, selected version, lifecycle phase, feed, and schedule",
+    "  interceptor update             Check now; reports selected release, eligibility or observed error",
+    "  interceptor update status      Read the retained check lifecycle, feed and schedule",
     "",
     "Notes:",
-    "  - macOS: requires the full install (the updater lives in the bridge app); browser-only",
-    "    installs get 'interceptor upgrade --full' guidance instead. A found update keeps",
-    "    Sparkle's visible prompt; a slow check returns 'checking' and status records its result.",
-    "  - Windows: updates ship as a signed installer — this command prints the Releases link",
-    "    (run the newer architecture-matched Setup; downgrades are refused).",
+    "  - Full installs check once a day. A newer release opens the update window: Skip This",
+    "    Version, Remind Me Later, Install Update. Nothing downloads or installs until you click;",
+    "    after the download, Install and Relaunch installs it. A slow check returns 'checking'",
+    "    and status records its result.",
+    "  - macOS: the window is Sparkle's, in the bridge app; browser-only installs get",
+    "    'interceptor upgrade --full' guidance instead.",
+    "  - Windows/Linux Full: the provider reads the signed feed on updates.hackervalley.media and",
+    "    verifies the installer (signed SHA-256 and length; Authenticode on Windows). An agent finds",
+    "    a button with 'interceptor desktop find \"Install Update\" --app interceptor-desktop' (Linux:",
+    "    --app interceptor-overlay) and presses it with 'interceptor desktop click <ref>'.",
+    "  - INTERCEPTOR_AUTO_UPDATE=off in the provider's login environment stops the daily checks.",
+    "  - Browser-only Windows/Linux installs update by running a newer installer.",
   ].join("\n"),
   daemon: [
     "interceptor daemon — local daemon lifecycle control",
@@ -58,7 +66,31 @@ const COMMAND_HELP: Record<string, string> = {
 // extracted from the HELP string below by matching lines that begin with
 // "  interceptor <cmd> ". User types `interceptor <cmd> --help` (or `-h`) and
 // gets exactly the slice for that command.
-export function helpForCommand(cmd: string): string | null {
+export function helpForCommand(cmd: string, sub?: string): string | null {
+  if ((cmd === "desktop" || cmd === "macos") && sub === "stream") return [
+    `interceptor ${cmd} stream start [--app <name> | --window <native-id> | --display <native-id>]`,
+    `interceptor ${cmd} stream record start [--sid <sid>] --media [--record-audio none|system]`,
+    `interceptor ${cmd} stream record status|stop [--sid <sid>]`,
+    "Media source candidate: Mac15+ native H264/MP4; Windows/Linux MJPEG/Matroska with measured frame-arrival times. Finalized replies include an exclusive private file, source identity and SHA256.",
+    "Counter-only record syntax remains available without --media. Mac system audio requires an explicit display; portable audio synchronization is unavailable. Current grouped tests and installed qualification remain open.",
+  ].join("\n")
+  if (cmd === "desktop") {
+    if (["status", "capabilities", "providers"].includes(sub ?? "")) return "interceptor desktop status|capabilities|providers: negotiated native provider, version, session, permissions and operation capabilities."
+    if (sub === "files") return [
+      "interceptor desktop files watch <absolute-path>",
+      "interceptor desktop files unwatch <absolute-path>",
+      "interceptor desktop files recent [--limit 0..1000]",
+      "interceptor desktop files open [--pid <positive-pid>] [--limit 0..100]",
+      "Watch keeps the original file/directory object, observes direct changes, and returns watching/eventPath. Events may coalesce. Unwatch returns path/removed.",
+      "Recent returns ordered path/timestamp/event records (default 20). History ends when the provider exits; 64 watches, 1000 entries/1MiB history, private 4MiB rolling event log.",
+      "Open returns files/count/partial/scope and coverage counts (default 100), with a five-second deadline. Accessible current-user paths only; Windows/Linux also require the current graphical login. Coverage is partial.",
+      "Unsupported filters, extra selectors, unknown flags and malformed integers refuse before native calls. Read-only recent/open and mutating watch/unwatch retain the same MCP policy.",
+    ].join("\n")
+    const page = ["interceptor desktop status|capabilities|providers", "Available operations depend on the installed native provider and target. Inspect capabilities before acting.", helpForCommand("macos", sub)?.replaceAll("interceptor macos", "interceptor desktop") ?? ""].join("\n")
+    // Windows and Linux leave out the commands their provider does not have (shared/desktop-support.json).
+    const os = hostDesktopOs()
+    return os ? filterDesktopHelp(page, os) : page
+  }
   const footer = `Run 'interceptor help --all' for the full command list, or 'interceptor ${cmd} -h' is an alias for --help.`
   // per-verb returns semantics from the manifest spec, so an
   // agent forming an invocation also learns exactly what comes back.
@@ -69,26 +101,52 @@ export function helpForCommand(cmd: string): string | null {
     if (spec.example) semantics.push(`Example: ${spec.example}`)
   }
   const curated = COMMAND_HELP[cmd]
-  if (curated) {
+  if (curated && !sub) {
     return [curated, ...semantics, "", footer].join("\n")
   }
+  // A curated page that documents the sub-verb answers for it too
+  // (`help update status`).
+  if (curated && sub && curated.includes(`interceptor ${cmd} ${sub}`)) {
+    return [curated, ...semantics, "", footer].join("\n")
+  }
+  // `help macos tree` / `help ios click`: only that sub-verb's lines. The
+  // unknown-flag error tells agents to run `help <cmd>`; a page that answers
+  // "no help" for a listed verb sent them guessing (106+ results, 2026-09-10).
   const lines = HELP.split("\n")
   const matched: string[] = []
   for (const line of lines) {
-    const m = line.match(/^\s+interceptor\s+(\S+)\b/)
-    if (m && m[1] === cmd) {
+    const m = line.match(/^\s+interceptor\s+(\S+)(?:\s+(\S+))?/)
+    // Grouped sub-verbs (`interceptor ios tree|find|inspect …`) match any of
+    // their alternatives, so `help ios tree` finds the line.
+    if (m && m[1] === cmd && (!sub || (m[2] ?? "").split("|").includes(sub))) {
       matched.push(line)
     }
   }
-  if (!matched.length) return null
-  return [
-    `interceptor ${cmd} — usage`,
-    "",
-    ...matched,
-    ...semantics,
-    "",
-    footer,
-  ].join("\n")
+  if (matched.length) {
+    return [
+      `interceptor ${cmd}${sub ? ` ${sub}` : ""} — usage`,
+      "",
+      ...matched,
+      ...semantics,
+      "",
+      footer,
+    ].join("\n")
+  }
+  // Manifest fallback: verbs the HELP text never listed line-by-line but the
+  // machine-readable manifest describes (usage, flags, what comes back).
+  if (spec && !sub) {
+    const flags = (spec.flags ?? []).map(f => `  ${f.name}${f.value ? ` <${f.value}>` : ""}  ${f.description}`)
+    return [
+      `interceptor ${cmd} — ${spec.summary}`,
+      "",
+      `  ${spec.usage}`,
+      ...(flags.length ? ["", "Flags:", ...flags] : []),
+      ...semantics,
+      "",
+      footer,
+    ].join("\n")
+  }
+  return null
 }
 
 // ── progressive disclosure ─────────────────────────────────────
@@ -116,12 +174,12 @@ const MAP_BROWSER = `BROWSER — a signed-in Chrome/Brave profile, background ta
   Read text  text (visible innerText) · text --markdown (keeps headings/tables) · html <ref> (raw markup)
   Structure  tree (a11y refs) · find "<q>" (current-page text + elements) · state · diff
   Web        websearch "<q>" (configured default provider → managed background tab + page read)
-  Extract    table · links · images · forms · query <css> · exists · count · attr · style      structured JSON
+  Extract    table · links · images · forms · query <css> · exists · count · attr · style      structured JSON; query returns at most 20 plus count/returned/truncated
   Act        act <ref> · click · type · select · focus · hover · drag · dblclick · rightclick · check · keys · scroll
   Navigate   navigate <url> · back · forward · scroll · wait <ms> · wait-stable
   Tabs       tabs · tab new|close|switch · window · frames · session · group (per-agent isolation) · contexts
   Network    net (passive log → HAR/pcapng) · headers · override (rewrite requests) · sse
-  Capture    screenshot [ref] · canvas · ocr · save --out <path> <expr>  (page bytes straight to disk) · eval <js> [--main]
+  Capture    screenshot [--element <ref>] · canvas · ocr · save --out <path> <expr>  (page bytes straight to disk) · eval <js> [--main]
   Data       cookies · storage · history · bookmarks · downloads · clipboard · clear
   Record     monitor (record → replay) · scene (canvas / rich editors) · batch (many actions, one call) · brand`
 
@@ -132,7 +190,7 @@ const MAP_MACOS = `MACOS — native apps via the accessibility tree, background-
   Capture    macos screenshot (occluded/minimized windows too) · capture · capture record (window → mp4) · stream · display
   Scripts    macos script run --jxa|--jsc|--script · intent dispatch (Apple Events, no foregrounding)
   System     macos clipboard · notifications · files · fs read|write|search · url · log query
-  Media/AI   macos vision (OCR any window) · listen (speech-to-text) · nlp · ai prompt · audio · sounds
+  Media/AI   macos vision (OCR any window or image file) · listen (speech-to-text) · nlp · ai prompt · audio · sounds
   Docs/data  macos pdf · detect · translate · thumbnail · calendar · reminders · contacts · photos · location · music · maps · share
   Electron   macos cdp discover|connect|app attach     drive an Electron/Chromium app's web contents
   Runtime    macos runtime enable|tree|read|eval|mutate     in-process control of a running native app
@@ -143,12 +201,14 @@ const MAP_UPGRADE = `macOS control is NOT enabled on this browser-only install:
 
 const MAP_FOOTER = `LOCAL (no browser needed):
   status · init · daemon stop · skills (adopt packs into Claude Code / Codex / ~/.agents) · manifest · research · upgrade · help
-  update — update Interceptor itself (fires the Sparkle update check; 'update status' shows the schedule)
+  update: check Interceptor releases; a newer release opens the update window; 'update status' shows retained state and schedule
 
 GLOBAL FLAGS (any command, any position — flag order never changes meaning):
   --json  --context <id>  --tab <id>  --group <label>  --frame <id>  --all-surfaces
   e.g. 'open --text-only <url>' ≡ 'open <url> --text-only'
   unknown flags are rejected (exit 1) on browser commands; INTERCEPTOR_LAX_FLAGS=1 downgrades to a warning
+  env defaults, set once per lane: INTERCEPTOR_CONTEXT=<id> (browser profile when several are connected),
+  INTERCEPTOR_GROUP=<label> (tab group), INTERCEPTOR_TREE_MAX_CHARS / INTERCEPTOR_TEXT_MAX_CHARS (open/read output budget)
 
 Docs & issues: https://github.com/Hacker-Valley-Media/Interceptor`
 
@@ -169,7 +229,7 @@ const HELP_BROWSER = `interceptor — browser control CLI
 Flags:
   -V, --version                       Print version, build SHA, and build date
   --json                              Output as JSON
-  --context <id>                      Target a specific browser context (see: interceptor contexts)
+  --context <id>                      Target a specific browser context (see: interceptor contexts; env: INTERCEPTOR_CONTEXT)
   --group <label>                     Hard-scope this command to a named tab group (env: INTERCEPTOR_GROUP).
                                       Agent shells default to a soft per-session group, labeled s-<hash16>,
                                       using INTERCEPTOR_SESSION_ID or a verified Maestro, Claude Code, or Codex id.
@@ -184,6 +244,7 @@ Compound (agent-optimized):
   interceptor open <url> --tree-only         Skip text, return only tree
   interceptor open <url> --text-only         Skip tree, return only text
   interceptor open <url> --full              Full text (200K cap) instead of the 8000-char summary
+  interceptor open <url> --tree-format compact   Compact tree; INTERCEPTOR_TREE_MAX_CHARS / INTERCEPTOR_TEXT_MAX_CHARS cap open/read output
   interceptor open <url> --timeout <ms>      Override wait-stable timeout (default 5000)
   interceptor open <url> --no-wait           Return immediately after tab creation
   interceptor open <url> --reuse             Navigate the most recent managed tab instead of opening a new one (cleans up long automation runs)
@@ -204,8 +265,9 @@ Compound (agent-optimized):
   interceptor style remove <handle>          Remove a previously injected stylesheet
   interceptor act <ref>                      Click + wait + return updated tree + diff
   interceptor act <ref> "value"              Type into field + wait + return updated tree
-  interceptor act <ref> --trusted            HID-sourced trusted input (isTrusted: true); requires the target tab
-                                             active in the OS-focused window — refuses otherwise, never moves focus
+  interceptor act <ref> --trusted            HID-sourced trusted input (isTrusted: true); the target tab must be the
+                                             active tab of a non-minimized window. A window that is not OS-focused is
+                                             reached in the background on a full install; never moves focus
   interceptor act <ref> --keys "Enter"       Send keyboard shortcut instead
   interceptor act <ref> --no-read            Skip post-action tree read
   interceptor inspect                        Tree + text + network log + headers
@@ -216,6 +278,7 @@ Research (deep-research mode — local, no daemon, no browser):
   interceptor research --full                Print the extended playbook + verb cookbook
   interceptor research init <slug>           Scaffold a source ledger (links.json, insights.md, sources/)
   interceptor research init <slug> --effort quick|standard|exhaustive   Set the breadth floor (8 / 20 / 40)
+  interceptor research use <slug>            Make <slug> the current ledger (init does this; add/note/status use it when several exist)
   interceptor research add <url> --note "..."  Append a lead to the ledger
   interceptor research note "<insight>"      Append a running insight
   interceptor research status [<slug>]       Rubric readout: sources vs floor, domains, saturation, verdict
@@ -240,6 +303,43 @@ State:
   interceptor text <ref> --markdown          Element text rendered as markdown
   interceptor html <index|ref>               HTML of specific element
 
+Page meta and data (one call each):
+  interceptor info                           Page URL, title, viewport, readyState
+  interceptor page_info                      Same as info
+  interceptor meta                           <meta> tags of the current page
+  interceptor capabilities                   What this extension can do here: userScripts (eval --main), debugger, OS input layer
+  interceptor modals                         Open dialogs / modals on the page
+  interceptor panels                         Side panels / drawers on the page
+  interceptor regions                        Landmark regions (header, nav, main, aside, footer) with refs
+  interceptor frames                         List frames in the active tab (ids for --frame <id>)
+  interceptor what-at <x,y>                  Element under viewport coordinates (ref, role, name, rect)
+  interceptor check <ref|role:name> [true|false]  Check a box or switch (false unchecks); "checkbox:Remember me" targets by role and name
+  interceptor blur                           Remove focus from the active element
+  interceptor wait_for <css> [timeout-ms]    Wait until a selector matches (default 10000 ms)
+  interceptor reload                         Reload the extension (an unpacked copy picks up installed files; a store copy asks the store for an update)
+  interceptor notify <title> <message...>    Post a browser notification
+  interceptor events [--tail] [--since <ms>] Daemon event log (request timings, timeouts)
+  interceptor sessions [max]                 Recently closed tabs / windows (chrome.sessions)
+  interceptor sessions restore <id>          Reopen a closed tab/window in the background, in your group
+  interceptor sessions restore <id> --activate   Browser's own restore (keeps history; brings the tab to the front)
+  interceptor session start|end              Mark a CLI session (advisory; enables batch hints)
+  interceptor history "<query>" [max]        Search browser history
+  interceptor history delete <url>           Remove a history entry
+  interceptor bookmarks "<query>"            Search bookmarks
+  interceptor bookmarks add <title> <url>    Create a bookmark
+  interceptor bookmarks delete <id>          Delete a bookmark
+  interceptor bookmarks tree                 Full bookmark tree
+  interceptor downloads ["<query>"]          List downloads
+  interceptor downloads start <url> [name]   Start a download
+  interceptor downloads cancel <id>          Cancel a download
+  interceptor clipboard                      Read the clipboard
+  interceptor clipboard write <text...>      Write the clipboard
+  interceptor clear <type...> [--since <ms>] Clear browsing data (cache, cookies, history, localStorage, ...)
+  interceptor raw '<json action>'            Send one raw action object to the extension (debugging)
+  interceptor extensions list|sync           Interceptor extension packs (the capability fabric), not browser extensions
+  interceptor mcp install|status|uninstall   Register / inspect / remove Interceptor as an MCP server in installed AI runtimes
+  interceptor mcp serve                      Run the MCP server on stdio (what the runtimes launch)
+
 Actions:
   interceptor click <index|ref>              Click element (e.g. interceptor click e5)
   interceptor click --selector "<css>" [--nth N]  Click by CSS selector (0-based --nth matches query output; quote selectors with spaces)
@@ -251,7 +351,7 @@ Actions:
   interceptor type "role:name" <text>        Type using semantic selector (e.g. "button:Submit")
   interceptor type <index|ref> --secret op://<vault>/<item>/<field>   Type a 1Password field (resolved in the daemon, never shown)
   interceptor click "text:<query>"            Click first element whose textContent matches (e.g. "text:Save")
-  interceptor select <index|ref> <value>     Select dropdown option
+  interceptor select <index|ref> <value>     Select native option by exact value or unique label; rejects invalid/disabled choices
   interceptor focus <index|ref>              Focus element
   interceptor hover <index|ref>              Hover over element
   interceptor hover <index> --from X,Y      Hover with mouse path
@@ -273,8 +373,10 @@ Tabs:
   interceptor tab new [url] --activate       Open new tab and foreground it (explicit opt-in)
   interceptor tab new [url] --reuse          Navigate the group's most-recent tab instead of creating
   interceptor tab close [id]                 Close tab
-  interceptor tab switch <id>                Switch to tab (explicit focus move)
-  interceptor window new [url]               Open a new browser window
+  interceptor tab keepalive <id> [--off]     Make a hidden managed tab read as visible and run its animation frames (no focus change)
+  interceptor tab switch <id>                Switch to tab (explicit focus move; 'tab switch' back to the tab that was showing is allowed)
+  interceptor window new [url]               Open a background window and move your tab group into it (your own window: its tabs paint, and 'tab switch' there never touches the user's view)
+  interceptor window new [url] --activate    Open a new browser window and focus it (explicit opt-in)
   interceptor window list                    List all browser windows
   interceptor window close <id>              Close a browser window
   interceptor window focus <id>              Focus a browser window (explicit focus move)
@@ -290,8 +392,8 @@ Capture:
   interceptor screenshot --element N         Capture element by ref (off-screen elements supported)
   interceptor screenshot --region X,Y,W,H   Capture page region (rendered + cropped)
   interceptor screenshot --scale 2           Override pixel ratio (e.g. retina from 1x display)
-  interceptor screenshot --pixel             Pixel-true compositor capture (legacy captureVisibleTab — requires Chrome focused)
-  interceptor screenshot --save              Save to disk; result has filePath, no dataUrl
+  interceptor screenshot --pixel             Pixel-true compositor capture (captureVisibleTab — the tab's window must be on screen; the browser need not be focused; a fully covered Chrome window can return a stale frame)
+  interceptor screenshot --save              Save one auto-named file in cwd; takes no path value
   interceptor screenshot --format png        Output format: png (default), jpeg, or webp
   interceptor screenshot --quality 80        Encode quality 0-100 (defaults: png 92, jpeg 92, webp 85)
   interceptor screenshot --target-max-long-edge 1568   Clamp output long edge in pixels (auto-resize at capture)
@@ -303,6 +405,7 @@ Capture:
   interceptor eval <code> --main             Run JS in page context
   interceptor eval <code> --main --allow-csp-strip   Also strip the page's CSP header for this tab
                                              (disables the site's own XSS defenses — opt-in, off by default)
+  interceptor eval <code> --main --no-reload Never reload the tab to beat page CSP
     --frame <id>                             Target exactly that frame; missing frames fail
     Isolated eval may require Allow User Scripts. MAIN CSP recovery discloses a tab reload, which can discard unsaved page state.
   interceptor save --out <path> <expr>       Stream page bytes (Blob/ArrayBuffer/blob: URL) to disk; no downloads/CDP — see 'save --help'
@@ -321,13 +424,16 @@ Network (CDP — explicit opt-in):
 
 Request Override (passive, no CDP):
   interceptor override "*pattern*" key=value   Override query param on matching requests
+  interceptor override "*pattern*" --status 500 [--body <text>] [--content-type <type>]
+                                              Answer matching fetch/XHR locally (never sent; net log marks it mocked)
+  interceptor override "*pattern*" --delay 1500  Hold matching requests at least 1500 ms before sending (combines with the above)
   interceptor override "*api*" limit=50 offset=0  Multiple params
   interceptor override clear                  Remove all overrides
 
 Passive Network (always-on, no CDP):
   interceptor net log                        Passively captured fetch/XHR traffic
   interceptor net log --filter <pattern>     Filter by URL substring
-  interceptor net log --since <timestamp>    Entries after timestamp
+  interceptor net log --since <30s|5m|ts>    Entries from the last 30s/5m/2h/1d, or after an epoch-ms timestamp
   interceptor net log --limit <n>            Max entries (default 100)
   interceptor net log --format json|har|pcapng --out <path>   Export the buffer (file is created mode 600)
   interceptor net log --format har --out <path> --no-redact-auth Same, but KEEPS credential headers (they are redacted by default)
@@ -344,7 +450,7 @@ Passive Network (always-on, no CDP):
 SSE Stream Capture:
   interceptor sse log [--filter <pattern>] [--limit N]   Show completed SSE streams
   interceptor sse streams                                  List active SSE streams
-  interceptor sse tail [--filter <pattern>]                Live tail SSE stream chunks
+  interceptor sse tail [--filter <pattern>] [--timeout ms] Wait for a stream, print it to its last chunk
 
 Headers:
   interceptor headers add <name> <value>     Add request header
@@ -443,6 +549,9 @@ Meta:
   interceptor status                         Check daemon status (local — no connection needed)
   interceptor status --verbose               Daemon + bridge + extension probe with per-component diagnostics
   interceptor status --explain               Alias for --verbose with extra rationale per component
+  interceptor surface status                 Browser-only vs full (macOS control) and the macOS domain allowlist
+  interceptor surface browser-only|full      Switch macOS control off/on (enforced by the CLI, daemon, and bridge)
+  interceptor surface allow <domains>|recommended|all|none   Limit which macOS bridge domains may run
   interceptor diagnose                       Post-failure snapshot: daemon binary, all contexts, tabs, elements, monitor
   interceptor diagnose --context <id>        Probe a specific browser context only
   interceptor diagnose --json                Same snapshot as JSON
@@ -465,7 +574,12 @@ Branding:
 Tab groups (per-agent isolation):
   interceptor open <url> --group <label>     Open into the named group "<brand>-<label>" (created on first use)
   interceptor group list                     All live tab groups: label, title, color, tab count
-  interceptor group close <label>            Atomically close every tab in a named group (other groups untouched)`
+  interceptor group close <label>            Atomically close every tab in a named group and delete the group (other groups untouched)
+  interceptor group prune [--dry-run]        Delete every closed saved group Interceptor left on the bookmarks bar (Full install)
+  interceptor group prune <label>...         Delete only those groups' closed saved copies (a delete syncs and cannot be undone)
+  interceptor group prune --app <name>       One browser only (default: every running Chromium browser)
+  interceptor group prune --brand <title>    Also match this brand title (default: interceptor, plus what connected profiles report)
+  interceptor group prune --allow-frontmost  Run even when the browser is the frontmost app (its open menu takes the keyboard)`
 
 const HELP_MACOS = `macOS App Internals:
   interceptor macos cdp connect <port> [--host H] [--app NAME] [--url HINT]
@@ -488,8 +602,11 @@ macOS Bridge (full install only):
   Background-first by contract (mirrors the browser surface in 'Tabs' and 'open' above):
   the only verbs that move the user's frontmost window or active tab are
   'macos app activate', 'macos open --activate', 'open --activate',
-  'tab new --activate', 'tab switch <id>', and 'window focus <id>'.
-  Every other 'macos *' verb and every routine 'open'/'tab new' leaves focus alone.
+  'tab new --activate', 'window new --activate', 'tab switch <id>', and 'window focus <id>'.
+  Every other 'macos *' verb and every routine 'open'/'tab new'/'window new' leaves focus alone.
+  The user is usually working on this Mac: never take focus to make your own work easier.
+  A page that will not render in a background tab: 'tab keepalive <id>'. If it needs a real paint,
+  'window new [url]' gives your tab group its own background window; 'tab switch' only inside that window.
 
   Compound (agent-optimized):
   interceptor macos open <app>               Tree + windows + app info (no foregrounding)
@@ -508,24 +625,27 @@ macOS Bridge (full install only):
   interceptor macos value <ref> ["<text>"]   Read or set element value
   interceptor macos action <ref> press|increment|decrement|...
   interceptor macos focused [--app <name>]   Currently focused element
-  interceptor macos windows [--app <name>]   All windows with frames
+  interceptor macos windows [--app <name>]   All windows with frames and window ids
   interceptor macos move <ref> --x N --y N
   interceptor macos resize <ref> --width N --height N
 
   Input (AX-first, PID-routed CGEvent fallback):
-    Refs route through AX. --app/--pid route via CGEvent.postToPid (no focus change).
+    Refs route through AX. --app/--pid/--window deliver to one window of that app in the
+    background (no focus change, cursor stays put) and refuse when no window resolves.
     Bare coordinates fall back to system HID tap (legacy: follows frontmost).
+    --window <id> names the window (ids: interceptor macos windows) when another
+    window of the same app covers the point.
   interceptor macos click <ref>              AX press
-  interceptor macos click X,Y --app <name>   Coordinate click via postToPid
+  interceptor macos click X,Y --app <name> [--window <id>]   Coordinate click in that app's window
   interceptor macos click X,Y                Coordinate click via system HID (legacy)
   interceptor macos click <ref> --double|--right
   interceptor macos type <ref> "<text>"      AX value-set on text-bearing role
-  interceptor macos type "<text>" --app <name>   Type via postToPid keys
+  interceptor macos type "<text>" --app <name> [--window <id>]   Type into that app's window
   interceptor macos type [<ref>] --secret op://<vault>/<item>/<field> --op-any-target   Type a 1Password field into a native app
-  interceptor macos keys "Meta+A" [--app <name>|--pid N]
-  interceptor macos scroll up|down|left|right N [--app <name>] [--times N] [--interval-ms N]
+  interceptor macos keys "Meta+A" [--app <name>|--pid N] [--window <id>]
+  interceptor macos scroll up|down|left|right N [--app <name>] [--ref <ref>] [--window <id>] [--times N] [--interval-ms N]
   interceptor macos drag <fromRef> <toRef> [--app <name>]
-  interceptor macos drag X1,Y1 X2,Y2 [--app <name>]
+  interceptor macos drag X1,Y1 X2,Y2 [--app <name>] [--window <id>]
 
   Apps & Windows:
   interceptor macos apps                     List running apps with PIDs
@@ -583,11 +703,13 @@ macOS Bridge (full install only):
 
   System & Filesystem:
   interceptor macos clipboard read|write|tail
-  interceptor macos notifications tail [--app <name>] [--limit N]
+  interceptor macos notifications tail --name <exact-distributed-name>
+  interceptor macos notifications untail --name <exact-distributed-name>
   interceptor macos notifications log [--app <pat>] [--limit N]   Buffered distributed notifications
-  interceptor macos files recent [--filter <pat>] [--limit N]
-  interceptor macos files watch <path> [--filter <pat>]            Emit file_change events for path
-  interceptor macos files open                                     lsof-derived list of open files under $HOME
+  interceptor macos files recent [--limit 0..1000]                 Ordered file_change history (default20)
+  interceptor macos files watch <path>                            Watch the original file/directory; events may coalesce
+  interceptor macos files unwatch <path>                          Cancel the owned watch
+  interceptor macos files open [--pid N] [--limit 0..100]         Bounded lsof-derived path array; partial inventory
   interceptor macos fs read|write|search <path|query>
   interceptor macos url get|post <url> [--header "K: V"] [--body <data>]
   interceptor macos log query --predicate '...' [--since <ts>] [--limit N]
@@ -597,7 +719,7 @@ macOS Bridge (full install only):
   interceptor macos vad status|start|stop
   interceptor macos sounds status|start|stop [--filter <pat>]
   interceptor macos audio output|input start|stop [--app <name>] [--save]
-  interceptor macos vision text|faces|hands|bodies [--app <name>]
+  interceptor macos vision text|faces|hands|bodies|classify|saliency [--app <name> | --image <path>]
   interceptor macos nlp entities|language|sentiment|tokens "<text>"
   interceptor macos nlp similar "<word1>" "<word2>"
   interceptor macos ai status|prompt "<prompt>"
@@ -630,6 +752,8 @@ macOS Bridge (full install only):
   Display / Stream / Container / Overlays:
   interceptor macos display list|set <resolution> [--id N] [--hidpi] [--hz N]
   interceptor macos stream start|status|stop [--sid N] [--app <name>] [--virtual <res>]
+  interceptor macos stream record start [--sid <sid>] --media [--record-audio none|system]
+  interceptor macos stream record status|stop [--sid <sid>]
   interceptor macos container run <image> [--cmd "..."] [--env K=V] [--volume host:container[:mode]]
   interceptor macos overlay start|stop|list|status|eval|ctl|verbs
 
@@ -687,8 +811,10 @@ macOS Bridge (full install only):
   interceptor macos location status|request|request-temporary-accuracy|current|monitor|significant|visits|heading|geocode|reverse|distance|postal-geocode
   interceptor macos location current                                              (one-shot CLLocationManager.requestLocation)
   interceptor macos location reverse <lat,lng>
-  interceptor macos music status|request|subscription|search|search-suggest|charts|recommendations|library|library-search|song|album|artist|playlist|play|pause|resume|stop|next|previous|seek|queue|repeat|shuffle|now-playing
-  interceptor macos music search "<term>" [--types song,album,artist,playlist,curator,genre]
+  interceptor macos music status|request|subscription|library|library-search|search|search-suggest|charts|recommendations|song|album|artist|playlist|play|pause|resume|stop|next|previous|seek|queue|repeat|shuffle|now-playing
+  interceptor macos music library-search "<term>" [--types song,album,artist,playlist]   (your library)
+  interceptor macos music search "<term>" [--types ...] [--limit N] [--offset N] [--top]   (Apple Music catalog, Mac only; needs the MusicKit App Service on the bridge's App ID, the refusal says so)
+  interceptor macos music search-suggest "<term>" | charts [--limit N] | recommendations | song|album|artist|playlist <catalog id>
   interceptor macos music library --type song|album|artist|playlist|track [--filter ...] [--sort ...]
 
   Distribution:

@@ -1,15 +1,37 @@
 ---
 name: interceptor-browser
 description: "Drive a signed-in Chrome / Brave / Safari session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser contexts with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native macOS apps, Electron desktop app web contents, OS dialogs, browser chrome, or large scraping."
+#os:win32 description: "Drive a signed-in Chrome / Brave / Edge session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser contexts with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native apps, Electron desktop app web contents, OS dialogs, browser chrome, or large scraping."
+#os:linux description: "Drive a signed-in Chrome / Brave session via the interceptor CLI: open/read pages, click, type, inspect DOM/text/network, automate rich browser editors and scene graphs, capture WebSocket/Beacon/BroadcastChannel traffic, record/replay flows, take VLM-budgeted screenshots, compare pages, and route to specific browser contexts with --context. Use for browser page content, tabs, forms, SPA extraction, request overrides, page communication capture, and deployment checks. Not for native apps, Electron desktop app web contents, OS dialogs, browser chrome, or large scraping."
 metadata:
   short-description: Drive a real signed-in Chrome / Brave / Safari session via the interceptor CLI
+#os:win32   short-description: Drive a real signed-in Chrome / Brave / Edge session via the interceptor CLI
+#os:linux   short-description: Drive a real signed-in Chrome / Brave session via the interceptor CLI
 ---
 
 # Interceptor Browser
 
-Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome, Brave, or Safari session: pages, network, scene graph, monitor, screenshots. For native macOS apps load `interceptor-macos` instead.
+Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome, Brave, or Safari session: pages, network, scene graph, monitor, screenshots. For native macOS apps load `interceptor-macos` instead. <!-- os:darwin -->
+Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome, Brave, or Edge session: pages, network, scene graph, monitor, screenshots. For native apps load `interceptor-desktop` instead. <!-- os:win32 -->
+Agent-operator skill for the Browser surface of Interceptor. Use the `interceptor` CLI (no prefix) to drive a live Chrome or Brave session: pages, network, scene graph, monitor, screenshots. For native apps load `interceptor-desktop` instead. <!-- os:linux -->
 
-This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `/Library/Application Support/Interceptor/skills`.
+This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `/Library/Application Support/Interceptor/skills`. <!-- os:darwin -->
+This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the `skills` folder in the Interceptor install folder (`%LOCALAPPDATA%\Programs\Interceptor\skills`). <!-- os:win32 -->
+This installed skill is self-contained. Source checkouts also have `AGENTS.md`, but packaged users may only have the skill directory below `~/.local/share/interceptor/skills`. <!-- os:linux -->
+
+## The User Is On This Mac Too <!-- os:darwin -->
+## The User Is On This Computer Too <!-- os:win32,linux -->
+
+Assume the person is using this browser and this Mac while you work. Never change the tab showing in a window they are using, never focus a window, and never bring the browser forward to make your own work easier or to test something. Stop at the first rung that works: <!-- os:darwin -->
+Assume the person is using this browser and this computer while you work. Never change the tab showing in a window they are using, never focus a window, and never bring the browser forward to make your own work easier or to test something. Stop at the first rung that works: <!-- os:win32,linux -->
+
+1. **Plain background verbs.** `open`, `read`, `act`, `click`, `type`, `screenshot`, `net`, and the rest run on a hidden tab.
+2. **`interceptor tab keepalive <id>`** when a page will not render while hidden (it reads visible and runs its animation frames).
+3. **Your own window** when the page needs a real paint (video playback, a virtualized grid that measures itself) or a trusted click: `interceptor window new [url]` opens a background window and moves your tab group into it. The tab showing there paints like a foreground tab even when the window is fully covered, and `interceptor tab switch <id>` there changes only that window. <!-- os:darwin -->
+3. **Your own window** when the page needs a real paint (video playback, a virtualized grid that measures itself): `interceptor window new [url]` opens a background window and moves your tab group into it, and `interceptor tab switch <id>` there changes only that window. Read the page again to confirm it rendered; a covered window painting in the background is measured on the Mac only. <!-- os:win32,linux -->
+4. **Trusted input without focus.** `interceptor click <ref> --trusted` (also `type`, `keys`) reaches the active tab of any window that is not minimized on a full install. No `tab switch` in the user's window, no `window focus`. <!-- os:darwin -->
+
+`tab switch` in a window the user is working in and `window focus` are last resorts. Say so first, do one fast batch, and put the previous tab back.
 
 ## Core Rules
 
@@ -19,30 +41,39 @@ This installed skill is self-contained. Source checkouts also have `AGENTS.md`, 
 - Supported agent shells get a soft per-session group automatically, labeled `s-<hash16>`, so bare commands reuse one tab per session and the idle sweeper has a cleanup unit. `INTERCEPTOR_SESSION_ID` is the harness-neutral contract; Interceptor also detects verified Maestro, Claude Code, and Codex session variables. Soft scope falls back to the active managed tab when the session group is empty. `--shared-group` (or empty `INTERCEPTOR_GROUP=`) explicitly uses Interceptor's shared default group; it does not remove managed grouping. **Concurrent lanes often share one host session id**, so give each lane a unique `--group lane-<n>` or `INTERCEPTOR_SESSION_ID`. Explicit `--group <label>` and non-empty `INTERCEPTOR_GROUP` provide hard isolation by default: resolution stays within that group and cross-group targets are rejected unless `--any-tab` is explicitly authorized. `interceptor group list` shows the automatic label.
 - Close your group with `interceptor group close <label>` when the job is done. The extension auto-closes groups after 10 minutes without tab activity by default; metadata polls such as `status` and `group list` do not keep a group alive. The timeout is configurable in the extension popup and is crash safety, not a substitute for cleanup.
 - In a named group, including an automatic session group, `open` navigates the group's most-recent tab by default (address-bar semantics; the reused tab stays in the background unless you add `--activate`). Pass `--no-reuse` when you need to keep the current page and open another, for example before comparing two pages or fanning out. `tab new` creates by default; explicit `--reuse` navigates the group's most-recent tab. Shared-default `open` creates by default.
-- `interceptor open <url>` and `interceptor tab new <url>` create background tabs by default. Only `open --activate`, `tab new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus. New tabs are created in the window that already holds Interceptor groups (the caller's own group's window first), not the window the user is focused on; the `tab new`/`open` result carries `windowId`.
+- `interceptor open <url>`, `interceptor tab new <url>`, and `interceptor window new [url]` create background tabs and windows by default. Only `open --activate`, `tab new --activate`, `window new --activate`, `tab switch <id>`, and `window focus <id>` intentionally move browser focus. New tabs are created in the window that already holds Interceptor groups (the caller's own group's window first), not the window the user is focused on; the `tab new`/`open` result carries `windowId`.
+- `interceptor window new [url]` gives your tab group its own background window: the new tab is the one showing there, and the group's other tabs move with it, so later `open` calls land in that window too. A `groupWarning` in the result means you are on the shared default group, which does not move; pass `--group <label>`.
+- A page that will not render while hidden (empty grid, "Loading" that never resolves, an app that pauses on `document.hidden`): run `interceptor tab keepalive <id>`, then `read` again. The page reads as visible and its animation frames run; the user's view is untouched. Limits: IntersectionObserver and ResizeObserver callbacks still wait for a real paint, and background timers stay at Chromium's rate (about once per second after 10 s). When keepalive is not enough (a video that stays stalled, a virtualized grid with zero rows), put the page in your own window with `interceptor window new <url>`; do not `tab switch` in the user's window. Measured: a YouTube video stalled in a hidden tab even with keepalive and played within 3 s in its own background window; a virtualized options grid rendered 0 rows hidden and 16 in its own window; a Google Doc painted with keepalive alone. <!-- os:darwin -->
+- A page that will not render while hidden (empty grid, "Loading" that never resolves, an app that pauses on `document.hidden`): run `interceptor tab keepalive <id>`, then `read` again. The page reads as visible and its animation frames run; the user's view is untouched. Limits: IntersectionObserver and ResizeObserver callbacks still wait for a real paint, and background timers stay at Chromium's rate (about once per second after 10 s). When keepalive is not enough (a video that stays stalled, a virtualized grid with zero rows), put the page in your own window with `interceptor window new <url>`; do not `tab switch` in the user's window. Check that it rendered with `read`; the measurements behind this are from the Mac. <!-- os:win32,linux -->
+- A trusted click does not need the tab brought on screen for the user. `interceptor click <ref> --trusted` is delivered to the tab's window in the background when the tab is the active tab of that window. A ref inside an iframe (`e<frame>_<n>`) works the same way. If a `tab switch` in the user's window ever was the only way, `tab switch <prior>` back to the tab that was showing is allowed even though it is unmanaged. <!-- os:darwin -->
 - If multiple browser profiles are connected, run `interceptor contexts` and pass `--context <id>`.
-- Safari registers as the stable context `safari`; route with `interceptor --context safari <verb>`. If it is absent, verify the notarized Interceptor Safari extension is enabled before attempting page commands. Safari's enable switch is a protected user-present action; never try to bypass its Touch ID/password gate.
+- Safari registers as the stable context `safari`; route with `interceptor --context safari <verb>`. If it is absent, verify the notarized Interceptor Safari extension is enabled before attempting page commands. Safari's enable switch is a protected user-present action; never try to bypass its Touch ID/password gate. <!-- os:darwin -->
 - Prefer structured reads (`read`, `tree`, `text`, `inspect`, `scene`) before screenshots. Open `references/screenshot-policy.md` before screenshot-heavy work.
 - Passwords are typed by 1Password reference: `interceptor type <ref> --secret op://<vault>/<item>/<field>`. The daemon checks the tab's host against the ITEM's own website URLs before reading the field, and the monitor records `***SECURE***`. Never put a credential in a literal `type` call or ask the user to paste one into chat; ask them to add the site to the 1Password item, then give you its secret reference (1Password's "Copy Secret Reference"). Pass `--op-account <shorthand>` if more than one account is signed in.
 - Default to plain text output. Use `--json` only when piping into scripts or when a downstream tool needs a machine-readable contract.
 - Unknown flags are rejected (exit 1, naming the flag and command) rather than ignored, so a typo never reads as success; `screenshot` writes to disk with `--save`, not `--out`. Fix the flag instead of setting `INTERCEPTOR_LAX_FLAGS=1`.
 - A verb whose result is a failure prints `error: …` and exits non-zero (every browser verb, including `back`/`forward` with no history). Check `$?` in scripts; do not grep stdout for `error:` to detect failure.
-- `eval --main` can recover from strict CSP by stripping the blocking header and reloading the tab. The result discloses that reload. Treat it as state-changing because unsaved page state can be lost; task verification disables this recovery.
+- `eval --main` can recover from strict CSP by stripping the blocking header and reloading the tab. The result discloses that reload and the CLI prints a `warning:` line for it, on success and on failure; `save` shares the same recovery. Treat it as state-changing because unsaved page state is lost. Pass `--no-reload` on a page whose state matters to get the CSP error instead; task verification always refuses the reload.
+- CSS-selector verbs (`query`, `exists`, `count`, `click --selector`, `wait`, `table`, `attr`, `style`, `rect`, `screenshot --selector`) search open and closed shadow roots after the light DOM, so a control inside a web component is reachable by selector; light-DOM matches keep their order and `--nth` its meaning.
 - If the extension behaves stale after a package update, run `interceptor reload --context <id>`: an unpacked copy picks up the installed files; a Chrome Web Store copy only asks the store for an update and keeps its version until the store publishes the new one. `interceptor contexts --verbose` shows which copy (store or unpacked) and version each context runs.
-- Safari package updates are loaded through the containing app/appex; do not look for a Chrome-style unpacked-extension reload button.
-- Safari suspends its background worker when idle, so `--context safari` can briefly report "context 'safari' not found" between commands and then self-heal. Re-issue the command rather than treating one transient drop as failure. Note two Safari capability limits: `headers add` only modifies recognized standard headers (arbitrary `X-…` names are refused — use `override` instead), and passive `net` capture reflects genuine page traffic, not requests you originate from `eval` (its world is separate from the page's).
+- Safari package updates are loaded through the containing app/appex; do not look for a Chrome-style unpacked-extension reload button. <!-- os:darwin -->
+- Safari suspends its background worker when idle, so `--context safari` can briefly report "context 'safari' not found" between commands and then self-heal. Re-issue the command rather than treating one transient drop as failure. Note two Safari capability limits: `headers add` only modifies recognized standard headers (arbitrary `X-…` names are refused — use `override` instead), and passive `net` capture reflects genuine page traffic, not requests you originate from `eval` (its world is separate from the page's). <!-- os:darwin -->
 
 ## Fast Path
 
 ```bash
-interceptor status                        # 1. Confirm daemon + extension are alive
+interceptor contexts                      # 0. Browser profiles connected. More than one? Pick the lane's once:
+export INTERCEPTOR_CONTEXT=<id>           #    (or pass --context <id> on every call; the flag overrides the env)
+interceptor status --verbose              # 1. Daemon + extension alive per context; eval --main availability
 interceptor websearch "example docs"      # 2a. Default provider → managed background results tab
-interceptor open "https://example.com"    # 2b. Or open a known URL → wait + tree + text
+interceptor open "https://example.com" --tree-format compact   # 2b. Or open a known URL → wait + compact tree + text
 interceptor read                          # 3. Current state (re-read after any mutation)
 interceptor act e5                        # 4. Click ref e5 (refs come from `read`)
 interceptor act e7 "example user"         # 5. Type into ref e7
 interceptor inspect                       # 6. Tree + text + network in one read
 ```
+
+If your harness truncates tool results, also set `INTERCEPTOR_TREE_MAX_CHARS` / `INTERCEPTOR_TEXT_MAX_CHARS` once (defaults 50000 / 8000); a truncated tree or text ends in a marker that says how to scope or widen. A `stale element [eN]` error means the element left the DOM and nothing was clicked or typed; refs never re-bind to look-alike elements, so `read` again. A `timeout … The outcome is unknown` means the action may still land; `read` before retrying it.
 
 Inside this repo without `interceptor` on PATH, use `./dist/interceptor ...`.
 
@@ -84,9 +115,11 @@ Each workflow is a complete self-contained "you are doing X" procedure. Open the
 
 ## When To Switch Surfaces
 
-If the target is **outside the page** - a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any non-browser macOS app - load `interceptor-macos` instead.
+If the target is **outside the page** - a native dialog, browser chrome (URL bar, profile picker), Save/Open file picker, OS notification, or any non-browser macOS app - load `interceptor-macos` instead. <!-- os:darwin -->
+If the target is **outside the page** - a native dialog, browser chrome (address bar, profile picker), Save/Open file picker, OS notification, or any other app - load `interceptor-desktop` instead. <!-- os:win32,linux -->
 
-If the target is an **Electron / Chromium desktop app's web contents** (Slack, VS Code, Notion, Descript, etc.), use the CDP/app reference from `interceptor-macos`: `references/cdp-app.md`.
+If the target is an **Electron / Chromium desktop app's web contents** (Slack, VS Code, Notion, Descript, etc.), use the CDP/app reference from `interceptor-macos`: `references/cdp-app.md`. <!-- os:darwin -->
+If the target is an **Electron / Chromium desktop app's web contents** (Slack, VS Code, Notion, Descript, etc.), use `interceptor desktop cdp` from `interceptor-desktop`. <!-- os:win32,linux -->
 
 If the task is **breadth research** — "investigate / go deep on / find everything about X" across many sources — load `interceptor-research`, which layers a planner loop, source ledger, and verification pass on top of this surface.
 

@@ -7,7 +7,6 @@
  *   browser  — always (it IS the product)
  *   macos    — darwin + bridge LaunchAgent plist present (Full install),
  *              or a dev checkout running the bridge directly
- *   ios      — rides the Full daemon (same detection as macos)
  *
  * The macOS surface is a soft, persisted CHOICE — see shared/surface-mode.ts.
  * `--all-surfaces` / INTERCEPTOR_ALL_SURFACES force it on; `--browser-only` /
@@ -17,6 +16,7 @@
 
 import { existsSync } from "node:fs"
 import { macosEnabled, readSurfaceMarker, isTruthyEnv } from "../../shared/surface-mode"
+import { bridgeSocketPathForDetection } from "../../shared/bridge-paths"
 
 export type Surfaces = { browser: true; macos: boolean }
 
@@ -29,7 +29,7 @@ function launchAgentUser(): string {
 export function detectSurfaces(argv: string[] = [], env: Record<string, string | undefined> = process.env): Surfaces {
   const detected = process.platform === "darwin" &&
     (existsSync(LAUNCH_AGENT_SYSTEM) || existsSync(launchAgentUser()) ||
-     existsSync("/tmp/interceptor-bridge.sock"))
+     existsSync(bridgeSocketPathForDetection(env)))
   const macos = macosEnabled({
     forceOff: argv.includes("--browser-only") || isTruthyEnv(env.INTERCEPTOR_BROWSER_ONLY),
     forceOn: argv.includes("--all-surfaces") || !!env.INTERCEPTOR_ALL_SURFACES,
@@ -40,4 +40,4 @@ export function detectSurfaces(argv: string[] = [], env: Record<string, string |
 }
 
 export const SURFACE_UPGRADE_HINT =
-  "macos: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only)."
+  "macos: not available in this install — 'interceptor upgrade --full' adds computer-use mode (macOS only), and 'interceptor surface full' enables it."

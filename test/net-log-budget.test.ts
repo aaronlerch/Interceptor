@@ -94,3 +94,4 @@ describe("timeout hint picks the honest branch (#161)", () => {
     expect(isGenericBrowserAction("daemon_shutdown")).toBe(false)
   })
 })
+

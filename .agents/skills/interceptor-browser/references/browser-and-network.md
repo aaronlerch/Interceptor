@@ -33,6 +33,7 @@ interceptor net log --filter api --limit 20
 - Read passive `net log` first. It captures fetch/XHR automatically.
 - Read `net headers` when CSRF or auth headers matter.
 - Use `override "*pattern*" key=value` to change pagination or filters before the page sends the request.
+- Use `override "*pattern*" --status <code> [--body <text>]` or `--delay <ms>` to change what the page receives; set it after the page has loaded.
 - Run `override clear` after the workflow so later tasks are not contaminated.
 
 ## Handle long-lived or streaming pages
@@ -55,4 +56,5 @@ interceptor net log --filter api --limit 20
 - Avoid screenshots when tree, text, inspect, or scene data can answer the question.
 - Avoid CDP commands unless the user explicitly needs debugger-backed interception.
 - Avoid acting outside the interceptor tab group unless `--any-tab` is intentional.
-- For anything outside the page (native dialogs, browser chrome, OS notifications, other apps), switch to the `interceptor-macos` skill — the browser surface cannot see those targets.
+- For anything outside the page (native dialogs, browser chrome, OS notifications, other apps), switch to the `interceptor-macos` skill — the browser surface cannot see those targets. <!-- os:darwin -->
+- For anything outside the page (native dialogs, browser chrome, OS notifications, other apps), switch to the `interceptor-desktop` skill — the browser surface cannot see those targets. <!-- os:win32,linux -->

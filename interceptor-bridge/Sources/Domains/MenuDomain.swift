@@ -25,16 +25,38 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
         }
     }
 
+    // `--app <name>` that matches nothing is an error, not the frontmost app:
+    // listing or invoking another app's menu under the requested name is the
+    // same wrong-target failure the input verbs refuse.
+    private func explicitAppProblem(_ action: [String: Any]) -> String? {
+        guard action["pid"] == nil, let appName = action["app"] as? String, !appName.isEmpty,
+              RunningApps.resolve(appName) == nil else { return nil }
+        return "no running app matches '\(appName)' — names are case-insensitive and accept the .app name or bundle id; 'interceptor macos apps' lists them"
+    }
+
+    // Nothing was pressed yet, so the neutral reply is a refusal, not an unknown outcome.
+    private func refusal(_ message: String, code: String) -> [String: Any] {
+        ["success": false, "code": code, "error": message, "details": ["dispatched": false]]
+    }
+
     private func targetPid(_ action: [String: Any]) -> pid_t {
         if let pid = action["pid"] as? Int32 { return pid }
         if let appName = action["app"] as? String,
-           let app = NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == appName }) {
+           let app = RunningApps.resolve(appName) {
             return app.processIdentifier
         }
         return FrontmostResolver.resolvePID(transport: transport)?.pid ?? 0
     }
 
     private func listMenu(action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        if let problem = explicitAppProblem(action) {
+            completion(refusal(problem, code: "target_gone"))
+            return
+        }
+        if let pid = action["pid"] as? Int32, NSRunningApplication(processIdentifier: pid)?.isTerminated ?? true {
+            completion(refusal("no target app found", code: "target_gone"))
+            return
+        }
         let pid = targetPid(action)
         guard pid != 0 else {
             completion(WireFormat.error("no frontmost app"))
@@ -44,7 +66,7 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
         let appElement = transport.createApplication(pid: pid)
         let (menuBarResult, menuBarValue) = transport.copyAttributeValue(appElement, kAXMenuBarAttribute as String)
         guard menuBarResult == .success, let menuBar = AXValueCodec.asElement(menuBarValue) else {
-            completion(WireFormat.error("could not read menu bar"))
+            completion(refusal("could not read menu bar", code: "unsupported_target"))
             return
         }
 
@@ -81,6 +103,14 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
     }
 
     private func invokeMenu(items: [String], action: [String: Any], completion: @escaping @Sendable ([String: Any]) -> Void) {
+        if let problem = explicitAppProblem(action) {
+            completion(refusal(problem, code: "target_gone"))
+            return
+        }
+        if let pid = action["pid"] as? Int32, NSRunningApplication(processIdentifier: pid)?.isTerminated ?? true {
+            completion(refusal("no target app found", code: "target_gone"))
+            return
+        }
         let pid = targetPid(action)
         guard pid != 0 else {
             completion(WireFormat.error("no frontmost app"))
@@ -90,7 +120,7 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
         let appElement = transport.createApplication(pid: pid)
         let (menuBarResult, menuBarValue) = transport.copyAttributeValue(appElement, kAXMenuBarAttribute as String)
         guard menuBarResult == .success, let menuBar = AXValueCodec.asElement(menuBarValue) else {
-            completion(WireFormat.error("could not read menu bar"))
+            completion(refusal("could not read menu bar", code: "unsupported_target"))
             return
         }
 
@@ -101,7 +131,7 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
             let target = path.removeFirst()
             let (childrenResult, childrenValue) = transport.copyAttributeValue(currentElement, kAXChildrenAttribute as String)
             guard childrenResult == .success, let children = childrenValue as? [AXUIElement] else {
-                completion(WireFormat.error("could not traverse menu to: \(target)"))
+                completion(refusal("could not read the menu items on the way to \(target); nothing was invoked", code: "unsupported_target"))
                 return
             }
 
@@ -128,11 +158,11 @@ final class MenuDomain: DomainHandler, @unchecked Sendable {
                 }
             }
             if !found {
-                completion(WireFormat.error("menu item not found: \(target)"))
+                completion(refusal("menu item not found: \(target); nothing was invoked", code: "target_gone"))
                 return
             }
         }
 
-        completion(WireFormat.error("menu path exhausted without finding target"))
+        completion(refusal("menu path exhausted without finding the target; nothing was invoked", code: "target_gone"))
     }
 }

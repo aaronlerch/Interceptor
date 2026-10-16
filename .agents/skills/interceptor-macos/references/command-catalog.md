@@ -10,15 +10,16 @@ interceptor macos open "Finder" --activate     # Explicit foregrounding
 interceptor macos read --app "Mail"            # AX tree; another app stays focused
 interceptor macos act <ref>                    # Click + wait + updated tree (AX press)
 interceptor macos act <ref> "hello"            # AX value-set (no focus change)
-interceptor macos inspect                      # Tree + apps + frontmost info
+interceptor macos inspect                      # Tree + apps + target (the inspected app) + frontmost (the app the user is in)
 ```
 
 ### Self-update rules
 
 - Run `interceptor update`. Inspect `outcome`, `selectedVersion`, and `phase`.
-- If `outcome` is `checking`, run `interceptor update status`.
-- If `outcome` is `update_available`, run `interceptor macos read --app interceptor-bridge`, then act on **Install Update**.
-- After download, read the changed alert for a fresh ref, then act on **Install and Relaunch**.
+- There is no `interceptor update install`: like Windows and Linux, the update installs from its window, below.
+- When an update is available, Sparkle's standard window shows signed cumulative notes from the target version back to, but not including, the installed version. Manual and scheduled checks use the same feed item and notes.
+- If `outcome` is `checking`, run `interceptor update status`. A live session reports `concluded: false`, `sessionAgeSeconds`, and the exact bridge restart command under `recoveryHint`.
+- If `outcome` is `update_available`, report it to the user and stop. Never press **Install Update** or **Install and Relaunch**: this install is a hardened fork built from source, and the Sparkle update installs the vendor package over it, silently reverting the fork's security changes. Updating is a source merge the user runs, not an agent action.
 - When macOS requests administrator authentication, STOP and hand it to the operator. This fork has no `authdialog` and no `macos sudo` (FORK-DELTA §5/§6): filling an admin prompt or running a command as root is not something an agent does here.
 
 ## Apps + Windows
@@ -54,13 +55,19 @@ interceptor macos menu --app "X"
 
 ## Input (click / type / keys / scroll / drag)
 
-Refs route to AX first (no focus change). `--app`/`--pid` flagged input routes via `CGEvent.postToPid`. Bare positional input follows frontmost.
+Refs route to AX first (no focus change). `--app`/`--pid`/`--window` flagged input is delivered to one window of that app while it stays in the background: the frontmost app and the cursor do not change. Bare positional input follows frontmost.
+
+Window choice: `--window <id>` (ids come from `interceptor macos windows`), else the window that owns the ref, else the app's frontmost window under the point (mouse) or its focused window (keys, scroll). A click or drag that resolves no window fails with "(nothing was delivered)": the window is minimized, the app is hidden, or the point is outside it. Scroll lands at `--ref`'s center, else the window's center.
+
+Limits: a minimized window and a hidden app receive no mouse input. Menus, popups, and file panels are separate windows and are not addressed. A web page sees `buttons=0` on drag moves.
 
 ```bash
 interceptor macos click <ref>                       # AX press
-interceptor macos click 100,200 --app "TextEdit"    # postToPid
+interceptor macos click 100,200 --app "TextEdit"    # background click in TextEdit's window
+interceptor macos click 100,200 --app "Brave Browser" --window 7247   # a covered window, by id
 interceptor macos type <ref> "..."                  # AX value-set (text roles)
 interceptor macos type "..." --app "X"
+interceptor macos type "Aa9!" --app UTM --window <id> --keycodes-us
 interceptor macos keys "Meta+S" --app "X"
 interceptor macos keys "Meta+A" --pid 1234
 interceptor macos scroll down 400 --app "Mail" --times 5 --interval-ms 80
@@ -73,6 +80,8 @@ OS-level escalation (for HID-source-state checks; follows frontmost):
 interceptor macos type "..." --os
 interceptor macos keys "..." --os
 ```
+
+`type --keycodes-us` sends physical US keyboard codes for VM keyboard devices that ignore Unicode text events. Both the host key mapping and guest keyboard layout must be US. It accepts printable ASCII, tab and newline, and refuses unsupported text before typing anything. It works with `--secret <name>` and retains the named credential's target check. Normal `type` keeps its Unicode and AX behavior.
 
 ## Secret vault + admin prompts
 
@@ -97,10 +106,14 @@ interceptor macos screenshot --window <ref>
 interceptor macos screenshot --region X,Y,W,H
 interceptor macos capture start | status | frame | stop
 interceptor macos stream start | list | frame | stop
+interceptor macos stream record start --sid <sid> --media [--record-audio none|system]
+interceptor macos stream record status | stop --sid <sid>
 interceptor macos display
 ```
 
 CGS captures occluded / minimized / cross-Space windows. Avoid `--mode display` for app-specific captures.
+
+Media recording (`stream record --media`): Mac15+ uses native H264/MP4 timestamps and returns the private file and SHA256 after native finalization and movie inspection. `--record-audio system` requires an explicitly selected display. Without `--media`, record retains the existing counter behavior.
 
 ## OSA Scripts + Apple Events
 
@@ -123,7 +136,8 @@ Never include `activate` unless the user asked for foregrounding. `--javascript`
 ## Vision + Speech + NLP + AI
 
 ```bash
-interceptor macos vision text|faces|hands|bodies
+interceptor macos vision text|faces|hands|bodies|classify|saliency [--app <name>]   # a window (frontmost when --app is omitted)
+interceptor macos vision text --image <path>                                         # a saved image file instead: no window, no capture
 interceptor macos listen
 interceptor macos vad
 interceptor macos sounds
@@ -135,6 +149,8 @@ interceptor macos nlp entities|language|sentiment|tokens|similar|embed
 interceptor macos ai status|prompt|session                # macOS 26+
 interceptor macos sensitive check|monitor
 ```
+
+`--image <path>` works with every vision verb and returns the same shape as a window capture. A relative path resolves from your working directory, an EXIF rotation tag is applied so a rotated phone capture reads upright, and no Screen Recording capture happens. `--image` and `--app` cannot be combined. A bad path answers with the path and the reason (`cannot read image file …`, `not an image file …`); `failed to capture screen` only ever means a window capture failed. To read an iPhone screen: `interceptor ios screenshot --on phone`, then `interceptor macos vision text --image <the saved path>`. Region boxes are normalized 0 to 1 with the origin at the bottom left.
 
 ## Log Query (OSLog)
 
@@ -150,11 +166,11 @@ Runs against `OSLogStore.local()` — system-wide.
 ```bash
 interceptor macos fs read <path>
 interceptor macos fs write <path> <content>
-interceptor macos fs search --scope home|workspace|granted|<absolute-path>
+interceptor macos fs search --scope home|workspace|granted|<absolute-path> [--timeout-ms N]
 interceptor macos files watch --watch-path <p>
 ```
 
-Unresolvable scopes return an explicit error.
+Unresolvable scopes return an explicit error. Spotlight passes run under a deadline (`--timeout-ms`, default 10000): a result with `partial: true` means the deadline cut a pass; narrow `--scope` or `--kinds`, or raise the deadline.
 
 ## URL Fetch
 
@@ -173,7 +189,8 @@ interceptor macos reminders status|all|incomplete|completed|create|complete|unco
 interceptor macos contacts status|list|find|create|update|delete|vcard|changes
 interceptor macos photos status|albums|assets|export|thumbnail|favorite|delete|import|changes
 interceptor macos location status|current|geocode|reverse|distance|monitor
-interceptor macos music search|library|play|pause|now-playing|...
+interceptor macos music library|library-search|play|pause|now-playing|...
+interceptor macos music search "<term>" | search-suggest "<term>" | charts | recommendations | song|album|artist|playlist <catalog id>   # Apple Music catalog; Mac only, needs the MusicKit App Service on App ID com.interceptor.bridge (permission_required until then)
 interceptor macos maps search|directions|eta|complete|reverse|mapitem-open
 interceptor macos share services|airdrop|email|message|named|text|url
 ```
