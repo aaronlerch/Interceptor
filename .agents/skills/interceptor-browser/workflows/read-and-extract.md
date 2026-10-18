@@ -99,7 +99,7 @@ Only when no built-in surface exposes what you need. Examples that justify it:
 - Reading ad hoc page state that is not exposed through DOM, network, scene, or
   page-communication capture
 
-On strict-CSP sites, the first `eval --main` may trigger an automatic reload/retry path. Expect that on the first attempt against a CSP-locked page.
+On strict-CSP sites, `eval --main` retries inside the page's policy automatically; stripping the CSP and reloading the tab needs `--allow-csp-strip`, and without it a CSP-locked page returns the CSP error.
 
 ## Output format
 

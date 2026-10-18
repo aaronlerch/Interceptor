@@ -47,7 +47,7 @@ interceptor net log --filter api --limit 20
 ## Use page-world code sparingly
 
 - Use `eval --main` only when the structured command surface is not enough.
-- On strict-CSP sites, the first `eval --main` attempt may trigger an automatic reload/retry path before succeeding.
+- On strict-CSP sites, `eval --main` retries inside the page's policy automatically; the CSP-strip + reload path runs only with `--allow-csp-strip`.
 - Prefer staged injections over one giant payload when cooking or building page overlays.
 
 

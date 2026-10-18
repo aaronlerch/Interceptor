@@ -17,7 +17,7 @@ You open a real site in the user's real Chrome/Brave through the Interceptor ext
 
 No proxy, no extension development, no fork. Mostly `interceptor eval --main` and some CSS.
 
-On strict-CSP sites, the first `eval --main` may trigger Interceptor's CSP-bypass fallback (strip CSP for the current tab, reload once, retry). That's still the same use case; it just means the browser may need one automatic retry before the page becomes paintable.
+On strict-CSP sites, `eval --main` first retries inside the page's policy (userScripts, then ISOLATED). If that is not enough, stripping the tab's CSP and reloading once needs `--allow-csp-strip`; without it you get the CSP error. That's still the same use case; it just means the page may need that opt-in before it becomes paintable.
 
 ### Why this is fun
 
@@ -43,7 +43,7 @@ interceptor eval --main "<javascript>"
   - Read real DOM (`document.querySelectorAll('.leaflet-marker-icon')`) to anchor overlays to real elements
   - Wipe and repaint the whole page (`document.documentElement.innerHTML = ...`) when you want a full takeover
 
-If the site has a strict CSP, the first attempt may fail and Interceptor may need to reload the tab once before retrying. After that, the same page-world pattern works normally.
+If the site has a strict CSP, the first attempt may fail with a CSP error; rerun with `--allow-csp-strip` to let Interceptor strip the header and reload the tab once. After that, the same page-world pattern works normally.
 
 That's it. The rest is CSS taste.
 
@@ -282,7 +282,7 @@ This is the literal sequence I ran for the demo:
 - **Use `position: fixed`** for overlays that should ignore page scroll. Use `position: absolute` with `getBoundingClientRect()` values only when anchoring to a specific DOM element at injection time.
 - **`pointer-events: none`** on every pure-decoration overlay so the site stays clickable underneath.
 - **Z-index ladder.** Pick a single scheme early (e.g. `9996 / 9997 / 9998 / 99999`) and stick to it — it makes adding effects additive instead of combative.
-- **Expect CSP on real sites.** If `eval --main` fails with a `script-src` / `unsafe-eval` error, don't abandon the cook. Interceptor may need to do a one-time reload/retry on that tab first.
+- **Expect CSP on real sites.** If `eval --main` fails with a `script-src` / `unsafe-eval` error, don't abandon the cook. Rerun with `--allow-csp-strip` so Interceptor can strip that tab's CSP and reload it once.
 - **Prefer staged injections over one huge payload.** Big one-shot HUD scripts are more likely to hit message timeouts or become miserable to debug. Frame first, then feed, then locks, then any map-specific blips.
 - **Namespace everything.** Give every overlay style block, node, timer, and animation root a `cook-*` id/class so a second pass can replace the first cleanly.
 - **`interceptor screenshot --save` + `Read` the JPEG** after every injection. Cooking blind produces garbage. Seeing the frame fixes 90% of layout mistakes immediately.
@@ -300,7 +300,7 @@ This is the literal sequence I ran for the demo:
 
 ## Known-Good Targets
 
-- **OpenStreetMap** — a useful proof target because it has a real strict CSP and still supports the cook flow after Interceptor's CSP-bypass retry path.
+- **OpenStreetMap** — a useful proof target because it has a real strict CSP and still supports the cook flow once the tab's CSP is stripped with `--allow-csp-strip`.
 - **Wikipedia** — permissive, fast, good for banner / feed / target-lock experiments.
 - **Leaflet-backed internal tools** — best for anchored reticles and radar-style map overlays because DOM markers are easy to target.
 

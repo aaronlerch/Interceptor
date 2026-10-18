@@ -52,8 +52,8 @@ interceptor eval --main "(async()=>{const r=await fetch(url,{headers:{Range:'byt
 interceptor eval --main "(async()=>{t.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true}));await new Promise(r=>setTimeout(r,400));return document.querySelector('[role=tooltip]')?.innerText})()"
 ```
 
-On strict-CSP sites the first `eval --main` may trigger an automatic reload/retry —
-expect that on the first attempt.
+On strict-CSP sites `eval --main` retries inside the page's policy automatically;
+stripping the CSP and reloading the tab needs `--allow-csp-strip`.
 
 ## Parallel fan-out (cover more sources at once)
 

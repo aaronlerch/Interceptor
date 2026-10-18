@@ -153,7 +153,7 @@ may now appear in any position — the parser keeps them out of the evaluated
 expression. The response includes `sha256`, `bytes`, and `chunks`; the daemon
 discards the file and fails if the written byte count doesn't match the source,
 so a reported success is integrity-checked. Strict-CSP / Trusted-Types pages
-work too — `save` reuses the same CSP-strip + reload bypass as `eval`.
+work too — `save` reuses the same CSP-strip + reload bypass as `eval`, behind the same `--allow-csp-strip` opt-in.
 
 ## Canvas
 
@@ -338,6 +338,7 @@ interceptor eval --main "window.__APP_STATE__"
 interceptor eval "document.title" --frame 4897        # Exactly that frame; a missing frame fails
 interceptor --frame 4897 eval "document.title"        # --frame is global: before or after the command
 interceptor eval --main --no-reload "app.state"       # Refuse the CSP-recovery reload; get the CSP error instead
+interceptor eval --main --allow-csp-strip "app.state" # Opt in to stripping the page's CSP header and reloading the tab
 ```
 
 Use only when no built-in command exposes what you need. Thrown exceptions, rejected promises, and syntax errors are failures (exit 1) in both worlds; top-level `await` works. The default isolated world may need Allow User Scripts enabled for the extension; `--main` is an explicit page-world choice. On a strict-CSP page `--main` may strip the header and reload the tab once; the result says so and a `warning:` line is printed, on success and on failure, for `eval` and for `save`. That reload discards the page's in-memory state (an open conversation, a half-filled form). Pass `--no-reload` on such a page to get the CSP error instead. Task verification never reloads.

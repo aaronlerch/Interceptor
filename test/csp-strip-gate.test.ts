@@ -87,3 +87,34 @@ describe("CLI threads the opt-in flag", () => {
     expect(on.code).toBe("blob")
   })
 })
+
+// The agent skills are written upstream, where the strip is automatic. A merge
+// that brings back "may trigger an automatic reload" teaches agents a behavior
+// this fork refuses. Every skill passage about the CSP strip/reload path must
+// name the opt-in flag.
+describe("agent skill sources describe the CSP strip as opt-in", () => {
+  const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs")
+  const { join } = require("node:path") as typeof import("node:path")
+  const root = join(import.meta.dir, "..", ".agents", "skills")
+  const files: string[] = []
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      if (statSync(p).isDirectory()) walk(p)
+      else if (p.endsWith(".md")) files.push(p)
+    }
+  }
+  walk(root)
+
+  test("no paragraph presents the strip or its reload as automatic", () => {
+    const offenders: string[] = []
+    for (const f of files) {
+      for (const para of readFileSync(f, "utf8").split(/\n\s*\n/)) {
+        const flat = para.replace(/\s+/g, " ")
+        const aboutStrip = /CSP[- ]?(strip|bypass)|strip(ping)? (the )?(blocking header|CSP|page's CSP)|reload\/retry/i.test(flat)
+        if (aboutStrip && !flat.includes("--allow-csp-strip")) offenders.push(`${f.slice(root.length + 1)}: ${flat.slice(0, 120)}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+})
